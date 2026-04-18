@@ -2,17 +2,23 @@
 
 ## 1. Objectives
 - Deliver a premium **dark-only**, OS-like internal platform for real estate teams: **Quantro One | Realty OS**.
-- Prove and ship the core connected workflow with AI automation:
-  **Smart Inbox item → GPT-4o intent detection → suggested action → (simulated) Calendar/CRM updates → Activity feed**.
+- Ship a connected, production-feeling workflow with AI automation **and** a critical control layer:
+  **Smart Inbox item → GPT-4o triage (single + batch) → suggested action → manual override (edit/approve/skip) → (simulated) Calendar/CRM updates → Activity feed**.
 - Provide a multi-page, production-quality UI (Dashboard, Inbox, Schedule, CRM, Onboarding, Content Engine) with **connected seeded mock data** showing realistic operations.
 - Ensure backend (FastAPI + MongoDB) provides clean entity modeling + append-only **activity event log** for traceability.
+- Transform the app from an automated demo into a **controllable workflow engine** via:
+  - **Batch AI triage at scale**
+  - **Manual Override UI (Review & Control)** as the trust + governance layer
 
 **Current status (as of this update):**
-- **Phase 1 and Phase 2 complete**.
+- **Phase 1, Phase 2, and Phase 3 complete**.
 - AI POC achieved **10/10** structured output tests.
 - Full app functional with seeded workflows.
-- End-to-end test pass rate **~96%** (minor cosmetic items only).
-- Fixed minor backend cosmetic issue: **Calendar POST now returns 201**.
+- End-to-end test pass rate **~96%** (Phase 2).
+- Phase 3 testing:
+  - **Backend: 100% pass** (batch triage + override endpoints validated)
+  - **Frontend: ~90% pass** (checkbox “bug” was a false-positive due to Radix rendering as `button[role=checkbox]`, not native `input[type=checkbox]`)
+- Database reset performed to restore fresh seed data for demo/workflows.
 
 ---
 
@@ -94,37 +100,82 @@
 
 ---
 
-### Phase 3 — Feature expansion + hardening (optional; next if requested)
-**Status: ⏭️ Ready to start (not implemented yet)**
+### Phase 3 — Workflow Engine Upgrade (Batch Triage + Manual Control Layer)
+**Status: ✅ Completed**
 
-**User stories (planned)**
-1. Batch “Auto-triage” for multiple inbox items.
-2. Manual override UI to edit AI-extracted entities (time/contact/property) pre-approval.
-3. Advanced CRM: filters, last-touch timestamps, lifecycle automation.
-4. Onboarding playbooks: system-completed vs human-required; templating.
-5. Content Engine enhancements: templates, tone sliders, variants, versioning.
+**Primary goal (achieved)**
+- Upgrade Smart Inbox from a single-item demo into a **scalable, controllable workflow engine**:
+  - **Batch message processing** with real-time system activity signals
+  - **Manual Override UI** enabling trust, governance, and precise execution
 
-**Implementation steps (planned)**
-- Inbox:
-  - Batch classify endpoint + UI
-  - Editable extraction fields + re-run AI
-  - Rule-based matching to existing contacts
-- Automation:
-  - Configurable “approval required” vs “auto-run” policies
-  - Better action auditing + rollback semantics
-- Activity feed:
-  - Grouping, icons, severity, and “System Health” panel
-  - Pagination and filtering
-- Content Engine:
-  - Templates + channels + tone controls
-  - Draft version history
-- Backend hardening:
-  - Pagination, consistent error envelopes
-  - Stronger schema validation
-  - Performance tuning indexes for common queries
+#### 3.1 Batch AI Triage (Inbox Intelligence at Scale)
+**Status: ✅ Implemented**
 
-**Close Phase 3 with testing (planned)**
-- Regression suite: batch triage, overrides, CRM linkage, onboarding playbooks, content templating.
+**User stories (delivered)**
+1. Select multiple inbox items (or process all new) and classify in bulk.
+2. AI classifies each message into booking/onboarding/follow-up/inquiry/escalation/spam/needs_review.
+3. Extract key data (name/contact/date-time/property/context) and store with the item.
+4. Display structured processing statuses:
+   **New → Processing → Classified → Completed/Skipped**.
+5. Bulk actions: process batch, approve batch, or review individually.
+
+**Backend (delivered)**
+- `POST /api/inbox/batch-analyze`
+  - Marks items as `processing`, runs GPT-4o triage sequentially, updates `ai_intent`, `ai_suggested_action`, sets `status=processed`.
+- `POST /api/inbox/batch-approve`
+  - Executes actions for multiple classified items and marks them `actioned`.
+- Activity logging emitted for classification + batch completion.
+
+**Frontend (delivered)**
+- **Triage view** with:
+  - Multi-select using Radix checkbox (`button[role=checkbox]`)
+  - Select-all
+  - Batch buttons: **Process All New** and **Approve All**
+  - Individual **Classify** button per item
+  - Status badges + live “processing” indicator
+
+#### 3.2 Manual Override UI (Critical Control Layer — “Review & Control”)
+**Status: ✅ Implemented**
+
+**User stories (delivered)**
+1. Dedicated interface to review and control automation decisions.
+2. Layout matches spec:
+   - **Left**: request list
+   - **Right**: three-section review panel:
+     1) Original Request
+     2) System Analysis
+     3) Action Controls
+3. System Analysis includes:
+   - Classification (human-friendly language)
+   - Confidence level: **High / Medium / Low**
+   - Proposed action
+   - Summary
+   - Extracted entities
+4. Actions supported:
+   - Primary: **Approve & Execute** (context-aware label)
+   - Secondary: **Adjust Details** (edit before execution)
+   - Tertiary: **Skip**
+5. On adjust:
+   - Opens edit dialog to change contact info, meeting details, and action type/description.
+6. On approve:
+   - Triggers downstream workflow (Calendar/CRM/Onboarding simulation) and logs activity.
+
+**Backend (delivered)**
+- `PUT /api/inbox/{inbox_id}/details`
+  - Saves manual edits to extracted entities and/or suggested action.
+- `POST /api/inbox/{inbox_id}/approve-with-overrides`
+  - Executes approval with optional override fields (meeting/contact details).
+
+**Copy + Trust (delivered)**
+- Removed technical AI wording in UI.
+  - Example: “This request is ready to be scheduled” vs “AI detected intent”.
+
+**Close Phase 3 with testing**
+- Testing agent results:
+  - **Backend: 100% pass**
+  - **Frontend: ~90% pass**
+    - Reported checkbox “bug” was a false-positive due to Radix checkbox structure; functionality verified.
+- Post-test database reset performed to restore original demo flow.
 
 ---
 
@@ -148,21 +199,30 @@
 ## 3. Next Actions
 - ✅ Phase 1 complete (AI POC + structured outputs).
 - ✅ Phase 2 complete (full app + seeded workflows + testing).
-- If you want to proceed:
-  1. Decide whether to start **Phase 3** (feature expansion + hardening)
-  2. Or implement **Phase 4** (auth + multi-tenant)
-  3. Or package as a V1 deliverable (docs, demo script, optional deployment tweaks)
+- ✅ Phase 3 complete (batch triage + manual override workflow engine upgrade).
+
+If you want to proceed next:
+1. Start **Phase 4** (auth + roles + multi-tenant readiness)
+2. Add workflow automation policies:
+   - per-intent “auto-run” vs “approval required”
+   - escalation routing rules
+3. Production hardening (optional): pagination, audit exports, indexing, more advanced connectors.
 
 ---
 
 ## 4. Success Criteria
-**Already achieved for V1:**
-- Core workflow reliable: **Inbox → AI intent → approve → calendar/CRM updates → activity feed**.
-- Premium OS-like UI: dark-only, calm, minimal, system-driven.
+
+**Achieved (V1 + Phase 3):**
+- Core workflow reliable:
+  - **Inbox → AI intent (single + batch) → manual control (adjust/approve/skip) → calendar/CRM updates → activity feed**.
+- Premium OS-like UI:
+  - Dark-only, calm, minimal, system-driven.
 - Connected seeded data demonstrates end-to-end workflows.
 - AI failures degrade safely to `needs_review`.
-- End-to-end test coverage completed with high pass rate; only cosmetic issues remained.
+- Batch triage delivers real-time processing feel via status transitions + UI indicators.
+- Manual Override UI provides a trustworthy control layer for automation governance.
 
-**Next success criteria (Phase 3/4):**
-- Batch + override controls, deeper CRM linkage, and configurable automations.
-- Auth + workspace scoping if multi-tenant is required.
+**Next success criteria (Phase 4+):**
+- Authentication + role-based access.
+- Workspace scoping for multi-tenant operation.
+- Configurable automation policies and exportable audit logs.
