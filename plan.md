@@ -14,7 +14,8 @@
   - **Content Templates** as the consistent, on-brand communication layer
 
 **Current status (as of this update):**
-- ✅ **Phase 1, Phase 2, Phase 3, and Phase 4 complete**.
+- ✅ **Phase 1, Phase 2, Phase 3, Phase 4 complete**.
+- ✅ **Phase 5 complete** (Auto-execution pipeline + Advanced escalations + UI updates + verification).
 - ✅ AI POC achieved **10/10** structured output tests.
 - ✅ Full app functional with seeded workflows.
 - ✅ Phase 2 E2E test pass rate **~96%**.
@@ -23,16 +24,12 @@
   - **Frontend: ~90% pass** (checkbox “bug” was a false-positive due to Radix rendering as `button[role=checkbox]`, not native `input[type=checkbox]`)
 - ✅ Phase 4 testing:
   - **Backend: 100% pass**
-  - **Frontend: ~95% pass** (only low-priority modal overlay click interception in automation dialogs during automation testing)
-- ✅ Database reset performed to restore fresh seed data for demo/workflows.
-- 🟡 **Phase 5 (Automation Engine Upgrade) in progress**:
-  - ✅ Backend helper functions implemented in `/app/backend/server.py`:
-    - `execute_action_for_item()` (auto-execution runner)
-    - `evaluate_advanced_escalation()` (advanced escalation condition evaluator)
-  - ⏳ Next step: **wire these helpers into**:
-    - `POST /api/inbox/{inbox_id}/analyze`
-    - `POST /api/inbox/batch-analyze`
-    - (and ensure manual override/updates don’t regress: `POST /api/inbox/update` / approve-with-overrides where applicable)
+  - **Frontend: ~95% pass** (low-priority modal overlay click interception during automated tests)
+- ✅ Phase 5 testing (Iteration 4):
+  - **Backend: 100% pass**
+  - **Frontend: ~95% pass**
+  - Low-priority: modal overlay click interception in some dialogs during automation (test harness limitation; UI is functional).
+- ✅ Database reset previously performed to restore fresh seed data for demo/workflows.
 
 ---
 
@@ -67,8 +64,8 @@
 
 **User stories (delivered)**
 1. Dashboard shows key metrics, today’s schedule, and live system activity.
-2. Smart Inbox provides message review + AI intent + recommended action.
-3. Approving AI suggestions triggers simulated automation (calendar/contact updates) and logs activity.
+2. Smart Inbox provides message review + intent + recommended action.
+3. Approving system suggestions triggers simulated automation (calendar/contact updates) and logs activity.
 4. CRM contact profiles show linked inbox threads, meetings, and sync status.
 5. Agent onboarding creates lifecycle steps and tracks progress.
 6. Content Engine generates and stores social posts + email drafts.
@@ -96,8 +93,8 @@
   - Polling for activity feed and dashboard updates
   - Subtle motion via **framer-motion**
 - Pages delivered:
-  - **Dashboard**: KPIs, Today schedule, AI suggestions queue, Live Activity feed
-  - **Smart Inbox**: filtering, message detail, AI analysis, approve/decline
+  - **Dashboard**: KPIs, Today schedule, suggestions queue, Live Activity feed
+  - **Smart Inbox**: filtering, message detail, analysis, approve/decline
   - **Schedule**: grouped agenda + create event dialog
   - **CRM**: lifecycle filters, contacts table, profile panel with timeline
   - **Onboarding**: add agent, progress tracking, expandable checklist with task toggles
@@ -122,7 +119,7 @@
 
 **User stories (delivered)**
 1. Select multiple inbox items (or process all new) and classify in bulk.
-2. AI classifies each message into booking/onboarding/follow-up/inquiry/escalation/spam/needs_review.
+2. Classify each message into booking/onboarding/follow-up/inquiry/escalation/spam/needs_review.
 3. Extract key data (name/contact/date-time/property/context) and store with the item.
 4. Display structured processing statuses:
    **New → Processing → Classified → Completed/Skipped**.
@@ -182,7 +179,6 @@
 - Testing agent results:
   - **Backend: 100% pass**
   - **Frontend: ~90% pass** (checkbox false positive)
-- Post-test database reset performed to restore original demo flow.
 
 ---
 
@@ -208,40 +204,36 @@
 - Policies integrated into:
   - `POST /api/inbox/{id}/analyze`
   - `POST /api/inbox/batch-analyze`
-- Inbox UI now displays:
-  - Policy outcome badge (Auto-execute / Needs approval / Manual review / Escalated)
+- Inbox UI displays policy outcome badges.
 
 **Backend (delivered)**
-- New collection: `automation_policies`
+- Collection: `automation_policies`
 - Endpoints:
   - `GET /api/policies`
   - `PUT /api/policies/{policy_id}`
   - `GET /api/policies/evaluate/{inbox_id}`
 
 **Frontend (delivered)**
-- New page: **Automation** (`/automation`)
+- **Automation** page (`/automation`):
   - Intent policy list with enable/disable toggle
   - Confidence-based action dropdowns for high/medium/low
 
 #### 4.2 Escalation Routing Rules
-**Status: ✅ Implemented (basic); 🟡 advanced conditions in progress (Phase 5)**
+**Status: ✅ Implemented (basic in Phase 4; advanced in Phase 5)**
 
 **Delivered capabilities (Phase 4)**
-- **5 predefined rules**:
+- Predefined rules (seeded examples):
   - Urgent recruiting lead → **Larry**
   - Incomplete onboarding data → **Ops/Admin**
   - Calendar conflict → **Manual Review**
   - Escalation intent → **Sophia Turner**
   - Investor keywords → **Sophia Turner**
-- Condition types (Phase 4 UI):
-  - `intent` match
-  - `keyword` match
-- Priority levels:
-  - `normal`, `high`, `critical`
+- Condition types (Phase 4 UI): `intent`, `keyword`
+- Priority levels: `normal`, `high`, `critical`
 - Full CRUD + enable/disable.
 
 **Backend (delivered)**
-- New collection: `escalation_rules`
+- Collection: `escalation_rules`
 - Endpoints:
   - `GET /api/escalation-rules`
   - `POST /api/escalation-rules`
@@ -251,24 +243,22 @@
 **Frontend (delivered)**
 - Escalation Rules tab inside Automation page:
   - List, create, edit, delete
-  - Enable/disable toggle
 
 #### 4.3 Content Templates (AI-Powered Communication Layer)
 **Status: ✅ Implemented**
 
 **Delivered capabilities**
-- **5 predefined templates**:
+- Predefined templates (seeded examples) + CRUD:
   - Welcome Email
   - Follow-up Message
   - Recruiting Message
   - New Listing Social Post
   - Market Update Post
 - Variable system: `{{contact_name}}`, `{{situation}}`, etc.
-- “Generate with AI” produces AI-enhanced version via GPT-4o.
-- Generated output is saved to content library and labeled **From Template**.
+- “Generate with AI” produces AI-enhanced version via GPT-4o and saves to content library.
 
 **Backend (delivered)**
-- New collection: `content_templates`
+- Collection: `content_templates`
 - Endpoints:
   - `GET /api/templates` (optional category filter)
   - `GET /api/templates/{template_id}`
@@ -277,144 +267,112 @@
   - `DELETE /api/templates/{template_id}`
   - `POST /api/templates/{template_id}/generate`
 
-**Frontend (delivered)**
-- Content Engine upgraded:
-  - **Templates** tab
-  - Template library view
-  - Preview panel (subject/body/variables/tags)
-  - Create template dialog
-  - Generate dialog with variable inputs + live preview + “Generate with AI”
-
 **Close Phase 4 with testing**
 - Testing agent results:
   - **Backend: 100% pass**
-  - **Frontend: ~95% pass** (low-priority modal overlay click interception during automated tests)
+  - **Frontend: ~95% pass** (low-priority modal overlay click interception in some dialogs)
 
 ---
 
 ### Phase 5 — Automation Engine Upgrade (Auto-Execution + Advanced Escalations)
-**Status: 🟡 In Progress**
+**Status: ✅ Completed**
 
-**Primary goal (Phase 5)**
+**Primary goal (achieved)**
 - Make the system feel “always running” by allowing high-confidence intents to **auto-run** end-to-end (simulated Calendar/CRM/Onboarding actions), while ensuring edge cases are routed via **advanced escalation evaluation**.
 
 #### 5.1 Backend: Auto-run execution pipeline
-**Status: ✅ Helpers implemented; ⏳ wiring pending**
+**Status: ✅ Implemented + wired**
 
-**What already exists (implemented in `/app/backend/server.py`)**
-- `execute_action_for_item(item, source=...)`
-  - Executes the item’s `ai_suggested_action` (mocked integrations)
-  - Marks inbox item:
+**Implemented**
+- `execute_action_for_item(item, source=...)`:
+  - Executes mocked actions based on `ai_suggested_action` (Calendar/CRM/Onboarding/Follow-up/Ignore)
+  - Writes execution metadata to inbox item:
     - `status=auto_actioned`
     - `auto_executed=true`, `auto_executed_at`, `execution_source`, `execution_results`
-  - Emits activity events for downstream actions
+  - Emits activity events for downstream actions.
 
-**To implement next (wiring)**
-- In `POST /api/inbox/{inbox_id}/analyze`:
-  - After AI result + policy evaluation, if `policy_action == "auto_run"`:
-    - Optionally run `evaluate_advanced_escalation(...)` first to catch conflicts/missing-data/urgency
-    - If no escalation triggered: call `execute_action_for_item(item, source="single_analyze")`
-    - Persist execution metadata and return updated item
-- In `POST /api/inbox/batch-analyze`:
-  - After policy evaluation per item, if `policy_action == "auto_run"`:
-    - Evaluate advanced escalation; if not triggered, auto-execute via `execute_action_for_item(item, source="batch_analyze")`
-    - Ensure results array includes `auto_executed` + `execution_results` for UI
-- Ensure manual paths do not regress:
-  - Manual override endpoints and approve flows should respect:
-    - Already auto-actioned items are not double-executed
-    - Items escalated by advanced conditions remain reviewable
-
-**Exit criteria**
-- `auto_run` policies result in immediate simulated execution for both single and batch triage.
-- Inbox items show correct terminal status (`auto_actioned`) and activity feed reflects actions.
+**Wired into endpoints**
+- `POST /api/inbox/{inbox_id}/analyze`
+  - After policy evaluation, auto-executes when `policy_action == auto_run` and no escalation is triggered.
+- `POST /api/inbox/batch-analyze`
+  - Applies the same auto-run execution logic per item.
+  - Returns `auto_executed` and optional `execution_results` in the batch response.
 
 #### 5.2 Backend: Advanced escalation evaluation
-**Status: ✅ Helper implemented; ⏳ wiring pending**
+**Status: ✅ Implemented + wired**
 
-**What already exists**
+**Implemented**
 - `evaluate_advanced_escalation(item, intent, confidence, policy_action)` supports:
   - `calendar_conflict`
-  - `incomplete_entities` (required entity list)
-  - `urgency` (keyword-based)
-  - `contact_type` / `lifecycle_stage`
-  - plus existing `intent` and `keyword`
+  - `incomplete_entities` (comma-separated required entities)
+  - `urgency` (keyword-based; e.g., any/high)
+  - `contact_type` (contact type or lifecycle stage)
+  - plus existing: `intent`, `keyword`
 
-**To implement next (wiring + persistence)**
-- Replace/augment the existing basic escalation matching in analyze + batch-analyze:
-  - Always compute `escalation_info` via `evaluate_advanced_escalation(...)` when:
-    - `policy_action == "escalate"`, OR
-    - `policy_action == "auto_run"` (pre-flight safety check), OR
-    - `intent == "escalation"`
-- Persist `escalation.reasons` (for UI transparency) when available.
+**Behavior**
+- Advanced escalation is evaluated during analyze + batch-analyze.
+- If an escalation triggers, it overrides policy to `policy_action=escalate` and prevents auto-run execution.
+- Escalation payload may include `reasons[]` for UI transparency.
 
-**Exit criteria**
-- Calendar conflicts, missing required entities, urgency keywords, and contact-type rules trigger escalation reliably.
+#### 5.3 Frontend: Smart Inbox auto-execution status & execution trail
+**Status: ✅ Implemented**
 
-#### 5.3 Frontend: Smart Inbox auto-execution status & audit trail
-**Status: ⏳ Not started (blocked by 5.1/5.2)**
-
-**To implement**
-- Update `/app/frontend/src/pages/SmartInbox.js` (and relevant components) to display:
-  - Distinct **Auto-executed** badge for `status=auto_actioned` or `auto_executed=true`
-  - Execution metadata:
-    - `auto_executed_at`
-    - `execution_source`
-    - `execution_results` list (event/contact/agent created)
-  - Clear separation between:
-    - Auto-run outcomes
-    - Requires approval
-    - Manual review
-    - Escalated
-
-**Exit criteria**
-- User can immediately understand which items were auto-run and what actions occurred.
+**Delivered**
+- Smart Inbox shows:
+  - `auto_actioned` status label (“Auto-executed”)
+  - Inline list indicator when `auto_executed=true`
+  - Detail view execution trail:
+    - `auto_executed_at`, `execution_source`
+    - `execution_results` entries (event/contact/agent created, follow-up queued, ignored)
+  - Escalation reasons rendered when present.
 
 #### 5.4 Frontend: Advanced escalation condition types in rule editor
-**Status: ⏳ Not started (blocked by 5.2)**
+**Status: ✅ Implemented**
 
-**To implement**
-- Update `/app/frontend/src/pages/AutomationPolicies.js` escalation rules UI to support creating/editing:
+**Delivered**
+- Escalation rule editor in `/automation` supports condition types:
   - `calendar_conflict`
-  - `incomplete_entities` (comma-separated required fields)
-  - `urgency` (any/high)
-  - `contact_type` / lifecycle stage
-- Ensure rule editor stays minimal and premium (shadcn components; concise helper text).
-
-**Exit criteria**
-- Users can configure advanced escalation conditions end-to-end (CRUD) and see them applied in Smart Inbox.
+  - `incomplete_entities`
+  - `urgency`
+  - `contact_type`
+  - plus existing: `intent`, `keyword`, `confidence`
+- Updated placeholders and helper text per condition type.
 
 #### 5.5 Testing & verification (Phase 5)
-**Status: ⏳ Pending**
+**Status: ✅ Completed**
 
-**Backend tests (manual + scripted smoke)**
-- Single analyze path:
-  - Verify `auto_run` triggers execution + activity logs
-  - Verify escalation blocks auto-run when advanced conditions match
-- Batch analyze path:
-  - Verify mixed outcomes within same batch (auto-run vs approval vs escalated)
-
-**Frontend tests**
-- Smart Inbox:
-  - Auto-executed items show badge + execution trail
-  - Escalation shows routing + reasons
-- Automation:
-  - Rule editor supports advanced condition types
+**Testing agent results (Iteration 4)**
+- Backend: **100%**
+- Frontend: **~95%**
+- Only low-priority automated-test limitation noted (modal overlay click interception).
 
 ---
 
 ## 3. Next Actions
-1. **Phase 5.1 + 5.2 (P0):** Wire `execute_action_for_item()` and `evaluate_advanced_escalation()` into analyze + batch-analyze.
-2. **Phase 5.3 (P1):** Update Smart Inbox UI to show auto-executed status + execution trail.
-3. **Phase 5.4 (P1):** Update Automation page escalation rule editor for advanced condition types.
-4. **Phase 5.5:** Run backend + frontend testing and update test report.
+With Phase 5 complete, next recommended workstreams:
+
+1. **Phase 6 (P1): Authentication + role-based access**
+   - Invite users + assign roles (admin/operator/agent)
+   - Session handling, route protection, UI gating
+2. **Phase 6 (P1): Workspace scoping (multi-tenant readiness)**
+   - Workspace ID on all collections
+   - Per-workspace policies, escalation rules, templates
+3. **Phase 6 (P2): Exportable audit logs + compliance-ready activity trail**
+   - Filters + export (CSV/JSON)
+   - Immutable event schema enhancements
+
+Optional expansions (P2):
+- Configurable escalation pipeline builder
+- Pagination/indexing for large inboxes
+- More realistic mocked connector states (sync delays, failures)
 
 ---
 
 ## 4. Success Criteria
 
-**Achieved (V1 + Phase 3 + Phase 4):**
+**Achieved (V1 + Phase 3 + Phase 4 + Phase 5):**
 - Core workflow reliable:
-  - **Inbox → AI intent (single + batch) → policy evaluation → manual control (adjust/approve/skip) → calendar/CRM updates → activity feed**.
+  - **Inbox → intent (single + batch) → policy evaluation → auto-run or manual control → calendar/CRM/onboarding updates → activity feed**.
 - Premium OS-like UI:
   - Dark-only, calm, minimal, system-driven.
 - Connected seeded data demonstrates end-to-end workflows.
@@ -423,9 +381,10 @@
 - Manual Override UI provides a trustworthy control layer for automation governance.
 - Automation policies and escalation routing operationalize “when to run” and “who owns edge cases”.
 - Template-based communication enables fast, consistent, on-brand content production.
-
-**Next success criteria (Phase 5):**
-- `auto_run` items can execute end-to-end without manual approval (simulated integrations) and log a transparent execution trail.
+- Auto-run can execute end-to-end without manual approval (simulated integrations) with transparent execution trail.
 - Advanced escalation conditions reliably prevent unsafe auto-run actions and route to the right owner with explicit reasons.
-- Smart Inbox clearly differentiates auto-run vs approval vs escalated items.
-- Automation UI supports configuring advanced escalation condition types.
+
+**Next success criteria (Phase 6):**
+- Auth + role-based access control implemented.
+- Workspace-scoped data for multi-tenant operation.
+- Exportable audit logs for compliance-ready review.

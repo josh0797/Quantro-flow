@@ -21,14 +21,14 @@
   },
   {
     "content": "Run comprehensive testing via testing_agent (backend + frontend)",
-    "status": "in_progress"
+    "status": "completed"
   },
   {
     "content": "Fix any issues found during testing",
-    "status": "pending"
+    "status": "completed"
   },
   {
     "content": "Update plan.md to mark Phase 5 as COMPLETED",
-    "status": "pending"
+    "status": "completed"
   }
 ]
