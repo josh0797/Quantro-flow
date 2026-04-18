@@ -17,6 +17,10 @@ export const getInboxItem = (id) => api.get(`/inbox/${id}`).then(r => r.data);
 export const analyzeInboxItem = (id) => api.post(`/inbox/${id}/analyze`).then(r => r.data);
 export const approveInboxAction = (id) => api.post(`/inbox/${id}/approve`).then(r => r.data);
 export const declineInboxAction = (id) => api.post(`/inbox/${id}/decline`).then(r => r.data);
+export const batchAnalyzeInbox = (inbox_ids) => api.post('/inbox/batch-analyze', { inbox_ids }).then(r => r.data);
+export const batchApproveInbox = (inbox_ids) => api.post('/inbox/batch-approve', { inbox_ids }).then(r => r.data);
+export const updateInboxDetails = (id, data) => api.put(`/inbox/${id}/details`, data).then(r => r.data);
+export const approveWithOverrides = (id, data) => api.post(`/inbox/${id}/approve-with-overrides`, data).then(r => r.data);
 
 // Calendar
 export const getCalendarEvents = () => api.get('/calendar').then(r => r.data);

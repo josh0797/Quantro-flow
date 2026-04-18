@@ -1,38 +1,22 @@
 [
   {
-    "content": "Phase 1: Get OpenAI GPT-4o integration playbook + Emergent LLM key",
+    "content": "Phase 3: Backend - Batch AI triage endpoint + processing status + manual override/edit endpoints",
     "status": "completed"
   },
   {
-    "content": "Phase 1: Create core AI module (schemas + prompts for intent detection & content generation)",
+    "content": "Phase 3: Frontend - Batch Triage UI with selection, processing indicators, bulk actions",
     "status": "completed"
   },
   {
-    "content": "Phase 1: Write & run POC test script - validate AI outputs",
+    "content": "Phase 3: Frontend - Manual Override UI (the critical control layer) with edit/approve/reject",
     "status": "completed"
   },
   {
-    "content": "Phase 1: Fix until all POC tests pass",
+    "content": "Phase 3: Human-friendly copy, confidence levels (High/Medium/Low), polished UX",
     "status": "completed"
   },
   {
-    "content": "Phase 2: Design agent - get UI/UX guidelines",
-    "status": "completed"
-  },
-  {
-    "content": "Phase 2: Backend - data models, seed data, API endpoints",
-    "status": "completed"
-  },
-  {
-    "content": "Phase 2: Frontend - all pages (Dashboard, Inbox, Schedule, CRM, Onboarding, Content)",
-    "status": "completed"
-  },
-  {
-    "content": "Phase 2: All user stories covered in Development and testing",
-    "status": "completed"
-  },
-  {
-    "content": "Phase 2: End to End Testing using Testing Agent",
-    "status": "completed"
+    "content": "Phase 3: End to End Testing using Testing Agent",
+    "status": "in_progress"
   }
 ]

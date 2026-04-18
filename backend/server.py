@@ -234,6 +234,28 @@ class CreateContactRequest(BaseModel):
     source: str = "manual"
     notes: str = ""
 
+class BatchAnalyzeRequest(BaseModel):
+    inbox_ids: List[str]
+
+class UpdateInboxDetailsRequest(BaseModel):
+    """Manual override for AI-extracted entities and suggested action"""
+    entities: Optional[dict] = None
+    suggested_action_type: Optional[str] = None
+    suggested_action_description: Optional[str] = None
+    summary: Optional[str] = None
+
+class ApproveWithOverridesRequest(BaseModel):
+    """Approve with optional manual overrides"""
+    title: Optional[str] = None
+    description: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    location: Optional[str] = None
+    attendees: Optional[List[str]] = None
+    contact_name: Optional[str] = None
+    contact_email: Optional[str] = None
+    contact_phone: Optional[str] = None
+
 # ─── Lifespan ──────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -467,6 +489,273 @@ async def decline_inbox_action(inbox_id: str):
     await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"status": "declined"}})
     await log_activity("inbox", "Action declined", f"AI suggestion for {item['from_name']} was declined", inbox_id, "inbox")
     return {"success": True}
+
+# ─── Batch AI Triage ───────────────────────────────────────────────────
+@app.post("/api/inbox/batch-analyze")
+async def batch_analyze_inbox(req: BatchAnalyzeRequest):
+    """Process multiple inbox items with AI classification in sequence."""
+    results = []
+    
+    for inbox_id in req.inbox_ids:
+        item = await inbox_col.find_one({"inbox_id": inbox_id})
+        if not item:
+            results.append({"inbox_id": inbox_id, "status": "error", "error": "Not found"})
+            continue
+        
+        # Mark as processing
+        await inbox_col.update_one(
+            {"inbox_id": inbox_id},
+            {"$set": {"status": "processing"}}
+        )
+        
+        try:
+            chat = LlmChat(
+                api_key=EMERGENT_LLM_KEY,
+                session_id=f"batch-{inbox_id}-{uuid.uuid4().hex[:6]}",
+                system_message=INTENT_SYSTEM_PROMPT,
+            ).with_model("openai", "gpt-4o")
+            
+            message_text = f"From: {item['from_name']} ({item['from_email']})\nSubject: {item['subject']}\n\n{item['body']}"
+            response = await chat.send_message(UserMessage(text=message_text))
+            ai_result = await parse_ai_json(response)
+            
+            if not ai_result:
+                ai_result = {"intent": "needs_review", "confidence": 0.0, "summary": "Could not analyze this message", "entities": {}, "suggested_action": {"type": "flag_review", "description": "Manual review required"}}
+            
+            await inbox_col.update_one(
+                {"inbox_id": inbox_id},
+                {"$set": {
+                    "ai_intent": {"intent": ai_result["intent"], "confidence": ai_result["confidence"], "summary": ai_result["summary"], "entities": ai_result.get("entities", {})},
+                    "ai_suggested_action": ai_result.get("suggested_action"),
+                    "status": "processed",
+                    "read": True,
+                }}
+            )
+            
+            await log_activity("ai", "Batch triage classified", f"{item['from_name']}: {ai_result['intent']} ({ai_result['confidence']:.0%})", inbox_id, "inbox")
+            
+            updated = await inbox_col.find_one({"inbox_id": inbox_id})
+            results.append({"inbox_id": inbox_id, "status": "classified", "data": serialize_doc(updated)})
+            
+        except Exception as e:
+            await inbox_col.update_one(
+                {"inbox_id": inbox_id},
+                {"$set": {"status": "new"}}
+            )
+            results.append({"inbox_id": inbox_id, "status": "error", "error": str(e)})
+    
+    await log_activity("ai", "Batch triage complete", f"Processed {len(req.inbox_ids)} message(s), {sum(1 for r in results if r['status'] == 'classified')} classified", None, "inbox")
+    
+    return {"success": True, "results": results, "total": len(req.inbox_ids), "classified": sum(1 for r in results if r["status"] == "classified")}
+
+@app.post("/api/inbox/batch-approve")
+async def batch_approve_inbox(req: BatchAnalyzeRequest):
+    """Approve all AI-suggested actions for multiple inbox items."""
+    results = []
+    
+    for inbox_id in req.inbox_ids:
+        item = await inbox_col.find_one({"inbox_id": inbox_id})
+        if not item or not item.get("ai_suggested_action"):
+            results.append({"inbox_id": inbox_id, "status": "skipped", "reason": "No action available"})
+            continue
+        
+        if item.get("status") in ["actioned", "declined"]:
+            results.append({"inbox_id": inbox_id, "status": "skipped", "reason": f"Already {item['status']}"})
+            continue
+        
+        try:
+            # Reuse the existing approve logic
+            action = item["ai_suggested_action"]
+            action_type = action["type"]
+            
+            if action_type == "schedule_meeting":
+                entities = item.get("ai_intent", {}).get("entities", {})
+                event = {
+                    "event_id": str(uuid.uuid4()),
+                    "title": f"Meeting - {item['from_name']}",
+                    "description": action["description"],
+                    "start_time": (datetime.utcnow() + timedelta(days=1, hours=2)).isoformat(),
+                    "end_time": (datetime.utcnow() + timedelta(days=1, hours=3)).isoformat(),
+                    "location": entities.get("property", "TBD"),
+                    "attendees": [item["from_name"]],
+                    "status": "pending",
+                    "source": "ai_batch",
+                    "created_at": now_iso(),
+                    "contact_id": item.get("contact_id"),
+                }
+                await calendar_col.insert_one(event)
+                await log_activity("calendar", "Meeting scheduled (batch)", f"Meeting with {item['from_name']}", event["event_id"], "calendar")
+            
+            elif action_type == "create_contact":
+                entities = item.get("ai_intent", {}).get("entities", {})
+                contact = {
+                    "contact_id": str(uuid.uuid4()),
+                    "name": entities.get("person_name", item["from_name"]),
+                    "email": entities.get("email", item["from_email"]),
+                    "phone": entities.get("phone", ""),
+                    "type": "lead",
+                    "lifecycle_stage": "new",
+                    "source": "inbox_batch",
+                    "ghl_sync_status": "pending",
+                    "ghl_last_sync": None,
+                    "created_at": now_iso(),
+                    "updated_at": now_iso(),
+                    "notes": item.get("ai_intent", {}).get("summary", ""),
+                }
+                await contacts_col.insert_one(contact)
+                await log_activity("crm", "Contact created (batch)", f"New contact {contact['name']}", contact["contact_id"], "contact")
+            
+            elif action_type == "send_follow_up":
+                await log_activity("inbox", "Follow-up queued (batch)", f"For {item['from_name']}", inbox_id, "inbox")
+            
+            elif action_type == "start_onboarding":
+                entities = item.get("ai_intent", {}).get("entities", {})
+                agent = {
+                    "agent_id": str(uuid.uuid4()),
+                    "name": entities.get("person_name", item["from_name"]),
+                    "email": entities.get("email", item["from_email"]),
+                    "phone": entities.get("phone", ""),
+                    "role": "agent",
+                    "status": "onboarding",
+                    "start_date": datetime.utcnow().isoformat(),
+                    "photo_url": None,
+                    "created_at": now_iso(),
+                }
+                await agents_col.insert_one(agent)
+                for idx, title in enumerate(["Complete compliance training", "Set up CRM profile", "Configure email signature", "Schedule orientation with team lead", "Access granted to listing portal"]):
+                    await onboarding_col.insert_one({"task_id": str(uuid.uuid4()), "agent_id": agent["agent_id"], "title": title, "description": f"Auto-generated step {idx+1}", "status": "pending", "order": idx + 1, "completed_at": None, "auto_generated": True})
+                await log_activity("onboarding", "Onboarding started (batch)", f"Agent {agent['name']} onboarding initiated", agent["agent_id"], "agent")
+            
+            else:
+                await log_activity("inbox", "Action approved (batch)", f"For {item['from_name']}", inbox_id, "inbox")
+            
+            await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"status": "actioned"}})
+            results.append({"inbox_id": inbox_id, "status": "actioned", "action_type": action_type})
+            
+        except Exception as e:
+            results.append({"inbox_id": inbox_id, "status": "error", "error": str(e)})
+    
+    actioned_count = sum(1 for r in results if r["status"] == "actioned")
+    await log_activity("system", "Batch approval complete", f"{actioned_count}/{len(req.inbox_ids)} actions executed", None, "inbox")
+    
+    return {"success": True, "results": results, "total": len(req.inbox_ids), "actioned": actioned_count}
+
+# ─── Manual Override (Edit Details) ────────────────────────────────────
+@app.put("/api/inbox/{inbox_id}/details")
+async def update_inbox_details(inbox_id: str, req: UpdateInboxDetailsRequest):
+    """Allow user to edit AI-extracted entities and suggested action before approving."""
+    item = await inbox_col.find_one({"inbox_id": inbox_id})
+    if not item:
+        raise HTTPException(status_code=404, detail="Inbox item not found")
+    
+    update_fields = {}
+    
+    if req.entities is not None:
+        current_intent = item.get("ai_intent", {})
+        current_intent["entities"] = req.entities
+        update_fields["ai_intent"] = current_intent
+    
+    if req.summary is not None:
+        current_intent = item.get("ai_intent", {})
+        current_intent["summary"] = req.summary
+        update_fields["ai_intent"] = current_intent
+    
+    if req.suggested_action_type is not None or req.suggested_action_description is not None:
+        current_action = item.get("ai_suggested_action", {}) or {}
+        if req.suggested_action_type is not None:
+            current_action["type"] = req.suggested_action_type
+        if req.suggested_action_description is not None:
+            current_action["description"] = req.suggested_action_description
+        update_fields["ai_suggested_action"] = current_action
+    
+    if update_fields:
+        await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": update_fields})
+        await log_activity("inbox", "Details edited", f"Manual adjustments made to {item['from_name']}'s request", inbox_id, "inbox")
+    
+    updated = await inbox_col.find_one({"inbox_id": inbox_id})
+    return serialize_doc(updated)
+
+@app.post("/api/inbox/{inbox_id}/approve-with-overrides")
+async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest):
+    """Approve an action with optional manual overrides for details."""
+    item = await inbox_col.find_one({"inbox_id": inbox_id})
+    if not item:
+        raise HTTPException(status_code=404, detail="Inbox item not found")
+    if not item.get("ai_suggested_action"):
+        raise HTTPException(status_code=400, detail="No action to approve")
+    
+    action = item["ai_suggested_action"]
+    action_type = action["type"]
+    entities = item.get("ai_intent", {}).get("entities", {})
+    results = []
+    
+    if action_type == "schedule_meeting":
+        event = {
+            "event_id": str(uuid.uuid4()),
+            "title": req.title or f"Meeting - {item['from_name']}",
+            "description": req.description or action["description"],
+            "start_time": req.start_time or (datetime.utcnow() + timedelta(days=1, hours=2)).isoformat(),
+            "end_time": req.end_time or (datetime.utcnow() + timedelta(days=1, hours=3)).isoformat(),
+            "location": req.location or entities.get("property", "TBD"),
+            "attendees": req.attendees or [item["from_name"]],
+            "status": "confirmed",
+            "source": "ai_override",
+            "created_at": now_iso(),
+            "contact_id": item.get("contact_id"),
+        }
+        await calendar_col.insert_one(event)
+        await log_activity("calendar", "Meeting scheduled", f"Meeting with {item['from_name']} (with adjustments)", event["event_id"], "calendar")
+        results.append({"type": "event_created", "event_id": event["event_id"]})
+    
+    elif action_type == "create_contact":
+        contact = {
+            "contact_id": str(uuid.uuid4()),
+            "name": req.contact_name or entities.get("person_name", item["from_name"]),
+            "email": req.contact_email or entities.get("email", item["from_email"]),
+            "phone": req.contact_phone or entities.get("phone", ""),
+            "type": "lead",
+            "lifecycle_stage": "new",
+            "source": "inbox",
+            "ghl_sync_status": "pending",
+            "ghl_last_sync": None,
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+            "notes": item.get("ai_intent", {}).get("summary", ""),
+        }
+        await contacts_col.insert_one(contact)
+        await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"contact_id": contact["contact_id"]}})
+        await log_activity("crm", "Contact created", f"New contact {contact['name']} (with adjustments)", contact["contact_id"], "contact")
+        results.append({"type": "contact_created", "contact_id": contact["contact_id"]})
+    
+    elif action_type == "start_onboarding":
+        agent = {
+            "agent_id": str(uuid.uuid4()),
+            "name": req.contact_name or entities.get("person_name", item["from_name"]),
+            "email": req.contact_email or entities.get("email", item["from_email"]),
+            "phone": req.contact_phone or entities.get("phone", ""),
+            "role": "agent",
+            "status": "onboarding",
+            "start_date": datetime.utcnow().isoformat(),
+            "photo_url": None,
+            "created_at": now_iso(),
+        }
+        await agents_col.insert_one(agent)
+        for idx, title in enumerate(["Complete compliance training", "Set up CRM profile", "Configure email signature", "Schedule orientation with team lead", "Access granted to listing portal"]):
+            await onboarding_col.insert_one({"task_id": str(uuid.uuid4()), "agent_id": agent["agent_id"], "title": title, "description": f"Auto-generated step {idx+1}", "status": "pending", "order": idx + 1, "completed_at": None, "auto_generated": True})
+        await log_activity("onboarding", "Onboarding started", f"Agent {agent['name']} onboarding initiated (with adjustments)", agent["agent_id"], "agent")
+        results.append({"type": "agent_created", "agent_id": agent["agent_id"]})
+    
+    elif action_type == "send_follow_up":
+        await log_activity("inbox", "Follow-up queued", f"Follow-up for {item['from_name']}", inbox_id, "inbox")
+        results.append({"type": "follow_up_queued"})
+    
+    else:
+        await log_activity("inbox", "Action approved", f"For {item['from_name']}", inbox_id, "inbox")
+        results.append({"type": action_type})
+    
+    await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"status": "actioned"}})
+    
+    return {"success": True, "action_type": action_type, "results": results}
 
 # ─── Calendar ──────────────────────────────────────────────────────────
 @app.get("/api/calendar")
