@@ -1,0 +1,38 @@
+[
+  {
+    "content": "Phase 1: Get OpenAI GPT-4o integration playbook + Emergent LLM key",
+    "status": "completed"
+  },
+  {
+    "content": "Phase 1: Create core AI module (schemas + prompts for intent detection & content generation)",
+    "status": "completed"
+  },
+  {
+    "content": "Phase 1: Write & run POC test script - validate AI outputs",
+    "status": "completed"
+  },
+  {
+    "content": "Phase 1: Fix until all POC tests pass",
+    "status": "completed"
+  },
+  {
+    "content": "Phase 2: Design agent - get UI/UX guidelines",
+    "status": "in_progress"
+  },
+  {
+    "content": "Phase 2: Backend - data models, seed data, API endpoints",
+    "status": "pending"
+  },
+  {
+    "content": "Phase 2: Frontend - all pages (Dashboard, Inbox, Schedule, CRM, Onboarding, Content)",
+    "status": "pending"
+  },
+  {
+    "content": "Phase 2: All user stories covered in Development and testing",
+    "status": "pending"
+  },
+  {
+    "content": "Phase 2: End to End Testing using Testing Agent",
+    "status": "pending"
+  }
+]
