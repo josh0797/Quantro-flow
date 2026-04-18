@@ -17,22 +17,22 @@
   },
   {
     "content": "Phase 2: Design agent - get UI/UX guidelines",
-    "status": "in_progress"
+    "status": "completed"
   },
   {
     "content": "Phase 2: Backend - data models, seed data, API endpoints",
-    "status": "pending"
+    "status": "completed"
   },
   {
     "content": "Phase 2: Frontend - all pages (Dashboard, Inbox, Schedule, CRM, Onboarding, Content)",
-    "status": "pending"
+    "status": "completed"
   },
   {
     "content": "Phase 2: All user stories covered in Development and testing",
-    "status": "pending"
+    "status": "in_progress"
   },
   {
     "content": "Phase 2: End to End Testing using Testing Agent",
-    "status": "pending"
+    "status": "in_progress"
   }
 ]

@@ -1,34 +1,78 @@
-.App-logo {
-    height: 40vmin;
-    pointer-events: none;
+/* Quantro One | Realty OS - App Styles */
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+  background: hsl(var(--background));
 }
 
-@media (prefers-reduced-motion: no-preference) {
-    .App-logo {
-        animation: App-logo-spin infinite 20s linear;
-    }
+.main-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  height: 100vh;
 }
 
-.App-header {
-    background-color: #0f0f10;
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    font-size: calc(10px + 2vmin);
-    color: white;
+.page-container {
+  max-width: 1400px;
+  width: 100%;
+  padding: 1.5rem;
 }
 
-.App-link {
-    color: #61dafb;
+@media (min-width: 640px) {
+  .page-container {
+    padding: 1.5rem 2rem;
+  }
 }
 
-@keyframes App-logo-spin {
-    from {
-        transform: rotate(0deg);
-    }
-    to {
-        transform: rotate(360deg);
-    }
+/* Gradient header wash */
+.gradient-wash {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 300px;
+  pointer-events: none;
+  z-index: 0;
+  background: radial-gradient(800px circle at 20% 0%, hsl(186 92% 42% / 0.08), transparent 55%),
+              radial-gradient(700px circle at 80% 10%, hsl(199 88% 52% / 0.05), transparent 60%);
 }
+
+/* Card hover effect */
+.card-hover {
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+.card-hover:hover {
+  background: hsl(var(--surface-2));
+  border-color: hsl(var(--border) / 0.8);
+}
+
+/* Status badge styles */
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.status-dot.running {
+  background: hsl(var(--status-running));
+  box-shadow: 0 0 0 3px hsl(var(--status-running) / 0.12);
+}
+.status-dot.syncing {
+  background: hsl(var(--status-syncing));
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+.status-dot.degraded {
+  background: hsl(var(--status-degraded));
+}
+.status-dot.down {
+  background: hsl(var(--status-down));
+}
+
+/* Intent badge colors */
+.intent-booking { background: hsl(var(--info) / 0.15); color: hsl(var(--info)); }
+.intent-onboarding { background: hsl(var(--success) / 0.15); color: hsl(var(--success)); }
+.intent-follow_up { background: hsl(var(--warning) / 0.15); color: hsl(var(--warning)); }
+.intent-inquiry { background: hsl(var(--accent) / 0.15); color: hsl(var(--accent)); }
+.intent-escalation { background: hsl(var(--critical) / 0.15); color: hsl(var(--critical)); }
+.intent-spam { background: hsl(var(--destructive) / 0.15); color: hsl(var(--destructive)); }
+.intent-needs_review { background: hsl(var(--muted-foreground) / 0.15); color: hsl(var(--muted-foreground)); }
