@@ -1,35 +1,23 @@
 # plan.md (Updated)
 
 ## 1. Objectives
-- Deliver a premium **dark-only**, OS-like internal platform for real estate teams: **Quantro One | Realty OS**.
-- Ship a connected, production-feeling workflow with AI automation **and** a critical control layer:
-  **Smart Inbox item → GPT-4o triage (single + batch) → policy evaluation → (auto-run OR manual override) → (simulated) Calendar/CRM updates → Activity feed**.
+- Deliver a premium **dark-first**, OS-like internal platform for real estate teams: **Quantro One | Realty OS**.
+- Ship a connected, production-feeling workflow with automation **and** a critical control layer:
+  **Smart Inbox item → GPT triage (single + batch) → policy evaluation → (auto-run OR manual override) → (simulated) Calendar/CRM updates → Activity feed / Audit trail**.
 - Provide a multi-page, production-quality UI (Dashboard, Inbox, Schedule, CRM, Onboarding, Content Engine, Automation) with **connected seeded mock data** showing realistic operations.
-- Ensure backend (FastAPI + MongoDB) provides clean entity modeling + append-only **activity event log** for traceability.
-- Transform the app from an automated demo into a **controllable workflow engine** via:
-  - **Batch AI triage at scale**
-  - **Manual Override UI (Review & Control)** as the trust + governance layer
-  - **Automation Policies** (per-intent + confidence thresholds) to operationalize when the system auto-executes vs requests approval
-  - **Escalation routing rules** (basic + advanced conditions) to route edge-cases and low-confidence items to the right owner
-  - **Content Templates** as the consistent, on-brand communication layer
+- Evolve from a single-tenant MVP into a **production-ready B2B SaaS foundation** by adding:
+  - **Authentication via Google OAuth (Emergent Integration)**
+  - **Role-based access control (RBAC)** with 5 tiers: **Owner / Admin / Manager / Operator / Agent**
+  - **Multi-workspace (multi-tenant) scoping** across all data collections
+  - **Compliance-ready audit logs** with filters and export (CSV + JSON)
 
 **Current status (as of this update):**
 - ✅ **Phase 1, Phase 2, Phase 3, Phase 4 complete**.
 - ✅ **Phase 5 complete** (Auto-execution pipeline + Advanced escalations + UI updates + verification).
 - ✅ AI POC achieved **10/10** structured output tests.
 - ✅ Full app functional with seeded workflows.
-- ✅ Phase 2 E2E test pass rate **~96%**.
-- ✅ Phase 3 testing:
-  - **Backend: 100% pass**
-  - **Frontend: ~90% pass** (checkbox “bug” was a false-positive due to Radix rendering as `button[role=checkbox]`, not native `input[type=checkbox]`)
-- ✅ Phase 4 testing:
-  - **Backend: 100% pass**
-  - **Frontend: ~95% pass** (low-priority modal overlay click interception during automated tests)
-- ✅ Phase 5 testing (Iteration 4):
-  - **Backend: 100% pass**
-  - **Frontend: ~95% pass**
-  - Low-priority: modal overlay click interception in some dialogs during automation (test harness limitation; UI is functional).
-- ✅ Database reset previously performed to restore fresh seed data for demo/workflows.
+- ✅ Phase 5 testing (Iteration 4): Backend **100%**, Frontend **~95%**.
+- 🟡 **Phase 6 starting** (Auth + RBAC + Multi-workspace + Audit logs).
 
 ---
 
@@ -102,7 +90,6 @@
 
 **Close Phase 2 with testing**
 - Testing agent run produced **~96% overall pass rate**.
-- Minor findings were cosmetic; critical flows passed.
 
 ---
 
@@ -117,68 +104,18 @@
 #### 3.1 Batch AI Triage (Inbox Intelligence at Scale)
 **Status: ✅ Implemented**
 
-**User stories (delivered)**
-1. Select multiple inbox items (or process all new) and classify in bulk.
-2. Classify each message into booking/onboarding/follow-up/inquiry/escalation/spam/needs_review.
-3. Extract key data (name/contact/date-time/property/context) and store with the item.
-4. Display structured processing statuses:
-   **New → Processing → Classified → Completed/Skipped**.
-5. Bulk actions: process batch, approve batch, or review individually.
-
-**Backend (delivered)**
-- `POST /api/inbox/batch-analyze`
-  - Marks items as `processing`, runs GPT-4o triage sequentially, updates `ai_intent`, `ai_suggested_action`, sets `status=processed`.
-- `POST /api/inbox/batch-approve`
-  - Executes actions for multiple classified items and marks them `actioned`.
-- Activity logging emitted for classification + batch completion.
-
-**Frontend (delivered)**
-- **Triage view** with:
-  - Multi-select using Radix checkbox (`button[role=checkbox]`)
-  - Select-all
-  - Batch buttons: **Process All New** and **Approve All**
-  - Individual **Classify** button per item
-  - Status badges + live “processing” indicator
+**Delivered**
+- `POST /api/inbox/batch-analyze` and `POST /api/inbox/batch-approve`
+- Smart Inbox triage view with multi-select, batch buttons, statuses, and per-item classify.
 
 #### 3.2 Manual Override UI (Critical Control Layer — “Review & Control”)
 **Status: ✅ Implemented**
 
-**User stories (delivered)**
-1. Dedicated interface to review and control automation decisions.
-2. Layout matches spec:
-   - **Left**: request list
-   - **Right**: three-section review panel:
-     1) Original Request
-     2) System Analysis
-     3) Action Controls
-3. System Analysis includes:
-   - Classification (human-friendly language)
-   - Confidence level: **High / Medium / Low**
-   - Proposed action
-   - Summary
-   - Extracted entities
-4. Actions supported:
-   - Primary: **Approve & Execute** (context-aware label)
-   - Secondary: **Adjust Details** (edit before execution)
-   - Tertiary: **Skip**
-5. On adjust:
-   - Opens edit dialog to change contact info, meeting details, and action type/description.
-6. On approve:
-   - Triggers downstream workflow (Calendar/CRM/Onboarding simulation) and logs activity.
-
-**Backend (delivered)**
-- `PUT /api/inbox/{inbox_id}/details`
-  - Saves manual edits to extracted entities and/or suggested action.
-- `POST /api/inbox/{inbox_id}/approve-with-overrides`
-  - Executes approval with optional override fields (meeting/contact details).
-
-**Copy + Trust (delivered)**
-- Removed technical AI wording in UI.
-
-**Close Phase 3 with testing**
-- Testing agent results:
-  - **Backend: 100% pass**
-  - **Frontend: ~90% pass** (checkbox false positive)
+**Delivered**
+- Review 6 control layout and override workflows
+- Backend endpoints:
+  - `PUT /api/inbox/{inbox_id}/details`
+  - `POST /api/inbox/{inbox_id}/approve-with-overrides`
 
 ---
 
@@ -186,91 +123,12 @@
 **Status: ✅ Completed**
 
 **Primary goal (achieved)**
-- Transform Quantro One into a production-ready workflow engine by:
-  - Defining when the system auto-executes vs requests approval vs escalates.
-  - Adding an on-brand communication layer via reusable templates + AI enhancement.
+- Governance for “when to run” + “who owns edge cases” + consistent communications.
 
-#### 4.1 Automation Policies
-**Status: ✅ Implemented**
-
-**Delivered capabilities**
-- **7 intent policies** with confidence-based actions:
-  - Intents: `booking`, `follow_up`, `onboarding`, `inquiry`, `escalation`, `spam`, `needs_review`
-  - Confidence tiers with thresholds:
-    - High: ≥ 85%
-    - Medium: ≥ 60%
-    - Low: < 60%
-  - Actions: `auto_run`, `require_approval`, `manual_review`, `escalate`
-- Policies integrated into:
-  - `POST /api/inbox/{id}/analyze`
-  - `POST /api/inbox/batch-analyze`
-- Inbox UI displays policy outcome badges.
-
-**Backend (delivered)**
-- Collection: `automation_policies`
-- Endpoints:
-  - `GET /api/policies`
-  - `PUT /api/policies/{policy_id}`
-  - `GET /api/policies/evaluate/{inbox_id}`
-
-**Frontend (delivered)**
-- **Automation** page (`/automation`):
-  - Intent policy list with enable/disable toggle
-  - Confidence-based action dropdowns for high/medium/low
-
-#### 4.2 Escalation Routing Rules
-**Status: ✅ Implemented (basic in Phase 4; advanced in Phase 5)**
-
-**Delivered capabilities (Phase 4)**
-- Predefined rules (seeded examples):
-  - Urgent recruiting lead → **Larry**
-  - Incomplete onboarding data → **Ops/Admin**
-  - Calendar conflict → **Manual Review**
-  - Escalation intent → **Sophia Turner**
-  - Investor keywords → **Sophia Turner**
-- Condition types (Phase 4 UI): `intent`, `keyword`
-- Priority levels: `normal`, `high`, `critical`
-- Full CRUD + enable/disable.
-
-**Backend (delivered)**
-- Collection: `escalation_rules`
-- Endpoints:
-  - `GET /api/escalation-rules`
-  - `POST /api/escalation-rules`
-  - `PUT /api/escalation-rules/{rule_id}`
-  - `DELETE /api/escalation-rules/{rule_id}`
-
-**Frontend (delivered)**
-- Escalation Rules tab inside Automation page:
-  - List, create, edit, delete
-
-#### 4.3 Content Templates (AI-Powered Communication Layer)
-**Status: ✅ Implemented**
-
-**Delivered capabilities**
-- Predefined templates (seeded examples) + CRUD:
-  - Welcome Email
-  - Follow-up Message
-  - Recruiting Message
-  - New Listing Social Post
-  - Market Update Post
-- Variable system: `{{contact_name}}`, `{{situation}}`, etc.
-- “Generate with AI” produces AI-enhanced version via GPT-4o and saves to content library.
-
-**Backend (delivered)**
-- Collection: `content_templates`
-- Endpoints:
-  - `GET /api/templates` (optional category filter)
-  - `GET /api/templates/{template_id}`
-  - `POST /api/templates`
-  - `PUT /api/templates/{template_id}`
-  - `DELETE /api/templates/{template_id}`
-  - `POST /api/templates/{template_id}/generate`
-
-**Close Phase 4 with testing**
-- Testing agent results:
-  - **Backend: 100% pass**
-  - **Frontend: ~95% pass** (low-priority modal overlay click interception in some dialogs)
+**Delivered**
+- Automation Policies (CRUD + evaluation)
+- Escalation routing rules (CRUD + enable/disable)
+- Content templates + AI generation from templates
 
 ---
 
@@ -278,93 +136,174 @@
 **Status: ✅ Completed**
 
 **Primary goal (achieved)**
-- Make the system feel “always running” by allowing high-confidence intents to **auto-run** end-to-end (simulated Calendar/CRM/Onboarding actions), while ensuring edge cases are routed via **advanced escalation evaluation**.
-
-#### 5.1 Backend: Auto-run execution pipeline
-**Status: ✅ Implemented + wired**
-
-**Implemented**
-- `execute_action_for_item(item, source=...)`:
-  - Executes mocked actions based on `ai_suggested_action` (Calendar/CRM/Onboarding/Follow-up/Ignore)
-  - Writes execution metadata to inbox item:
-    - `status=auto_actioned`
-    - `auto_executed=true`, `auto_executed_at`, `execution_source`, `execution_results`
-  - Emits activity events for downstream actions.
-
-**Wired into endpoints**
-- `POST /api/inbox/{inbox_id}/analyze`
-  - After policy evaluation, auto-executes when `policy_action == auto_run` and no escalation is triggered.
-- `POST /api/inbox/batch-analyze`
-  - Applies the same auto-run execution logic per item.
-  - Returns `auto_executed` and optional `execution_results` in the batch response.
-
-#### 5.2 Backend: Advanced escalation evaluation
-**Status: ✅ Implemented + wired**
-
-**Implemented**
-- `evaluate_advanced_escalation(item, intent, confidence, policy_action)` supports:
-  - `calendar_conflict`
-  - `incomplete_entities` (comma-separated required entities)
-  - `urgency` (keyword-based; e.g., any/high)
-  - `contact_type` (contact type or lifecycle stage)
-  - plus existing: `intent`, `keyword`
-
-**Behavior**
-- Advanced escalation is evaluated during analyze + batch-analyze.
-- If an escalation triggers, it overrides policy to `policy_action=escalate` and prevents auto-run execution.
-- Escalation payload may include `reasons[]` for UI transparency.
-
-#### 5.3 Frontend: Smart Inbox auto-execution status & execution trail
-**Status: ✅ Implemented**
+- Unattended automation where safe (auto-run) and guarded escalation when risk/uncertainty exists.
 
 **Delivered**
-- Smart Inbox shows:
-  - `auto_actioned` status label (“Auto-executed”)
-  - Inline list indicator when `auto_executed=true`
-  - Detail view execution trail:
-    - `auto_executed_at`, `execution_source`
-    - `execution_results` entries (event/contact/agent created, follow-up queued, ignored)
-  - Escalation reasons rendered when present.
+- Auto-execution pipeline:
+  - `execute_action_for_item()` auto-creates mocked Calendar/CRM/Onboarding actions
+  - Marks inbox items `status=auto_actioned` with `execution_results`
+- Advanced escalation evaluation:
+  - `calendar_conflict`, `incomplete_entities`, `urgency`, `contact_type` (+ existing `intent`, `keyword`)
+- UI updates:
+  - Smart Inbox shows auto-execution badge + execution trail
+  - Escalation reasons shown when present
+  - Automation rule editor supports advanced condition types
 
-#### 5.4 Frontend: Advanced escalation condition types in rule editor
-**Status: ✅ Implemented**
+---
 
-**Delivered**
-- Escalation rule editor in `/automation` supports condition types:
-  - `calendar_conflict`
-  - `incomplete_entities`
-  - `urgency`
-  - `contact_type`
-  - plus existing: `intent`, `keyword`, `confidence`
-- Updated placeholders and helper text per condition type.
+### Phase 6 — SaaS Foundation (Authentication + RBAC + Multi-Workspace + Audit Logs)
+**Status: 🟡 In Progress (starting now)**
 
-#### 5.5 Testing & verification (Phase 5)
-**Status: ✅ Completed**
+**Phase 6 Configuration (confirmed)**
+- **Auth provider**: **Google OAuth via Emergent Integration**
+- **Roles**: **Owner / Admin / Manager / Operator / Agent**
+- **Workspace scoping**: **multiple workspaces per user** (workspace switching)
+- **Onboarding flows**: create new workspace (first user becomes Owner) **and** join via invitation
+- **Audit logs**: Standard (user actions + system actions)
+- **Audit export**: **CSV + JSON**
 
-**Testing agent results (Iteration 4)**
-- Backend: **100%**
-- Frontend: **~95%**
-- Only low-priority automated-test limitation noted (modal overlay click interception).
+#### 6.1 Data model additions (MongoDB)
+**Goal**: Introduce multi-tenant primitives and stable identity.
+
+**New collections**
+- `users`
+  - `{ user_id, email, name, avatar_url, google_sub, created_at, last_login_at }`
+- `workspaces`
+  - `{ workspace_id, name, slug, created_at, created_by_user_id, plan_tier, settings }`
+- `workspace_members`
+  - `{ workspace_id, user_id, role, status(active/invited), joined_at }`
+- `workspace_invitations`
+  - `{ invitation_id, workspace_id, email, role, token, expires_at, created_by_user_id, accepted_at }`
+- `audit_events`
+  - `{ audit_id, workspace_id, actor_type(user/system), actor_user_id?, action_type, module, entity_type?, entity_id?, metadata, ip?, user_agent?, created_at }`
+
+**Schema changes (existing collections)**
+- Add `workspace_id` to:
+  - `inbox_items`, `calendar_events`, `contacts`, `agents`, `onboarding_tasks`, `content_items`, `activity_events`, `automation_policies`, `escalation_rules`, `content_templates`
+
+**Exit criteria**
+- All reads/writes are workspace-scoped; no cross-workspace leakage.
+
+#### 6.2 Authentication (Google OAuth via Emergent)
+**Backend**
+- Implement OAuth endpoints:
+  - `GET /api/auth/google/start`
+  - `GET /api/auth/google/callback`
+  - `POST /api/auth/logout`
+  - `GET /api/auth/me`
+- Session/token strategy:
+  - Server issues a signed session (JWT or secure cookie) containing `user_id`.
+
+**Frontend**
+- Login screen with “Continue with Google”
+- Route protection and authenticated app shell
+
+**Exit criteria**
+- User can sign in/out and session persists across refresh.
+
+#### 6.3 Workspace selection + switching
+**Backend**
+- Workspace context strategy (required for most endpoints):
+  - `X-Workspace-Id` header OR `?workspace_id=`
+- Endpoints:
+  - `POST /api/workspaces` (create; creator becomes Owner)
+  - `GET /api/workspaces` (list workspaces for user)
+  - `GET /api/workspaces/{workspace_id}`
+
+**Frontend**
+- Workspace switcher visible in top navigation (premium B2B SaaS style)
+- Workspace creation modal + join-by-invite flow
+
+**Exit criteria**
+- User can switch between multiple workspaces; UI updates data accordingly.
+
+#### 6.4 Role-based access control (RBAC)
+**Role definitions (confirmed)**
+- **Owner**: full workspace control, billing, policies, integrations, users
+- **Admin**: full operational access, users, CRM, inbox, automations, content
+- **Manager**: manage inbox, CRM, scheduling, onboarding, content, view reports
+- **Operator**: inbox triage, manual override, approvals, scheduling, CRM updates
+- **Agent**: view-only access to assigned records, meetings, activity
+
+**Backend**
+- Permission middleware / dependency:
+  - Resolve user + workspace + role
+  - Guard endpoints by module/action
+
+**Frontend**
+- UI gating:
+  - Hide/disable restricted actions (e.g., policy edits, user invites)
+  - Show role label in user menu
+
+**Exit criteria**
+- Unauthorized actions return 403; UI reflects permissions.
+
+#### 6.5 Invitations + user management
+**Backend**
+- Endpoints:
+  - `POST /api/workspaces/{workspace_id}/invites` (Owner/Admin)
+  - `GET /api/workspaces/{workspace_id}/members`
+  - `PUT /api/workspaces/{workspace_id}/members/{user_id}` (change role)
+  - `DELETE /api/workspaces/{workspace_id}/members/{user_id}` (remove)
+  - `POST /api/invites/accept` (token)
+
+**Frontend**
+- Workspace settings → Members table
+- Invite user dialog (email + role)
+- Accept invite screen
+
+**Exit criteria**
+- Users can be invited, accept, and join the workspace with the right role.
+
+#### 6.6 Audit logs (filterable + exportable)
+**Scope (confirmed: Standard)**
+Include events for:
+- login/logout
+- approvals/rejections
+- manual overrides
+- automation executions
+- policy-triggered actions
+- CRM/contact updates
+- scheduling actions
+
+**Backend**
+- Write audit events alongside existing `activity_events` (or unify later)
+- Endpoints:
+  - `GET /api/audit` with filters: `user_id`, `action_type`, `module`, `from`, `to`
+  - `GET /api/audit/export?format=csv|json` (same filters)
+
+**Frontend**
+- New page: **Audit Log**
+  - Filters: user, action type, module, date range
+  - Table with clear “User vs System” attribution
+  - Export button: CSV / JSON
+
+**Exit criteria**
+- Admin/Owner can filter and export audit events reliably.
+
+#### 6.7 Testing & verification (Phase 6)
+- Backend:
+  - Auth flow happy path + failure path
+  - Workspace scoping correctness
+  - RBAC enforcement (matrix by role/module)
+  - Audit events written for required actions
+  - Export endpoints produce valid CSV + JSON
+- Frontend:
+  - Login/logout
+  - Workspace switcher
+  - Invite acceptance
+  - Permission-based UI gating
+  - Audit filters + export
 
 ---
 
 ## 3. Next Actions
-With Phase 5 complete, next recommended workstreams:
-
-1. **Phase 6 (P1): Authentication + role-based access**
-   - Invite users + assign roles (admin/operator/agent)
-   - Session handling, route protection, UI gating
-2. **Phase 6 (P1): Workspace scoping (multi-tenant readiness)**
-   - Workspace ID on all collections
-   - Per-workspace policies, escalation rules, templates
-3. **Phase 6 (P2): Exportable audit logs + compliance-ready activity trail**
-   - Filters + export (CSV/JSON)
-   - Immutable event schema enhancements
-
-Optional expansions (P2):
-- Configurable escalation pipeline builder
-- Pagination/indexing for large inboxes
-- More realistic mocked connector states (sync delays, failures)
+**Immediate (Phase 6 P1):**
+1. Implement Google OAuth via Emergent Integration and session handling.
+2. Add workspace primitives + membership + invitation flows.
+3. Add `workspace_id` to all documents and scope all API endpoints.
+4. Implement RBAC enforcement across backend routes and frontend UI.
+5. Add audit log storage, filtering, and export endpoints + UI.
 
 ---
 
@@ -374,17 +313,15 @@ Optional expansions (P2):
 - Core workflow reliable:
   - **Inbox → intent (single + batch) → policy evaluation → auto-run or manual control → calendar/CRM/onboarding updates → activity feed**.
 - Premium OS-like UI:
-  - Dark-only, calm, minimal, system-driven.
+  - Dark-first, calm, minimal, system-driven.
 - Connected seeded data demonstrates end-to-end workflows.
 - AI failures degrade safely to `needs_review`.
-- Batch triage delivers real-time processing feel via status transitions + UI indicators.
-- Manual Override UI provides a trustworthy control layer for automation governance.
-- Automation policies and escalation routing operationalize “when to run” and “who owns edge cases”.
-- Template-based communication enables fast, consistent, on-brand content production.
-- Auto-run can execute end-to-end without manual approval (simulated integrations) with transparent execution trail.
-- Advanced escalation conditions reliably prevent unsafe auto-run actions and route to the right owner with explicit reasons.
+- Auto-run executes with transparent execution trail.
+- Advanced escalation conditions prevent unsafe automation and provide explicit reasons.
 
-**Next success criteria (Phase 6):**
-- Auth + role-based access control implemented.
-- Workspace-scoped data for multi-tenant operation.
-- Exportable audit logs for compliance-ready review.
+**Phase 6 Success Criteria (to be achieved):**
+- Google OAuth login working end-to-end.
+- Multi-workspace support with smooth switching in top navigation.
+- 5-tier RBAC enforced consistently (API + UI) per permission model.
+- Standard audit log covers user and system actions, filterable and exportable (CSV + JSON).
+- No cross-workspace data access is possible; all queries are scoped.

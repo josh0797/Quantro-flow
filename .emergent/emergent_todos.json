@@ -1,34 +1,86 @@
 [
   {
-    "content": "Wire auto-execution and advanced escalation into POST /api/inbox/{inbox_id}/analyze endpoint",
+    "content": "Get Google OAuth integration playbook from integration_playbook_expert_v2",
     "status": "completed"
   },
   {
-    "content": "Wire auto-execution and advanced escalation into POST /api/inbox/batch-analyze endpoint",
-    "status": "completed"
+    "content": "Backend: Create users, workspaces, workspace_members, workspace_invitations, audit_events collections with schema and seed data",
+    "status": "in_progress"
   },
   {
-    "content": "Test backend auto-execution flow with curl (single + batch analyze)",
-    "status": "completed"
+    "content": "Backend: Add workspace_id to all existing collections (inbox_items, contacts, calendar_events, etc.)",
+    "status": "pending"
   },
   {
-    "content": "Update Smart Inbox UI to display auto-executed items with distinct badge and execution trail",
-    "status": "completed"
+    "content": "Backend: Implement Google OAuth endpoints (start, callback, logout, me)",
+    "status": "pending"
   },
   {
-    "content": "Update Automation Policies UI to support advanced escalation condition types in rule editor",
-    "status": "completed"
+    "content": "Backend: Implement workspace CRUD endpoints (create, list, get)",
+    "status": "pending"
   },
   {
-    "content": "Run comprehensive testing via testing_agent (backend + frontend)",
-    "status": "completed"
+    "content": "Backend: Implement invitation endpoints (create, accept, list members, update role, remove member)",
+    "status": "pending"
+  },
+  {
+    "content": "Backend: Add workspace context middleware and RBAC permission decorators",
+    "status": "pending"
+  },
+  {
+    "content": "Backend: Update all existing endpoints to require workspace_id and enforce RBAC",
+    "status": "pending"
+  },
+  {
+    "content": "Backend: Implement audit log endpoints (list with filters, export CSV/JSON)",
+    "status": "pending"
+  },
+  {
+    "content": "Backend: Add audit event tracking for user actions and system automation events",
+    "status": "pending"
+  },
+  {
+    "content": "Frontend: Create login/signup page with Google OAuth button",
+    "status": "pending"
+  },
+  {
+    "content": "Frontend: Add workspace switcher to top navigation",
+    "status": "pending"
+  },
+  {
+    "content": "Frontend: Create workspace creation and join-by-invite flows",
+    "status": "pending"
+  },
+  {
+    "content": "Frontend: Add user menu with profile and logout",
+    "status": "pending"
+  },
+  {
+    "content": "Frontend: Implement route protection and session management",
+    "status": "pending"
+  },
+  {
+    "content": "Frontend: Add RBAC UI gating (hide/disable restricted actions)",
+    "status": "pending"
+  },
+  {
+    "content": "Frontend: Create Audit Log page with filters and export functionality",
+    "status": "pending"
+  },
+  {
+    "content": "Frontend: Create workspace settings page with members management",
+    "status": "pending"
+  },
+  {
+    "content": "Run comprehensive testing via testing_agent for Phase 6",
+    "status": "pending"
   },
   {
     "content": "Fix any issues found during testing",
-    "status": "completed"
+    "status": "pending"
   },
   {
-    "content": "Update plan.md to mark Phase 5 as COMPLETED",
-    "status": "completed"
+    "content": "Update plan.md to mark Phase 6 as COMPLETED",
+    "status": "pending"
   }
 ]
