@@ -52,6 +52,7 @@ const statusConfig = {
   processing: { label: 'Processing', color: 'bg-[hsl(var(--primary)/0.15)] text-[hsl(var(--primary))]' },
   processed: { label: 'Classified', color: 'bg-[hsl(var(--warning)/0.15)] text-[hsl(var(--warning))]' },
   actioned: { label: 'Completed', color: 'bg-[hsl(var(--success)/0.15)] text-[hsl(var(--success))]' },
+  auto_actioned: { label: 'Auto-executed', color: 'bg-[hsl(var(--primary)/0.15)] text-[hsl(var(--primary))]' },
   declined: { label: 'Skipped', color: 'bg-[hsl(var(--muted-foreground)/0.15)] text-[hsl(var(--muted-foreground))]' },
 };
 
@@ -568,6 +569,12 @@ function TriageView({ items, loading, selectedIds, toggleSelect, selectedItem, s
                           → {item.escalation.route_to}
                         </span>
                       )}
+                      {item.auto_executed && (
+                        <div className="flex items-center gap-1 text-[10px] text-[hsl(var(--primary))]">
+                          <Zap size={10} />
+                          <span>Auto-executed</span>
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -794,14 +801,71 @@ function ReviewDetailPanel({ item, approving, handleApproveWithOverrides, handle
                   </Badge>
                 </div>
                 {item.escalation && (
-                  <div className="flex items-center gap-2 mt-2 pt-2 border-t border-[hsl(var(--border)/0.5)]">
-                    <AlertTriangle size={12} className="text-[hsl(var(--critical))]" />
-                    <span className="text-xs">Routed to <span className="font-semibold">{item.escalation.route_to}</span></span>
-                    <Badge className={`text-[9px] ml-auto ${
-                      item.escalation.priority === 'critical' ? 'bg-[hsl(var(--critical)/0.15)] text-[hsl(var(--critical))]' :
-                      item.escalation.priority === 'high' ? 'bg-[hsl(var(--warning)/0.15)] text-[hsl(var(--warning))]' :
-                      'bg-[hsl(var(--muted-foreground)/0.15)] text-[hsl(var(--muted-foreground))]'
-                    }`}>{item.escalation.priority}</Badge>
+                  <div className="flex flex-col gap-2 mt-2 pt-2 border-t border-[hsl(var(--border)/0.5)]">
+                    <div className="flex items-center gap-2">
+                      <AlertTriangle size={12} className="text-[hsl(var(--critical))]" />
+                      <span className="text-xs">Routed to <span className="font-semibold">{item.escalation.route_to}</span></span>
+                      <Badge className={`text-[9px] ml-auto ${
+                        item.escalation.priority === 'critical' ? 'bg-[hsl(var(--critical)/0.15)] text-[hsl(var(--critical))]' :
+                        item.escalation.priority === 'high' ? 'bg-[hsl(var(--warning)/0.15)] text-[hsl(var(--warning))]' :
+                        'bg-[hsl(var(--muted-foreground)/0.15)] text-[hsl(var(--muted-foreground))]'
+                      }`}>{item.escalation.priority}</Badge>
+                    </div>
+                    {item.escalation.reasons && item.escalation.reasons.length > 0 && (
+                      <div className="pl-5 space-y-1">
+                        {item.escalation.reasons.map((reason, idx) => (
+                          <p key={idx} className="text-[10px] text-muted-foreground">• {reason}</p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Auto-Execution Trail */}
+            {item.auto_executed && item.execution_results && (
+              <div className="p-3 rounded-lg border mb-4 bg-[hsl(var(--primary)/0.06)] border-[hsl(var(--primary)/0.15)]">
+                <div className="flex items-center gap-2 mb-3">
+                  <Zap size={14} className="text-[hsl(var(--primary))]" />
+                  <span className="text-xs font-semibold text-foreground">Auto-Executed</span>
+                  {item.auto_executed_at && (
+                    <span className="text-[10px] text-muted-foreground ml-auto font-mono">
+                      {new Date(item.auto_executed_at).toLocaleString()}
+                    </span>
+                  )}
+                </div>
+                <div className="space-y-2">
+                  {item.execution_results.map((result, idx) => (
+                    <div key={idx} className="flex items-start gap-2 text-xs">
+                      <CheckCircle2 size={12} className="text-[hsl(var(--success))] mt-0.5 shrink-0" />
+                      <div>
+                        <p className="text-foreground/90">
+                          {result.type === 'event_created' && 'Meeting scheduled in calendar'}
+                          {result.type === 'contact_created' && 'Contact added to CRM'}
+                          {result.type === 'agent_created' && 'Agent onboarding initiated'}
+                          {result.type === 'follow_up_queued' && 'Follow-up queued'}
+                          {result.type === 'ignored' && 'Marked as spam/ignored'}
+                          {!['event_created', 'contact_created', 'agent_created', 'follow_up_queued', 'ignored'].includes(result.type) && `Action: ${result.type}`}
+                        </p>
+                        {result.event_id && (
+                          <p className="text-[10px] text-muted-foreground font-mono">Event ID: {result.event_id.slice(0, 8)}...</p>
+                        )}
+                        {result.contact_id && (
+                          <p className="text-[10px] text-muted-foreground font-mono">Contact ID: {result.contact_id.slice(0, 8)}...</p>
+                        )}
+                        {result.agent_id && (
+                          <p className="text-[10px] text-muted-foreground font-mono">Agent ID: {result.agent_id.slice(0, 8)}...</p>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {item.execution_source && (
+                  <div className="mt-2 pt-2 border-t border-[hsl(var(--border)/0.5)]">
+                    <span className="text-[10px] text-muted-foreground">
+                      Source: <span className="font-mono">{item.execution_source}</span>
+                    </span>
                   </div>
                 )}
               </div>

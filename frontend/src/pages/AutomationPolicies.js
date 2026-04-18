@@ -302,6 +302,10 @@ export default function AutomationPolicies() {
                       <SelectContent>
                         <SelectItem value="intent">Intent Match</SelectItem>
                         <SelectItem value="keyword">Keyword Match</SelectItem>
+                        <SelectItem value="calendar_conflict">Calendar Conflict</SelectItem>
+                        <SelectItem value="incomplete_entities">Incomplete Entities</SelectItem>
+                        <SelectItem value="urgency">Urgency Detected</SelectItem>
+                        <SelectItem value="contact_type">Contact Type/Stage</SelectItem>
                         <SelectItem value="confidence">Confidence Level</SelectItem>
                       </SelectContent>
                     </Select>
@@ -311,10 +315,24 @@ export default function AutomationPolicies() {
                     <Input
                       value={ruleForm.condition_value}
                       onChange={e => setRuleForm({...ruleForm, condition_value: e.target.value})}
-                      placeholder={ruleForm.condition_type === 'intent' ? 'e.g. onboarding' : ruleForm.condition_type === 'keyword' ? 'e.g. urgent,conflict,cancel' : 'e.g. low'}
+                      placeholder={
+                        ruleForm.condition_type === 'intent' ? 'e.g. onboarding' :
+                        ruleForm.condition_type === 'keyword' ? 'e.g. urgent,conflict,cancel' :
+                        ruleForm.condition_type === 'calendar_conflict' ? 'e.g. any (detects conflicts)' :
+                        ruleForm.condition_type === 'incomplete_entities' ? 'e.g. person_name,email,phone' :
+                        ruleForm.condition_type === 'urgency' ? 'e.g. any or high' :
+                        ruleForm.condition_type === 'contact_type' ? 'e.g. lead, investor, agent' :
+                        'e.g. low'
+                      }
                     />
                     <p className="text-[10px] text-muted-foreground mt-1">
-                      {ruleForm.condition_type === 'keyword' ? 'Comma-separated keywords to match in message' : ruleForm.condition_type === 'intent' ? 'Intent type to match' : 'Confidence level: low, medium, high'}
+                      {ruleForm.condition_type === 'keyword' && 'Comma-separated keywords to match in message'}
+                      {ruleForm.condition_type === 'intent' && 'Intent type to match (booking, inquiry, etc.)'}
+                      {ruleForm.condition_type === 'calendar_conflict' && 'Enter "any" to detect any calendar conflicts'}
+                      {ruleForm.condition_type === 'incomplete_entities' && 'Comma-separated required fields (person_name, email, phone, date_time, property)'}
+                      {ruleForm.condition_type === 'urgency' && 'Enter "any" for any urgency or "high" for high-priority keywords'}
+                      {ruleForm.condition_type === 'contact_type' && 'Contact type or lifecycle stage (lead, client, investor, etc.)'}
+                      {ruleForm.condition_type === 'confidence' && 'Confidence level: low, medium, high'}
                     </p>
                   </div>
                   <div><Label>Route To *</Label><Input value={ruleForm.route_to} onChange={e => setRuleForm({...ruleForm, route_to: e.target.value})} placeholder="Person name or team" /></div>

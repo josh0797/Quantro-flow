@@ -315,6 +315,134 @@ class QuantroOSAPITester:
         
         return True
 
+    def test_phase5_auto_execution(self):
+        """Test Phase 5 auto-execution pipeline and advanced escalation"""
+        print("   Testing Phase 5 auto-execution features...")
+        
+        # First, get current policies to understand auto_run settings
+        success, policies_data = self.run_test("Get Policies for Auto-execution Test", "GET", "policies", 200)
+        if not success:
+            return False
+            
+        # Find a policy with auto_run action for testing
+        auto_run_policy = None
+        for policy in policies_data:
+            if policy.get('high_action') == 'auto_run' or policy.get('action') == 'auto_run':
+                auto_run_policy = policy
+                break
+        
+        if not auto_run_policy:
+            print("   No auto_run policy found, setting booking policy to auto_run for testing...")
+            # Update booking policy to have auto_run for high confidence
+            booking_policy = next((p for p in policies_data if p.get('intent') == 'booking'), None)
+            if booking_policy:
+                update_data = {
+                    "intent": "booking",
+                    "action": "auto_run",
+                    "high_action": "auto_run",
+                    "medium_action": "require_approval",
+                    "low_action": "escalate",
+                    "enabled": True
+                }
+                self.run_test("Set Booking Policy to Auto-run", "PUT", f"policies/{booking_policy['policy_id']}", 200, update_data)
+        
+        # Test advanced escalation rule creation with new condition types
+        advanced_escalation_rules = [
+            {
+                "name": "Calendar Conflict Detection",
+                "condition_type": "calendar_conflict",
+                "condition_value": "any",
+                "route_to": "Calendar Manager",
+                "priority": "high",
+                "enabled": True
+            },
+            {
+                "name": "Incomplete Entity Detection",
+                "condition_type": "incomplete_entities", 
+                "condition_value": "person_name,email",
+                "route_to": "Data Quality Team",
+                "priority": "normal",
+                "enabled": True
+            },
+            {
+                "name": "Urgency Detection",
+                "condition_type": "urgency",
+                "condition_value": "any",
+                "route_to": "Priority Queue",
+                "priority": "critical",
+                "enabled": True
+            },
+            {
+                "name": "Contact Type Routing",
+                "condition_type": "contact_type",
+                "condition_value": "investor",
+                "route_to": "Investment Team",
+                "priority": "high", 
+                "enabled": True
+            }
+        ]
+        
+        created_rule_ids = []
+        for rule_data in advanced_escalation_rules:
+            success, created_rule = self.run_test(f"Create Advanced Escalation Rule: {rule_data['name']}", "POST", "escalation-rules", 200, rule_data)
+            if success and created_rule and 'rule_id' in created_rule:
+                created_rule_ids.append(created_rule['rule_id'])
+        
+        # Get inbox items to test auto-execution
+        success, inbox_data = self.run_test("Get All Inbox Items", "GET", "inbox", 200)
+        if success and inbox_data:
+            # Look for items that can be analyzed
+            unprocessed_items = [item for item in inbox_data if item.get('status') == 'new']
+            processed_items = [item for item in inbox_data if item.get('status') == 'processed']
+            
+            # Test single item analysis with auto-execution
+            if unprocessed_items:
+                test_item = unprocessed_items[0]
+                print(f"   Testing auto-execution on item: {test_item['subject'][:50]}...")
+                success, analyzed_item = self.run_test("Analyze Item for Auto-execution", "POST", f"inbox/{test_item['inbox_id']}/analyze", 200, timeout=25)
+                
+                if success and analyzed_item:
+                    # Check for auto-execution indicators
+                    auto_executed = analyzed_item.get('auto_executed', False)
+                    execution_results = analyzed_item.get('execution_results', [])
+                    policy_action = analyzed_item.get('policy_action')
+                    escalation = analyzed_item.get('escalation')
+                    
+                    print(f"   Auto-executed: {auto_executed}")
+                    print(f"   Policy action: {policy_action}")
+                    print(f"   Escalation: {escalation is not None}")
+                    if execution_results:
+                        print(f"   Execution results: {len(execution_results)} actions")
+                    
+                    # Verify auto-execution fields are properly set
+                    if auto_executed:
+                        if analyzed_item.get('status') != 'auto_actioned':
+                            self.failed_tests.append("Auto-executed item should have status=auto_actioned")
+                        if not analyzed_item.get('auto_executed_at'):
+                            self.failed_tests.append("Auto-executed item should have auto_executed_at timestamp")
+                        if not execution_results:
+                            self.failed_tests.append("Auto-executed item should have execution_results")
+            
+            # Test batch analysis with auto-execution
+            if len(unprocessed_items) >= 2:
+                batch_ids = [item['inbox_id'] for item in unprocessed_items[:2]]
+                print(f"   Testing batch auto-execution on {len(batch_ids)} items...")
+                batch_data = {"inbox_ids": batch_ids}
+                success, batch_result = self.run_test("Batch Analyze with Auto-execution", "POST", "inbox/batch-analyze", 200, batch_data, timeout=35)
+                
+                if success and batch_result:
+                    results = batch_result.get('results', [])
+                    auto_executed_count = sum(1 for r in results if r.get('auto_executed', False))
+                    escalated_count = sum(1 for r in results if r.get('escalation') is not None)
+                    
+                    print(f"   Batch results: {len(results)} processed, {auto_executed_count} auto-executed, {escalated_count} escalated")
+        
+        # Clean up created escalation rules
+        for rule_id in created_rule_ids:
+            self.run_test(f"Cleanup Escalation Rule", "DELETE", f"escalation-rules/{rule_id}", 200)
+        
+        return True
+
 def main():
     print("🚀 Starting Quantro One | Realty OS API Tests")
     print("=" * 60)
@@ -357,6 +485,9 @@ def main():
 
     print("\n🔄 BATCH OPERATIONS")
     tester.test_batch_operations()
+
+    print("\n⚡ PHASE 5 AUTO-EXECUTION PIPELINE")
+    tester.test_phase5_auto_execution()
 
     # Print final results
     print("\n" + "=" * 60)

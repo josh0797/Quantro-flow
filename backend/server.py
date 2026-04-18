@@ -121,6 +121,182 @@ async def log_activity(event_type, title, description, related_id=None, related_
     await activity_col.insert_one(event)
     return event
 
+# ─── Auto-Execution Engine ─────────────────────────────────────────────
+URGENCY_KEYWORDS = ["urgent", "asap", "immediately", "emergency", "critical", "right away", "time-sensitive", "rush"]
+
+async def execute_action_for_item(item, source="auto"):
+    """Execute the suggested action for an inbox item. Returns execution results."""
+    action = item.get("ai_suggested_action")
+    if not action:
+        return {"executed": False, "reason": "No action available"}
+    
+    action_type = action["type"]
+    entities = item.get("ai_intent", {}).get("entities", {})
+    results = []
+    
+    if action_type == "schedule_meeting":
+        event = {
+            "event_id": str(uuid.uuid4()),
+            "title": f"Meeting - {item['from_name']}",
+            "description": action["description"],
+            "start_time": (datetime.utcnow() + timedelta(days=1, hours=2)).isoformat(),
+            "end_time": (datetime.utcnow() + timedelta(days=1, hours=3)).isoformat(),
+            "location": entities.get("property", "TBD"),
+            "attendees": [item["from_name"]],
+            "status": "pending",
+            "source": f"ai_{source}",
+            "created_at": now_iso(),
+            "contact_id": item.get("contact_id"),
+        }
+        await calendar_col.insert_one(event)
+        await log_activity("calendar", f"Meeting auto-scheduled ({source})", f"Meeting with {item['from_name']} created automatically", event["event_id"], "calendar")
+        results.append({"type": "event_created", "event_id": event["event_id"]})
+    
+    elif action_type == "create_contact":
+        contact = {
+            "contact_id": str(uuid.uuid4()),
+            "name": entities.get("person_name", item["from_name"]),
+            "email": entities.get("email", item["from_email"]),
+            "phone": entities.get("phone", ""),
+            "type": "lead",
+            "lifecycle_stage": "new",
+            "source": f"inbox_{source}",
+            "ghl_sync_status": "pending",
+            "ghl_last_sync": None,
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+            "notes": item.get("ai_intent", {}).get("summary", ""),
+        }
+        await contacts_col.insert_one(contact)
+        await inbox_col.update_one({"inbox_id": item["inbox_id"]}, {"$set": {"contact_id": contact["contact_id"]}})
+        await log_activity("crm", f"Contact auto-created ({source})", f"New contact {contact['name']} created automatically", contact["contact_id"], "contact")
+        results.append({"type": "contact_created", "contact_id": contact["contact_id"]})
+    
+    elif action_type == "start_onboarding":
+        agent = {
+            "agent_id": str(uuid.uuid4()),
+            "name": entities.get("person_name", item["from_name"]),
+            "email": entities.get("email", item["from_email"]),
+            "phone": entities.get("phone", ""),
+            "role": "agent",
+            "status": "onboarding",
+            "start_date": datetime.utcnow().isoformat(),
+            "photo_url": None,
+            "created_at": now_iso(),
+        }
+        await agents_col.insert_one(agent)
+        for idx, title in enumerate(["Complete compliance training", "Set up CRM profile", "Configure email signature", "Schedule orientation with team lead", "Access granted to listing portal"]):
+            await onboarding_col.insert_one({"task_id": str(uuid.uuid4()), "agent_id": agent["agent_id"], "title": title, "description": f"Auto-generated step {idx+1}", "status": "pending", "order": idx + 1, "completed_at": None, "auto_generated": True})
+        await log_activity("onboarding", f"Onboarding auto-started ({source})", f"Agent {agent['name']} onboarding initiated automatically", agent["agent_id"], "agent")
+        results.append({"type": "agent_created", "agent_id": agent["agent_id"]})
+    
+    elif action_type == "send_follow_up":
+        await log_activity("inbox", f"Follow-up auto-queued ({source})", f"Follow-up for {item['from_name']} queued automatically", item["inbox_id"], "inbox")
+        results.append({"type": "follow_up_queued"})
+    
+    elif action_type == "ignore":
+        await log_activity("inbox", f"Auto-ignored ({source})", f"Message from {item['from_name']} auto-ignored (spam/irrelevant)", item["inbox_id"], "inbox")
+        results.append({"type": "ignored"})
+    
+    else:
+        await log_activity("inbox", f"Action auto-executed ({source})", f"Action '{action_type}' for {item['from_name']} executed automatically", item["inbox_id"], "inbox")
+        results.append({"type": action_type})
+    
+    # Mark as auto-actioned
+    await inbox_col.update_one(
+        {"inbox_id": item["inbox_id"]},
+        {"$set": {"status": "auto_actioned", "auto_executed": True, "auto_executed_at": now_iso(), "execution_source": source, "execution_results": results}}
+    )
+    
+    return {"executed": True, "action_type": action_type, "results": results}
+
+
+async def evaluate_advanced_escalation(item, intent, confidence, policy_action):
+    """Evaluate advanced escalation conditions beyond simple intent/keyword matching."""
+    escalation_info = None
+    escalation_reasons = []
+    
+    rules = await escalation_col.find({"enabled": True}).to_list(100)
+    entities = item.get("ai_intent", {}).get("entities", {})
+    text = f"{item.get('subject', '')} {item.get('body', '')}".lower()
+    
+    for rule in rules:
+        matched = False
+        
+        if rule["condition_type"] == "intent" and rule["condition_value"] == intent:
+            matched = True
+        
+        elif rule["condition_type"] == "keyword":
+            keywords = [k.strip().lower() for k in rule["condition_value"].split(",")]
+            if any(kw in text for kw in keywords):
+                matched = True
+        
+        elif rule["condition_type"] == "calendar_conflict":
+            # Check if a meeting is proposed and conflicts with existing events
+            if item.get("ai_suggested_action", {}).get("type") == "schedule_meeting":
+                proposed_dt = entities.get("date_time")
+                if proposed_dt:
+                    # Check for any events on the same day (simplified conflict check)
+                    existing_events = await calendar_col.find({}).to_list(100)
+                    for ev in existing_events:
+                        try:
+                            ev_start = ev.get("start_time", "")
+                            if proposed_dt.lower() in ev_start.lower() or ev_start[:10] == proposed_dt[:10]:
+                                matched = True
+                                escalation_reasons.append(f"Potential calendar conflict with '{ev.get('title', 'existing event')}'")
+                                break
+                        except Exception:
+                            pass
+                # Also trigger if there are many events that day
+                if not matched:
+                    from datetime import date
+                    today_str = date.today().isoformat()
+                    today_events = [e for e in await calendar_col.find({}).to_list(100) if today_str in e.get("start_time", "")]
+                    if len(today_events) >= 4:
+                        matched = True
+                        escalation_reasons.append(f"Calendar is busy ({len(today_events)} events today)")
+        
+        elif rule["condition_type"] == "incomplete_entities":
+            # Check if critical entities are missing
+            required_fields = [f.strip() for f in rule["condition_value"].split(",")]
+            missing = [f for f in required_fields if not entities.get(f)]
+            if missing:
+                matched = True
+                escalation_reasons.append(f"Missing information: {', '.join(missing)}")
+        
+        elif rule["condition_type"] == "urgency":
+            # Check for urgency indicators in the message
+            urgency_level = rule["condition_value"].lower()
+            found_keywords = [kw for kw in URGENCY_KEYWORDS if kw in text]
+            if urgency_level == "any" and found_keywords:
+                matched = True
+                escalation_reasons.append(f"Urgency detected: {', '.join(found_keywords)}")
+            elif urgency_level == "high" and len(found_keywords) >= 2:
+                matched = True
+                escalation_reasons.append(f"High urgency: {', '.join(found_keywords)}")
+        
+        elif rule["condition_type"] == "contact_type":
+            # Check contact type if linked
+            if item.get("contact_id"):
+                contact = await contacts_col.find_one({"contact_id": item["contact_id"]})
+                if contact and contact.get("type") == rule["condition_value"]:
+                    matched = True
+                    escalation_reasons.append(f"Contact type match: {rule['condition_value']}")
+                elif contact and contact.get("lifecycle_stage") == rule["condition_value"]:
+                    matched = True
+                    escalation_reasons.append(f"Lifecycle stage match: {rule['condition_value']}")
+        
+        if matched:
+            escalation_info = {
+                "rule": rule["name"],
+                "route_to": rule["route_to"],
+                "priority": rule["priority"],
+                "reasons": escalation_reasons if escalation_reasons else [f"Matched {rule['condition_type']}: {rule['condition_value']}"],
+            }
+            break
+    
+    return escalation_info
+
 # ─── Seed Data ─────────────────────────────────────────────────────────
 async def seed_database():
     count = await inbox_col.count_documents({})
@@ -451,19 +627,22 @@ async def analyze_inbox_item(inbox_id: str):
             policy_action = policy.get("medium_action", "require_approval")
         else:
             policy_action = policy.get("low_action", "escalate")
-        
-        if policy_action == "escalate":
-            esc_rules = await escalation_col.find({"enabled": True}).to_list(100)
-            for rule in esc_rules:
-                if rule["condition_type"] == "intent" and rule["condition_value"] == intent:
-                    escalation_info = {"rule": rule["name"], "route_to": rule["route_to"], "priority": rule["priority"]}
-                    break
-                elif rule["condition_type"] == "keyword":
-                    keywords = [k.strip().lower() for k in rule["condition_value"].split(",")]
-                    text = f"{item.get('subject', '')} {item.get('body', '')}".lower()
-                    if any(kw in text for kw in keywords):
-                        escalation_info = {"rule": rule["name"], "route_to": rule["route_to"], "priority": rule["priority"]}
-                        break
+    
+    # Evaluate advanced escalation conditions (applies to all policy actions)
+    updated_item = await inbox_col.find_one({"inbox_id": inbox_id})
+    escalation_info = await evaluate_advanced_escalation(updated_item, intent, confidence, policy_action)
+    
+    # If escalation triggered, override policy action
+    if escalation_info:
+        policy_action = "escalate"
+    
+    # Auto-execute if policy says auto_run and no escalation
+    auto_executed = False
+    execution_results = None
+    if policy_action == "auto_run" and not escalation_info:
+        exec_result = await execute_action_for_item(updated_item, source="single_analyze")
+        auto_executed = exec_result.get("executed", False)
+        execution_results = exec_result.get("results")
     
     await inbox_col.update_one(
         {"inbox_id": inbox_id},
@@ -647,20 +826,22 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest):
                     policy_action = policy.get("medium_action", "require_approval")
                 else:
                     policy_action = policy.get("low_action", "escalate")
-                
-                # Check escalation rules if needed
-                if policy_action == "escalate":
-                    esc_rules = await escalation_col.find({"enabled": True}).to_list(100)
-                    for rule in esc_rules:
-                        if rule["condition_type"] == "intent" and rule["condition_value"] == intent:
-                            escalation_info = {"rule": rule["name"], "route_to": rule["route_to"], "priority": rule["priority"]}
-                            break
-                        elif rule["condition_type"] == "keyword":
-                            keywords = [k.strip().lower() for k in rule["condition_value"].split(",")]
-                            text = f"{item.get('subject', '')} {item.get('body', '')}".lower()
-                            if any(kw in text for kw in keywords):
-                                escalation_info = {"rule": rule["name"], "route_to": rule["route_to"], "priority": rule["priority"]}
-                                break
+            
+            # Evaluate advanced escalation conditions (applies to all policy actions)
+            updated_item = await inbox_col.find_one({"inbox_id": inbox_id})
+            escalation_info = await evaluate_advanced_escalation(updated_item, intent, confidence, policy_action)
+            
+            # If escalation triggered, override policy action
+            if escalation_info:
+                policy_action = "escalate"
+            
+            # Auto-execute if policy says auto_run and no escalation
+            auto_executed = False
+            execution_results = None
+            if policy_action == "auto_run" and not escalation_info:
+                exec_result = await execute_action_for_item(updated_item, source="batch_analyze")
+                auto_executed = exec_result.get("executed", False)
+                execution_results = exec_result.get("results")
             
             # Store policy evaluation result on the item
             await inbox_col.update_one(
@@ -672,7 +853,17 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest):
             )
             
             updated = await inbox_col.find_one({"inbox_id": inbox_id})
-            results.append({"inbox_id": inbox_id, "status": "classified", "data": serialize_doc(updated), "policy_action": policy_action, "escalation": escalation_info})
+            result_data = {
+                "inbox_id": inbox_id,
+                "status": "classified",
+                "data": serialize_doc(updated),
+                "policy_action": policy_action,
+                "escalation": escalation_info,
+                "auto_executed": auto_executed,
+            }
+            if execution_results:
+                result_data["execution_results"] = execution_results
+            results.append(result_data)
             
         except Exception as e:
             await inbox_col.update_one(
