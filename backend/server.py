@@ -474,7 +474,7 @@ async def get_calendar_events():
     events = await calendar_col.find({}).sort("start_time", 1).to_list(100)
     return [serialize_doc(e) for e in events]
 
-@app.post("/api/calendar")
+@app.post("/api/calendar", status_code=201)
 async def create_calendar_event(req: CreateEventRequest):
     event = {
         "event_id": str(uuid.uuid4()),
