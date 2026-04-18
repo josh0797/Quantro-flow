@@ -3,22 +3,28 @@
 ## 1. Objectives
 - Deliver a premium **dark-only**, OS-like internal platform for real estate teams: **Quantro One | Realty OS**.
 - Ship a connected, production-feeling workflow with AI automation **and** a critical control layer:
-  **Smart Inbox item → GPT-4o triage (single + batch) → suggested action → manual override (edit/approve/skip) → (simulated) Calendar/CRM updates → Activity feed**.
-- Provide a multi-page, production-quality UI (Dashboard, Inbox, Schedule, CRM, Onboarding, Content Engine) with **connected seeded mock data** showing realistic operations.
+  **Smart Inbox item → GPT-4o triage (single + batch) → policy evaluation → suggested action → manual override (edit/approve/skip) → (simulated) Calendar/CRM updates → Activity feed**.
+- Provide a multi-page, production-quality UI (Dashboard, Inbox, Schedule, CRM, Onboarding, Content Engine, Automation) with **connected seeded mock data** showing realistic operations.
 - Ensure backend (FastAPI + MongoDB) provides clean entity modeling + append-only **activity event log** for traceability.
 - Transform the app from an automated demo into a **controllable workflow engine** via:
   - **Batch AI triage at scale**
   - **Manual Override UI (Review & Control)** as the trust + governance layer
+  - **Automation Policies** (per-intent + confidence thresholds) to operationalize when the system auto-executes vs requests approval
+  - **Escalation routing rules** to route edge-cases and low-confidence items to the right owner
+  - **Content Templates** as the consistent, on-brand communication layer
 
 **Current status (as of this update):**
-- **Phase 1, Phase 2, and Phase 3 complete**.
-- AI POC achieved **10/10** structured output tests.
-- Full app functional with seeded workflows.
-- End-to-end test pass rate **~96%** (Phase 2).
-- Phase 3 testing:
-  - **Backend: 100% pass** (batch triage + override endpoints validated)
+- ✅ **Phase 1, Phase 2, Phase 3, and Phase 4 complete**.
+- ✅ AI POC achieved **10/10** structured output tests.
+- ✅ Full app functional with seeded workflows.
+- ✅ Phase 2 E2E test pass rate **~96%**.
+- ✅ Phase 3 testing:
+  - **Backend: 100% pass**
   - **Frontend: ~90% pass** (checkbox “bug” was a false-positive due to Radix rendering as `button[role=checkbox]`, not native `input[type=checkbox]`)
-- Database reset performed to restore fresh seed data for demo/workflows.
+- ✅ Phase 4 testing:
+  - **Backend: 100% pass**
+  - **Frontend: ~95% pass** (only low-priority modal overlay click interception in automation dialogs during automation testing)
+- ✅ Database reset performed to restore fresh seed data for demo/workflows.
 
 ---
 
@@ -91,12 +97,7 @@
 
 **Close Phase 2 with testing**
 - Testing agent run produced **~96% overall pass rate**.
-- Minor findings were cosmetic; critical flows passed:
-  - AI analysis
-  - Approve/decline workflow
-  - CRUD for events/contacts
-  - Onboarding progress updates
-  - Content generation + storage
+- Minor findings were cosmetic; critical flows passed.
 
 ---
 
@@ -168,18 +169,122 @@
 
 **Copy + Trust (delivered)**
 - Removed technical AI wording in UI.
-  - Example: “This request is ready to be scheduled” vs “AI detected intent”.
 
 **Close Phase 3 with testing**
 - Testing agent results:
   - **Backend: 100% pass**
-  - **Frontend: ~90% pass**
-    - Reported checkbox “bug” was a false-positive due to Radix checkbox structure; functionality verified.
+  - **Frontend: ~90% pass** (checkbox false positive)
 - Post-test database reset performed to restore original demo flow.
 
 ---
 
-### Phase 4 — Optional: Authentication + multi-tenant readiness
+### Phase 4 — Workflow Governance + Communication Layer (Automation Policies + Templates)
+**Status: ✅ Completed**
+
+**Primary goal (achieved)**
+- Transform Quantro One into a production-ready workflow engine by:
+  - Defining when the system auto-executes vs requests approval vs escalates.
+  - Adding an on-brand communication layer via reusable templates + AI enhancement.
+
+#### 4.1 Automation Policies
+**Status: ✅ Implemented**
+
+**Delivered capabilities**
+- **7 intent policies** with confidence-based actions:
+  - Intents: `booking`, `follow_up`, `onboarding`, `inquiry`, `escalation`, `spam`, `needs_review`
+  - Confidence tiers with thresholds:
+    - High: ≥ 85%
+    - Medium: ≥ 60%
+    - Low: < 60%
+  - Actions: `auto_run`, `require_approval`, `manual_review`, `escalate`
+- Policies integrated into:
+  - `POST /api/inbox/{id}/analyze`
+  - `POST /api/inbox/batch-analyze`
+- Inbox UI now displays:
+  - Policy outcome badge (Auto-execute / Needs approval / Manual review / Escalated)
+
+**Backend (delivered)**
+- New collection: `automation_policies`
+- Endpoints:
+  - `GET /api/policies`
+  - `PUT /api/policies/{policy_id}`
+  - `GET /api/policies/evaluate/{inbox_id}`
+
+**Frontend (delivered)**
+- New page: **Automation** (`/automation`)
+  - Intent policy list with enable/disable toggle
+  - Confidence-based action dropdowns for high/medium/low
+
+#### 4.2 Escalation Routing Rules
+**Status: ✅ Implemented**
+
+**Delivered capabilities**
+- **5 predefined rules**:
+  - Urgent recruiting lead → **Larry**
+  - Incomplete onboarding data → **Ops/Admin**
+  - Calendar conflict → **Manual Review**
+  - Escalation intent → **Sophia Turner**
+  - Investor keywords → **Sophia Turner**
+- Condition types:
+  - `intent` match
+  - `keyword` match
+- Priority levels:
+  - `normal`, `high`, `critical`
+- Full CRUD + enable/disable.
+
+**Backend (delivered)**
+- New collection: `escalation_rules`
+- Endpoints:
+  - `GET /api/escalation-rules`
+  - `POST /api/escalation-rules`
+  - `PUT /api/escalation-rules/{rule_id}`
+  - `DELETE /api/escalation-rules/{rule_id}`
+
+**Frontend (delivered)**
+- Escalation Rules tab inside Automation page:
+  - List, create, edit, delete
+  - Enable/disable toggle
+
+#### 4.3 Content Templates (AI-Powered Communication Layer)
+**Status: ✅ Implemented**
+
+**Delivered capabilities**
+- **5 predefined templates**:
+  - Welcome Email
+  - Follow-up Message
+  - Recruiting Message
+  - New Listing Social Post
+  - Market Update Post
+- Variable system: `{{contact_name}}`, `{{situation}}`, etc.
+- “Generate with AI” produces AI-enhanced version via GPT-4o.
+- Generated output is saved to content library and labeled **From Template**.
+
+**Backend (delivered)**
+- New collection: `content_templates`
+- Endpoints:
+  - `GET /api/templates` (optional category filter)
+  - `GET /api/templates/{template_id}`
+  - `POST /api/templates`
+  - `PUT /api/templates/{template_id}`
+  - `DELETE /api/templates/{template_id}`
+  - `POST /api/templates/{template_id}/generate`
+
+**Frontend (delivered)**
+- Content Engine upgraded:
+  - **Templates** tab
+  - Template library view
+  - Preview panel (subject/body/variables/tags)
+  - Create template dialog
+  - Generate dialog with variable inputs + live preview + “Generate with AI”
+
+**Close Phase 4 with testing**
+- Testing agent results:
+  - **Backend: 100% pass**
+  - **Frontend: ~95% pass** (low-priority modal overlay click interception during automated tests)
+
+---
+
+### Phase 5 — Optional: Authentication + multi-tenant readiness
 **Status: ⏭️ Pending user approval**
 
 **User stories (planned)**
@@ -200,29 +305,34 @@
 - ✅ Phase 1 complete (AI POC + structured outputs).
 - ✅ Phase 2 complete (full app + seeded workflows + testing).
 - ✅ Phase 3 complete (batch triage + manual override workflow engine upgrade).
+- ✅ Phase 4 complete (automation policies + escalation rules + content templates).
 
 If you want to proceed next:
-1. Start **Phase 4** (auth + roles + multi-tenant readiness)
-2. Add workflow automation policies:
-   - per-intent “auto-run” vs “approval required”
-   - escalation routing rules
-3. Production hardening (optional): pagination, audit exports, indexing, more advanced connectors.
+1. Start **Phase 5** (auth + roles + multi-tenant readiness)
+2. Expand automation engine (optional):
+   - Auto-run execution pipeline (if/when you want fully unattended processing)
+   - Policy-driven auto-approve for `auto_run`
+   - More escalation conditions (calendar conflicts detection, incomplete entity validation)
+3. Production hardening (optional): pagination, indexing, audit export UI, and advanced connectors.
 
 ---
 
 ## 4. Success Criteria
 
-**Achieved (V1 + Phase 3):**
+**Achieved (V1 + Phase 3 + Phase 4):**
 - Core workflow reliable:
-  - **Inbox → AI intent (single + batch) → manual control (adjust/approve/skip) → calendar/CRM updates → activity feed**.
+  - **Inbox → AI intent (single + batch) → policy evaluation → manual control (adjust/approve/skip) → calendar/CRM updates → activity feed**.
 - Premium OS-like UI:
   - Dark-only, calm, minimal, system-driven.
 - Connected seeded data demonstrates end-to-end workflows.
 - AI failures degrade safely to `needs_review`.
 - Batch triage delivers real-time processing feel via status transitions + UI indicators.
 - Manual Override UI provides a trustworthy control layer for automation governance.
+- Automation policies and escalation routing operationalize “when to run” and “who owns edge cases”.
+- Template-based communication enables fast, consistent, on-brand content production.
 
-**Next success criteria (Phase 4+):**
+**Next success criteria (Phase 5+):**
 - Authentication + role-based access.
 - Workspace scoping for multi-tenant operation.
-- Configurable automation policies and exportable audit logs.
+- Policy, escalation, and templates scoped per workspace.
+- Exportable audit logs + compliance-ready activity trail.
