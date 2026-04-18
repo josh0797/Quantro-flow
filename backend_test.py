@@ -204,6 +204,117 @@ class QuantroOSAPITester:
         """Test system status"""
         return self.run_test("System Status", "GET", "system/status", 200)
 
+    def test_automation_policies(self):
+        """Test automation policies operations"""
+        # Get all policies
+        success, policies_data = self.run_test("Get Automation Policies", "GET", "policies", 200)
+        
+        if success and policies_data and len(policies_data) > 0:
+            # Test updating a policy
+            policy_id = policies_data[0].get('policy_id')
+            if policy_id:
+                update_data = {
+                    "intent": policies_data[0].get('intent'),
+                    "action": "require_approval",
+                    "high_action": "auto_run",
+                    "medium_action": "require_approval", 
+                    "low_action": "escalate",
+                    "enabled": True
+                }
+                self.run_test("Update Automation Policy", "PUT", f"policies/{policy_id}", 200, update_data)
+        
+        return True
+
+    def test_escalation_rules(self):
+        """Test escalation rules operations"""
+        # Get all escalation rules
+        success, rules_data = self.run_test("Get Escalation Rules", "GET", "escalation-rules", 200)
+        
+        # Create new escalation rule
+        new_rule = {
+            "name": "Test Escalation Rule",
+            "condition_type": "keyword",
+            "condition_value": "urgent,emergency",
+            "route_to": "Test Manager",
+            "priority": "high",
+            "enabled": True
+        }
+        success, created_rule = self.run_test("Create Escalation Rule", "POST", "escalation-rules", 200, new_rule)
+        
+        # Update and delete the created rule
+        if success and created_rule and 'rule_id' in created_rule:
+            rule_id = created_rule['rule_id']
+            update_data = {**new_rule, "priority": "critical"}
+            self.run_test("Update Escalation Rule", "PUT", f"escalation-rules/{rule_id}", 200, update_data)
+            self.run_test("Delete Escalation Rule", "DELETE", f"escalation-rules/{rule_id}", 200)
+        
+        return True
+
+    def test_content_templates(self):
+        """Test content templates operations"""
+        # Get all templates
+        success, templates_data = self.run_test("Get Content Templates", "GET", "templates", 200)
+        
+        # Test filtering by category
+        self.run_test("Get Welcome Templates", "GET", "templates?category=welcome", 200)
+        
+        # Create new template
+        new_template = {
+            "name": "Test Template",
+            "category": "follow_up",
+            "template_type": "email",
+            "subject_template": "Following up: {{subject}}",
+            "body_template": "Hi {{contact_name}},\n\nJust following up on {{situation}}.\n\nBest regards,\nThe Team",
+            "variables": ["contact_name", "subject", "situation"],
+            "tags": ["test", "follow-up"]
+        }
+        success, created_template = self.run_test("Create Content Template", "POST", "templates", 200, new_template)
+        
+        # Test template generation and cleanup
+        if success and created_template and 'template_id' in created_template:
+            template_id = created_template['template_id']
+            
+            # Get specific template
+            self.run_test("Get Template Detail", "GET", f"templates/{template_id}", 200)
+            
+            # Generate from template (AI operation - may take longer)
+            print("   Testing template generation (may take 10-15 seconds)...")
+            generation_data = {
+                "template_id": template_id,
+                "context": {
+                    "contact_name": "John Doe",
+                    "subject": "Property Inquiry",
+                    "situation": "your interest in downtown properties"
+                }
+            }
+            self.run_test("Generate from Template", "POST", f"templates/{template_id}/generate", 200, generation_data, timeout=20)
+            
+            # Delete the created template
+            self.run_test("Delete Content Template", "DELETE", f"templates/{template_id}", 200)
+        
+        return True
+
+    def test_batch_operations(self):
+        """Test batch inbox operations"""
+        # Get inbox items for batch testing
+        success, inbox_data = self.run_test("Get Inbox for Batch", "GET", "inbox?status=new", 200)
+        
+        if success and inbox_data and len(inbox_data) > 0:
+            # Get up to 2 inbox IDs for batch testing
+            inbox_ids = [item['inbox_id'] for item in inbox_data[:2]]
+            
+            # Test batch analyze (AI operation - may take longer)
+            print("   Testing batch AI analysis (may take 15-20 seconds)...")
+            batch_analyze_data = {"inbox_ids": inbox_ids}
+            success, batch_result = self.run_test("Batch Analyze Inbox", "POST", "inbox/batch-analyze", 200, batch_analyze_data, timeout=30)
+            
+            # Test batch approve if analysis was successful
+            if success and batch_result:
+                print("   Testing batch approval...")
+                self.run_test("Batch Approve Inbox", "POST", "inbox/batch-approve", 200, batch_analyze_data, timeout=15)
+        
+        return True
+
 def main():
     print("🚀 Starting Quantro One | Realty OS API Tests")
     print("=" * 60)
@@ -234,6 +345,18 @@ def main():
     print("\n📈 ACTIVITY & SYSTEM")
     tester.test_activity_operations()
     tester.test_system_status()
+
+    print("\n🤖 AUTOMATION POLICIES")
+    tester.test_automation_policies()
+
+    print("\n🚨 ESCALATION RULES")
+    tester.test_escalation_rules()
+
+    print("\n📝 CONTENT TEMPLATES")
+    tester.test_content_templates()
+
+    print("\n🔄 BATCH OPERATIONS")
+    tester.test_batch_operations()
 
     # Print final results
     print("\n" + "=" * 60)

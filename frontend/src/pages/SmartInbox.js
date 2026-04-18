@@ -55,6 +55,13 @@ const statusConfig = {
   declined: { label: 'Skipped', color: 'bg-[hsl(var(--muted-foreground)/0.15)] text-[hsl(var(--muted-foreground))]' },
 };
 
+const policyActionLabels = {
+  auto_run: { label: 'Auto-execute', color: 'text-[hsl(var(--success))]', icon: '⚡' },
+  require_approval: { label: 'Needs approval', color: 'text-[hsl(var(--warning))]', icon: '🔒' },
+  manual_review: { label: 'Manual review', color: 'text-[hsl(var(--info))]', icon: '👁' },
+  escalate: { label: 'Escalated', color: 'text-[hsl(var(--critical))]', icon: '🔺' },
+};
+
 function getConfidenceLabel(confidence) {
   if (confidence >= 0.85) return { label: 'High', color: 'text-[hsl(var(--success))]' };
   if (confidence >= 0.6) return { label: 'Medium', color: 'text-[hsl(var(--warning))]' };
@@ -546,6 +553,21 @@ function TriageView({ items, loading, selectedIds, toggleSelect, selectedItem, s
                           → {actionLabels[item.ai_suggested_action.type] || item.ai_suggested_action.type}
                         </span>
                       )}
+                      {item.policy_action && (
+                        <Badge className={`text-[9px] ml-auto ${
+                          item.policy_action === 'auto_run' ? 'bg-[hsl(var(--success)/0.12)] text-[hsl(var(--success))]' :
+                          item.policy_action === 'require_approval' ? 'bg-[hsl(var(--warning)/0.12)] text-[hsl(var(--warning))]' :
+                          item.policy_action === 'escalate' ? 'bg-[hsl(var(--critical)/0.12)] text-[hsl(var(--critical))]' :
+                          'bg-[hsl(var(--info)/0.12)] text-[hsl(var(--info))]'
+                        }`}>
+                          {policyActionLabels[item.policy_action]?.label || item.policy_action}
+                        </Badge>
+                      )}
+                      {item.escalation && (
+                        <span className="text-[10px] text-[hsl(var(--critical))]">
+                          → {item.escalation.route_to}
+                        </span>
+                      )}
                     </div>
                   )}
 
@@ -748,6 +770,42 @@ function ReviewDetailPanel({ item, approving, handleApproveWithOverrides, handle
               <p className="text-[10px] text-muted-foreground mb-1">Summary</p>
               <p className="text-sm">{item.ai_intent.summary}</p>
             </div>
+
+            {/* Policy Evaluation */}
+            {item.policy_action && (
+              <div className={`p-3 rounded-lg border mb-4 ${
+                item.policy_action === 'auto_run' ? 'bg-[hsl(var(--success)/0.06)] border-[hsl(var(--success)/0.15)]' :
+                item.policy_action === 'escalate' ? 'bg-[hsl(var(--critical)/0.06)] border-[hsl(var(--critical)/0.15)]' :
+                item.policy_action === 'require_approval' ? 'bg-[hsl(var(--warning)/0.06)] border-[hsl(var(--warning)/0.15)]' :
+                'bg-[hsl(var(--info)/0.06)] border-[hsl(var(--info)/0.15)]'
+              }`}>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Shield size={12} className={policyActionLabels[item.policy_action]?.color || ''} />
+                    <span className="text-xs font-medium">Automation Policy</span>
+                  </div>
+                  <Badge className={`text-[10px] ${
+                    item.policy_action === 'auto_run' ? 'bg-[hsl(var(--success)/0.15)] text-[hsl(var(--success))]' :
+                    item.policy_action === 'require_approval' ? 'bg-[hsl(var(--warning)/0.15)] text-[hsl(var(--warning))]' :
+                    item.policy_action === 'escalate' ? 'bg-[hsl(var(--critical)/0.15)] text-[hsl(var(--critical))]' :
+                    'bg-[hsl(var(--info)/0.15)] text-[hsl(var(--info))]'
+                  }`}>
+                    {policyActionLabels[item.policy_action]?.label || item.policy_action}
+                  </Badge>
+                </div>
+                {item.escalation && (
+                  <div className="flex items-center gap-2 mt-2 pt-2 border-t border-[hsl(var(--border)/0.5)]">
+                    <AlertTriangle size={12} className="text-[hsl(var(--critical))]" />
+                    <span className="text-xs">Routed to <span className="font-semibold">{item.escalation.route_to}</span></span>
+                    <Badge className={`text-[9px] ml-auto ${
+                      item.escalation.priority === 'critical' ? 'bg-[hsl(var(--critical)/0.15)] text-[hsl(var(--critical))]' :
+                      item.escalation.priority === 'high' ? 'bg-[hsl(var(--warning)/0.15)] text-[hsl(var(--warning))]' :
+                      'bg-[hsl(var(--muted-foreground)/0.15)] text-[hsl(var(--muted-foreground))]'
+                    }`}>{item.escalation.priority}</Badge>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Extracted Info */}
             {Object.values(entities).some(v => v) && (

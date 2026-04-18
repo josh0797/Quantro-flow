@@ -50,4 +50,23 @@ export const getActivity = (limit = 20, eventType) => api.get('/activity', { par
 // System
 export const getSystemStatus = () => api.get('/system/status').then(r => r.data);
 
+// Automation Policies
+export const getPolicies = () => api.get('/policies').then(r => r.data);
+export const updatePolicy = (id, data) => api.put(`/policies/${id}`, data).then(r => r.data);
+export const evaluatePolicy = (inboxId) => api.get(`/policies/evaluate/${inboxId}`).then(r => r.data);
+
+// Escalation Rules
+export const getEscalationRules = () => api.get('/escalation-rules').then(r => r.data);
+export const createEscalationRule = (data) => api.post('/escalation-rules', data).then(r => r.data);
+export const updateEscalationRule = (id, data) => api.put(`/escalation-rules/${id}`, data).then(r => r.data);
+export const deleteEscalationRule = (id) => api.delete(`/escalation-rules/${id}`).then(r => r.data);
+
+// Content Templates
+export const getTemplates = (category) => api.get('/templates', { params: category ? { category } : {} }).then(r => r.data);
+export const getTemplate = (id) => api.get(`/templates/${id}`).then(r => r.data);
+export const createTemplate = (data) => api.post('/templates', data).then(r => r.data);
+export const updateTemplate = (id, data) => api.put(`/templates/${id}`, data).then(r => r.data);
+export const deleteTemplate = (id) => api.delete(`/templates/${id}`).then(r => r.data);
+export const generateFromTemplate = (id, context) => api.post(`/templates/${id}/generate`, { template_id: id, context }).then(r => r.data);
+
 export default api;

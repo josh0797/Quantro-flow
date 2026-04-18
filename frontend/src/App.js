@@ -8,6 +8,7 @@ import Schedule from './pages/Schedule';
 import CRM from './pages/CRM';
 import Onboarding from './pages/Onboarding';
 import ContentEngine from './pages/ContentEngine';
+import AutomationPolicies from './pages/AutomationPolicies';
 import './App.css';
 
 function App() {
@@ -25,6 +26,7 @@ function App() {
             <Route path="/crm" element={<CRM />} />
             <Route path="/onboarding" element={<Onboarding />} />
             <Route path="/content" element={<ContentEngine />} />
+            <Route path="/automation" element={<AutomationPolicies />} />
           </Routes>
         </main>
         <Toaster position="bottom-right" theme="dark" />

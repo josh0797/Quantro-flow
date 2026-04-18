@@ -1,22 +1,26 @@
 [
   {
-    "content": "Phase 3: Backend - Batch AI triage endpoint + processing status + manual override/edit endpoints",
+    "content": "Phase 4: Backend - Automation policies (per-intent + confidence rules), escalation routing",
     "status": "completed"
   },
   {
-    "content": "Phase 3: Frontend - Batch Triage UI with selection, processing indicators, bulk actions",
+    "content": "Phase 4: Backend - Content templates (CRUD + AI generation from template context)",
     "status": "completed"
   },
   {
-    "content": "Phase 3: Frontend - Manual Override UI (the critical control layer) with edit/approve/reject",
+    "content": "Phase 4: Frontend - Automation Policies settings page with intent rules + confidence thresholds + escalation routing",
     "status": "completed"
   },
   {
-    "content": "Phase 3: Human-friendly copy, confidence levels (High/Medium/Low), polished UX",
+    "content": "Phase 4: Frontend - Content Templates library with preview, edit, and AI generation",
     "status": "completed"
   },
   {
-    "content": "Phase 3: End to End Testing using Testing Agent",
+    "content": "Phase 4: Integrate policies into inbox triage flow (auto-run, require approval, escalate)",
     "status": "completed"
+  },
+  {
+    "content": "Phase 4: End to End Testing using Testing Agent",
+    "status": "in_progress"
   }
 ]

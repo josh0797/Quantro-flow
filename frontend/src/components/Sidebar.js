@@ -1,6 +1,6 @@
 import React from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Inbox, Calendar, Users, UserPlus, PenTool, Activity, ChevronLeft, ChevronRight, Zap } from 'lucide-react';
+import { LayoutDashboard, Inbox, Calendar, Users, UserPlus, PenTool, ChevronLeft, ChevronRight, Zap, Settings2 } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { getSystemStatus } from '../lib/api';
 
@@ -11,6 +11,7 @@ const navItems = [
   { to: '/crm', icon: Users, label: 'CRM', testId: 'nav-crm' },
   { to: '/onboarding', icon: UserPlus, label: 'Onboarding', testId: 'nav-onboarding' },
   { to: '/content', icon: PenTool, label: 'Content Engine', testId: 'nav-content-engine' },
+  { to: '/automation', icon: Settings2, label: 'Automation', testId: 'nav-automation' },
 ];
 
 export default function Sidebar() {

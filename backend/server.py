@@ -30,6 +30,9 @@ agents_col = db["agents"]
 onboarding_col = db["onboarding_tasks"]
 content_col = db["content_items"]
 activity_col = db["activity_events"]
+policies_col = db["automation_policies"]
+escalation_col = db["escalation_rules"]
+templates_col = db["content_templates"]
 
 # ─── Helpers ───────────────────────────────────────────────────────────
 def serialize_doc(doc):
@@ -201,6 +204,38 @@ async def seed_database():
     ]
     await activity_col.insert_many(activity_events)
 
+    # Automation Policies (per-intent rules)
+    policies = [
+        {"policy_id": str(uuid.uuid4()), "intent": "booking", "action": "auto_run", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "auto_run", "medium_action": "require_approval", "low_action": "escalate", "enabled": True, "created_at": now},
+        {"policy_id": str(uuid.uuid4()), "intent": "follow_up", "action": "require_approval", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "require_approval", "medium_action": "require_approval", "low_action": "escalate", "enabled": True, "created_at": now},
+        {"policy_id": str(uuid.uuid4()), "intent": "onboarding", "action": "require_approval", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "require_approval", "medium_action": "require_approval", "low_action": "escalate", "enabled": True, "created_at": now},
+        {"policy_id": str(uuid.uuid4()), "intent": "inquiry", "action": "manual_review", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "manual_review", "medium_action": "manual_review", "low_action": "escalate", "enabled": True, "created_at": now},
+        {"policy_id": str(uuid.uuid4()), "intent": "escalation", "action": "escalate", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "escalate", "medium_action": "escalate", "low_action": "escalate", "enabled": True, "created_at": now},
+        {"policy_id": str(uuid.uuid4()), "intent": "spam", "action": "auto_run", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "auto_run", "medium_action": "manual_review", "low_action": "manual_review", "enabled": True, "created_at": now},
+        {"policy_id": str(uuid.uuid4()), "intent": "needs_review", "action": "manual_review", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "manual_review", "medium_action": "manual_review", "low_action": "escalate", "enabled": True, "created_at": now},
+    ]
+    await policies_col.insert_many(policies)
+
+    # Escalation Rules
+    escalation_rules = [
+        {"rule_id": str(uuid.uuid4()), "name": "Urgent recruiting leads", "condition_type": "intent", "condition_value": "onboarding", "route_to": "Larry", "priority": "high", "enabled": True, "created_at": now},
+        {"rule_id": str(uuid.uuid4()), "name": "Incomplete onboarding data", "condition_type": "keyword", "condition_value": "incomplete,missing,setup", "route_to": "Ops/Admin", "priority": "normal", "enabled": True, "created_at": now},
+        {"rule_id": str(uuid.uuid4()), "name": "Calendar conflicts", "condition_type": "keyword", "condition_value": "conflict,reschedule,cancel", "route_to": "Manual Review", "priority": "normal", "enabled": True, "created_at": now},
+        {"rule_id": str(uuid.uuid4()), "name": "Escalation requests", "condition_type": "intent", "condition_value": "escalation", "route_to": "Sophia Turner", "priority": "critical", "enabled": True, "created_at": now},
+        {"rule_id": str(uuid.uuid4()), "name": "High-value investor inquiries", "condition_type": "keyword", "condition_value": "investor,investment,portfolio", "route_to": "Sophia Turner", "priority": "high", "enabled": True, "created_at": now},
+    ]
+    await escalation_col.insert_many(escalation_rules)
+
+    # Content Templates
+    templates = [
+        {"template_id": str(uuid.uuid4()), "name": "Welcome Email", "category": "welcome", "template_type": "email", "subject_template": "Welcome to our team, {{contact_name}}!", "body_template": "Dear {{contact_name}},\n\nWelcome to the team! We're thrilled to have you on board.\n\n{{situation}}\n\nPlease don't hesitate to reach out if you need anything during your transition. We're here to help you succeed.\n\nBest regards,\nThe Quantro Team", "variables": ["contact_name", "situation"], "tags": ["onboarding", "welcome"], "status": "active", "created_at": now, "created_by": "system"},
+        {"template_id": str(uuid.uuid4()), "name": "Follow-up Message", "category": "follow_up", "template_type": "email", "subject_template": "Following up: {{subject}}", "body_template": "Hi {{contact_name}},\n\nI wanted to follow up on {{subject}}. {{situation}}\n\nPlease let me know if you have any questions or if there's anything else I can help with.\n\nBest,\nThe Quantro Team", "variables": ["contact_name", "subject", "situation"], "tags": ["follow-up", "client"], "status": "active", "created_at": now, "created_by": "system"},
+        {"template_id": str(uuid.uuid4()), "name": "Recruiting Message", "category": "recruiting", "template_type": "email", "subject_template": "Exciting opportunity at our firm", "body_template": "Hi {{contact_name}},\n\nWe're expanding our team and your profile caught our attention. {{situation}}\n\nWe'd love to discuss how you could be a great fit for our growing real estate team. Would you be available for a brief call this week?\n\nLooking forward to connecting,\nThe Quantro Team", "variables": ["contact_name", "situation"], "tags": ["recruiting", "agent"], "status": "active", "created_at": now, "created_by": "system"},
+        {"template_id": str(uuid.uuid4()), "name": "New Listing Social Post", "category": "social", "template_type": "social_post", "subject_template": None, "body_template": "Just listed! {{property_details}}. {{highlight}}. Contact us today for a private showing. #NewListing #RealEstate #{{location}}", "variables": ["property_details", "highlight", "location"], "tags": ["listing", "social"], "status": "active", "created_at": now, "created_by": "system"},
+        {"template_id": str(uuid.uuid4()), "name": "Market Update Post", "category": "market_update", "template_type": "social_post", "subject_template": None, "body_template": "Market Update: {{market_data}}. {{insight}}. Whether you're buying or selling, now is the time to strategize. #MarketUpdate #RealEstate", "variables": ["market_data", "insight"], "tags": ["market", "social", "update"], "status": "active", "created_at": now, "created_by": "system"},
+    ]
+    await templates_col.insert_many(templates)
+
     print(f"Seeded database with connected mock data")
 
 # ─── Pydantic Models ───────────────────────────────────────────────────
@@ -255,6 +290,37 @@ class ApproveWithOverridesRequest(BaseModel):
     contact_name: Optional[str] = None
     contact_email: Optional[str] = None
     contact_phone: Optional[str] = None
+
+class AutomationPolicyRequest(BaseModel):
+    intent: str
+    action: str  # auto_run, require_approval, manual_review, escalate
+    confidence_threshold_high: float = 0.85
+    confidence_threshold_medium: float = 0.6
+    high_action: str = "auto_run"
+    medium_action: str = "require_approval"
+    low_action: str = "escalate"
+    enabled: bool = True
+
+class EscalationRuleRequest(BaseModel):
+    name: str
+    condition_type: str  # intent, keyword, confidence, contact_type
+    condition_value: str
+    route_to: str  # person name or team
+    priority: str = "normal"  # normal, high, critical
+    enabled: bool = True
+
+class ContentTemplateRequest(BaseModel):
+    name: str
+    category: str  # welcome, follow_up, recruiting, social, market_update
+    template_type: str  # email, social_post
+    subject_template: Optional[str] = None
+    body_template: str
+    variables: List[str] = []
+    tags: List[str] = []
+
+class GenerateFromTemplateRequest(BaseModel):
+    template_id: str
+    context: dict = {}  # e.g. {"contact_name": "Sarah", "situation": "new lead"}
 
 # ─── Lifespan ──────────────────────────────────────────────────────────
 @asynccontextmanager
@@ -370,6 +436,39 @@ async def analyze_inbox_item(inbox_id: str):
     )
     
     await log_activity("ai", "AI processed inbox", f"Intent: {ai_result['intent']} ({ai_result['confidence']:.0%}) - {ai_result['summary']}", inbox_id, "inbox")
+    
+    # Evaluate policy
+    intent = ai_result["intent"]
+    confidence = ai_result["confidence"]
+    policy = await policies_col.find_one({"intent": intent, "enabled": True})
+    policy_action = "manual_review"
+    escalation_info = None
+    
+    if policy:
+        if confidence >= policy.get("confidence_threshold_high", 0.85):
+            policy_action = policy.get("high_action", "auto_run")
+        elif confidence >= policy.get("confidence_threshold_medium", 0.6):
+            policy_action = policy.get("medium_action", "require_approval")
+        else:
+            policy_action = policy.get("low_action", "escalate")
+        
+        if policy_action == "escalate":
+            esc_rules = await escalation_col.find({"enabled": True}).to_list(100)
+            for rule in esc_rules:
+                if rule["condition_type"] == "intent" and rule["condition_value"] == intent:
+                    escalation_info = {"rule": rule["name"], "route_to": rule["route_to"], "priority": rule["priority"]}
+                    break
+                elif rule["condition_type"] == "keyword":
+                    keywords = [k.strip().lower() for k in rule["condition_value"].split(",")]
+                    text = f"{item.get('subject', '')} {item.get('body', '')}".lower()
+                    if any(kw in text for kw in keywords):
+                        escalation_info = {"rule": rule["name"], "route_to": rule["route_to"], "priority": rule["priority"]}
+                        break
+    
+    await inbox_col.update_one(
+        {"inbox_id": inbox_id},
+        {"$set": {"policy_action": policy_action, "escalation": escalation_info}}
+    )
     
     updated = await inbox_col.find_one({"inbox_id": inbox_id})
     return serialize_doc(updated)
@@ -534,8 +633,46 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest):
             
             await log_activity("ai", "Batch triage classified", f"{item['from_name']}: {ai_result['intent']} ({ai_result['confidence']:.0%})", inbox_id, "inbox")
             
+            # Evaluate policy for this item
+            intent = ai_result["intent"]
+            confidence = ai_result["confidence"]
+            policy = await policies_col.find_one({"intent": intent, "enabled": True})
+            policy_action = "manual_review"
+            escalation_info = None
+            
+            if policy:
+                if confidence >= policy.get("confidence_threshold_high", 0.85):
+                    policy_action = policy.get("high_action", "auto_run")
+                elif confidence >= policy.get("confidence_threshold_medium", 0.6):
+                    policy_action = policy.get("medium_action", "require_approval")
+                else:
+                    policy_action = policy.get("low_action", "escalate")
+                
+                # Check escalation rules if needed
+                if policy_action == "escalate":
+                    esc_rules = await escalation_col.find({"enabled": True}).to_list(100)
+                    for rule in esc_rules:
+                        if rule["condition_type"] == "intent" and rule["condition_value"] == intent:
+                            escalation_info = {"rule": rule["name"], "route_to": rule["route_to"], "priority": rule["priority"]}
+                            break
+                        elif rule["condition_type"] == "keyword":
+                            keywords = [k.strip().lower() for k in rule["condition_value"].split(",")]
+                            text = f"{item.get('subject', '')} {item.get('body', '')}".lower()
+                            if any(kw in text for kw in keywords):
+                                escalation_info = {"rule": rule["name"], "route_to": rule["route_to"], "priority": rule["priority"]}
+                                break
+            
+            # Store policy evaluation result on the item
+            await inbox_col.update_one(
+                {"inbox_id": inbox_id},
+                {"$set": {
+                    "policy_action": policy_action,
+                    "escalation": escalation_info,
+                }}
+            )
+            
             updated = await inbox_col.find_one({"inbox_id": inbox_id})
-            results.append({"inbox_id": inbox_id, "status": "classified", "data": serialize_doc(updated)})
+            results.append({"inbox_id": inbox_id, "status": "classified", "data": serialize_doc(updated), "policy_action": policy_action, "escalation": escalation_info})
             
         except Exception as e:
             await inbox_col.update_one(
@@ -983,6 +1120,258 @@ async def get_activity(limit: int = Query(default=20, le=100), event_type: Optio
         query["event_type"] = event_type
     events = await activity_col.find(query).sort("timestamp", -1).to_list(limit)
     return [serialize_doc(e) for e in events]
+
+# ─── Automation Policies ───────────────────────────────────────────────
+@app.get("/api/policies")
+async def get_policies():
+    policies = await policies_col.find({}).to_list(100)
+    return [serialize_doc(p) for p in policies]
+
+@app.put("/api/policies/{policy_id}")
+async def update_policy(policy_id: str, req: AutomationPolicyRequest):
+    update = {
+        "intent": req.intent,
+        "action": req.action,
+        "confidence_threshold_high": req.confidence_threshold_high,
+        "confidence_threshold_medium": req.confidence_threshold_medium,
+        "high_action": req.high_action,
+        "medium_action": req.medium_action,
+        "low_action": req.low_action,
+        "enabled": req.enabled,
+        "updated_at": now_iso(),
+    }
+    result = await policies_col.update_one({"policy_id": policy_id}, {"$set": update})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    await log_activity("system", "Policy updated", f"Automation policy for '{req.intent}' updated", policy_id, "policy")
+    updated = await policies_col.find_one({"policy_id": policy_id})
+    return serialize_doc(updated)
+
+@app.get("/api/policies/evaluate/{inbox_id}")
+async def evaluate_policy_for_item(inbox_id: str):
+    """Evaluate what action a policy would take for a given inbox item."""
+    item = await inbox_col.find_one({"inbox_id": inbox_id})
+    if not item or not item.get("ai_intent"):
+        return {"action": "manual_review", "reason": "No AI classification available", "escalation": None}
+    
+    intent = item["ai_intent"]["intent"]
+    confidence = item["ai_intent"]["confidence"]
+    
+    policy = await policies_col.find_one({"intent": intent, "enabled": True})
+    if not policy:
+        return {"action": "manual_review", "reason": f"No policy defined for '{intent}'", "escalation": None}
+    
+    # Determine action based on confidence thresholds
+    if confidence >= policy.get("confidence_threshold_high", 0.85):
+        resolved_action = policy.get("high_action", "auto_run")
+    elif confidence >= policy.get("confidence_threshold_medium", 0.6):
+        resolved_action = policy.get("medium_action", "require_approval")
+    else:
+        resolved_action = policy.get("low_action", "escalate")
+    
+    # Check escalation rules
+    escalation = None
+    if resolved_action == "escalate":
+        rules = await escalation_col.find({"enabled": True}).to_list(100)
+        for rule in rules:
+            if rule["condition_type"] == "intent" and rule["condition_value"] == intent:
+                escalation = {"rule": rule["name"], "route_to": rule["route_to"], "priority": rule["priority"]}
+                break
+            elif rule["condition_type"] == "keyword":
+                keywords = [k.strip().lower() for k in rule["condition_value"].split(",")]
+                text = f"{item.get('subject', '')} {item.get('body', '')}".lower()
+                if any(kw in text for kw in keywords):
+                    escalation = {"rule": rule["name"], "route_to": rule["route_to"], "priority": rule["priority"]}
+                    break
+    
+    return {
+        "action": resolved_action,
+        "reason": f"Policy '{intent}': confidence {confidence:.0%} → {resolved_action}",
+        "policy_id": policy["policy_id"],
+        "confidence_level": "high" if confidence >= policy.get("confidence_threshold_high", 0.85) else ("medium" if confidence >= policy.get("confidence_threshold_medium", 0.6) else "low"),
+        "escalation": escalation,
+    }
+
+# ─── Escalation Rules ─────────────────────────────────────────────────
+@app.get("/api/escalation-rules")
+async def get_escalation_rules():
+    rules = await escalation_col.find({}).to_list(100)
+    return [serialize_doc(r) for r in rules]
+
+@app.post("/api/escalation-rules")
+async def create_escalation_rule(req: EscalationRuleRequest):
+    rule = {
+        "rule_id": str(uuid.uuid4()),
+        "name": req.name,
+        "condition_type": req.condition_type,
+        "condition_value": req.condition_value,
+        "route_to": req.route_to,
+        "priority": req.priority,
+        "enabled": req.enabled,
+        "created_at": now_iso(),
+    }
+    await escalation_col.insert_one(rule)
+    await log_activity("system", "Escalation rule created", f"New rule: {req.name} → {req.route_to}", rule["rule_id"], "escalation")
+    return serialize_doc(rule)
+
+@app.put("/api/escalation-rules/{rule_id}")
+async def update_escalation_rule(rule_id: str, req: EscalationRuleRequest):
+    update = {
+        "name": req.name,
+        "condition_type": req.condition_type,
+        "condition_value": req.condition_value,
+        "route_to": req.route_to,
+        "priority": req.priority,
+        "enabled": req.enabled,
+        "updated_at": now_iso(),
+    }
+    result = await escalation_col.update_one({"rule_id": rule_id}, {"$set": update})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    updated = await escalation_col.find_one({"rule_id": rule_id})
+    return serialize_doc(updated)
+
+@app.delete("/api/escalation-rules/{rule_id}")
+async def delete_escalation_rule(rule_id: str):
+    result = await escalation_col.delete_one({"rule_id": rule_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    return {"success": True}
+
+# ─── Content Templates ─────────────────────────────────────────────────
+@app.get("/api/templates")
+async def get_templates(category: Optional[str] = None):
+    query = {}
+    if category:
+        query["category"] = category
+    templates = await templates_col.find(query).sort("created_at", -1).to_list(100)
+    return [serialize_doc(t) for t in templates]
+
+@app.get("/api/templates/{template_id}")
+async def get_template(template_id: str):
+    template = await templates_col.find_one({"template_id": template_id})
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return serialize_doc(template)
+
+@app.post("/api/templates")
+async def create_template(req: ContentTemplateRequest):
+    template = {
+        "template_id": str(uuid.uuid4()),
+        "name": req.name,
+        "category": req.category,
+        "template_type": req.template_type,
+        "subject_template": req.subject_template,
+        "body_template": req.body_template,
+        "variables": req.variables,
+        "tags": req.tags,
+        "status": "active",
+        "created_at": now_iso(),
+        "created_by": "user",
+    }
+    await templates_col.insert_one(template)
+    await log_activity("content", "Template created", f"New template: {req.name}", template["template_id"], "template")
+    return serialize_doc(template)
+
+@app.put("/api/templates/{template_id}")
+async def update_template(template_id: str, req: ContentTemplateRequest):
+    update = {
+        "name": req.name,
+        "category": req.category,
+        "template_type": req.template_type,
+        "subject_template": req.subject_template,
+        "body_template": req.body_template,
+        "variables": req.variables,
+        "tags": req.tags,
+        "updated_at": now_iso(),
+    }
+    result = await templates_col.update_one({"template_id": template_id}, {"$set": update})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Template not found")
+    updated = await templates_col.find_one({"template_id": template_id})
+    return serialize_doc(updated)
+
+@app.delete("/api/templates/{template_id}")
+async def delete_template(template_id: str):
+    result = await templates_col.delete_one({"template_id": template_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return {"success": True}
+
+TEMPLATE_AI_PROMPT = """You are a premium content writer for a real estate team.
+You will be given a template with variables marked as {{variable_name}} and context values.
+Generate polished, professional content by filling in the template with the given context.
+Also enhance the language to be engaging and natural while keeping the template structure.
+
+Respond with ONLY valid JSON (no markdown fences):
+{
+  "subject": "<filled subject if email, or null>",
+  "body": "<filled and polished body text>",
+  "enhanced": true
+}
+
+Style: Professional, warm, trustworthy. On-brand for a premium real estate firm."""
+
+@app.post("/api/templates/{template_id}/generate")
+async def generate_from_template(template_id: str, req: GenerateFromTemplateRequest):
+    """Generate AI-enhanced content from a template with context variables."""
+    template = await templates_col.find_one({"template_id": template_id})
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+    
+    # Fill in variables manually first
+    body = template["body_template"]
+    subject = template.get("subject_template", "") or ""
+    for key, value in req.context.items():
+        body = body.replace(f"{{{{{key}}}}}", str(value))
+        subject = subject.replace(f"{{{{{key}}}}}", str(value))
+    
+    # Use AI to enhance
+    chat = LlmChat(
+        api_key=EMERGENT_LLM_KEY,
+        session_id=f"template-{template_id}-{uuid.uuid4().hex[:6]}",
+        system_message=TEMPLATE_AI_PROMPT,
+    ).with_model("openai", "gpt-4o")
+    
+    prompt = f"Template category: {template['category']}\nTemplate name: {template['name']}\n\nSubject (if email): {subject}\n\nBody:\n{body}\n\nContext: {json.dumps(req.context)}\n\nPlease enhance this content while keeping the overall structure and intent."
+    
+    response = await chat.send_message(UserMessage(text=prompt))
+    ai_result = await parse_ai_json(response)
+    
+    if not ai_result:
+        # Fallback to manual fill
+        ai_result = {"subject": subject, "body": body, "enhanced": False}
+    
+    # Save as content item
+    content_type = "email_draft" if template["template_type"] == "email" else "social_post"
+    
+    if content_type == "email_draft":
+        content_data = {
+            "subject": ai_result.get("subject") or subject,
+            "body": ai_result.get("body") or body,
+            "call_to_action": "Reply to this email",
+        }
+    else:
+        content_data = {
+            "text": ai_result.get("body") or body,
+            "hashtags": [f"#{tag}" for tag in template.get("tags", [])],
+            "platform": "instagram",
+        }
+    
+    content_item = {
+        "content_id": str(uuid.uuid4()),
+        "type": content_type,
+        "title": f"{template['name']} - {req.context.get('contact_name', 'Generated')}",
+        "content": content_data,
+        "status": "draft",
+        "created_at": now_iso(),
+        "created_by": "ai_template",
+        "template_id": template_id,
+    }
+    await content_col.insert_one(content_item)
+    await log_activity("content", "Content from template", f"Generated '{template['name']}' content", content_item["content_id"], "content")
+    
+    return {"success": True, "item": serialize_doc(content_item), "enhanced": ai_result.get("enhanced", False)}
 
 # ─── System Status ─────────────────────────────────────────────────────
 @app.get("/api/system/status")
