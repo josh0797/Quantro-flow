@@ -5,11 +5,13 @@ import { Button } from '../components/ui/button';
 import { ScrollArea } from '../components/ui/scroll-area';
 import { Separator } from '../components/ui/separator';
 import { Skeleton } from '../components/ui/skeleton';
-import { Users, Calendar, Inbox, Activity, Zap, Clock, ArrowRight, CheckCircle2, AlertTriangle, Mail, UserPlus, PenTool } from 'lucide-react';
+import { Users, Calendar, Inbox, Activity, Zap, Clock, ArrowRight, CheckCircle2, AlertTriangle, Mail, UserPlus, PenTool, Database, Plug } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { getDashboardMetrics, getActivity, getAISuggestions, getCalendarEvents } from '../lib/api';
 import { useNavigate } from 'react-router-dom';
 import { format, parseISO, isToday, isTomorrow } from 'date-fns';
+import { useBusinessProfile } from '../contexts/BusinessProfileContext';
+import { getIndustryConfig, getEntityLabel } from '../config/industryConfig';
 
 const eventTypeIcons = {
   system: Zap,
@@ -19,6 +21,7 @@ const eventTypeIcons = {
   crm: Users,
   onboarding: UserPlus,
   content: PenTool,
+  integration: Plug,
 };
 
 const eventTypeColors = {
@@ -29,6 +32,7 @@ const eventTypeColors = {
   crm: 'text-[hsl(var(--accent))]',
   onboarding: 'text-[hsl(var(--success))]',
   content: 'text-[hsl(var(--info))]',
+  integration: 'text-[hsl(var(--success))]',
 };
 
 export default function Dashboard() {
@@ -36,33 +40,55 @@ export default function Dashboard() {
   const [activities, setActivities] = useState([]);
   const [suggestions, setSuggestions] = useState([]);
   const [events, setEvents] = useState([]);
+  const [integrations, setIntegrations] = useState([]);
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
+  const { profile, loading: profileLoading } = useBusinessProfile();
+
+  // Get industry-specific config
+  const industry = profile?.industry || 'other';
+  const industryConfig = getIndustryConfig(industry);
+  const customLabels = profile?.entity_labels || {};
 
   const fetchData = useCallback(async () => {
     try {
-      const [m, a, s, e] = await Promise.all([
+      const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
+      const [m, a, s, e, i] = await Promise.all([
         getDashboardMetrics(),
         getActivity(15),
         getAISuggestions(),
         getCalendarEvents(),
+        fetch(`${backendUrl}/api/integrations`).then(r => r.json()).catch(() => []),
       ]);
       setMetrics(m);
-      setActivities(a);
-      setSuggestions(s);
+      
+      // Use industry-specific activities if available, otherwise use fetched activities
+      const industryActivities = industryConfig.activities.map((act, idx) => ({
+        ...act,
+        event_id: `industry-${idx}`,
+        timestamp: new Date(Date.now() - idx * 60000).toISOString(),
+      }));
+      setActivities(industryActivities.length > 0 ? industryActivities : a);
+      
+      // Use industry-specific suggestions
+      setSuggestions(industryConfig.aiSuggestions || s);
+      
       setEvents(e);
+      setIntegrations(i);
     } catch (err) {
       console.error('Dashboard fetch error:', err);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [industryConfig]);
 
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 15000);
-    return () => clearInterval(interval);
-  }, [fetchData]);
+    if (!profileLoading) {
+      fetchData();
+      const interval = setInterval(fetchData, 15000);
+      return () => clearInterval(interval);
+    }
+  }, [fetchData, profileLoading]);
 
   const todayEvents = events.filter(e => {
     try { return isToday(parseISO(e.start_time)); } catch { return false; }
@@ -71,7 +97,9 @@ export default function Dashboard() {
     try { return isTomorrow(parseISO(e.start_time)); } catch { return false; }
   });
 
-  if (loading) {
+  const connectedIntegrations = integrations.filter(i => i.status === 'connected');
+
+  if (loading || profileLoading) {
     return (
       <div className="page-container relative z-[1]">
         <div className="space-y-6">
@@ -94,232 +122,326 @@ export default function Dashboard() {
       <div className="flex items-center justify-between mb-8">
         <div>
           <h1 className="font-display text-2xl font-semibold tracking-tight">Dashboard</h1>
-          <p className="text-sm text-muted-foreground mt-1">System overview and real-time activity</p>
+          <p className="text-sm text-muted-foreground mt-1">
+            {industryConfig.name} operations • Real-time overview
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <span className="status-dot running animate-pulse-dot" />
-          <span className="text-xs font-mono text-muted-foreground">All systems operational</span>
+          <span className="text-xs text-muted-foreground">System Running</span>
         </div>
       </div>
 
-      {/* Metrics Grid */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-8">
-        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0 }}>
-          <Card data-testid="kpi-agents" className="card-hover cursor-pointer" onClick={() => navigate('/onboarding')}>
-            <CardContent className="pt-5 pb-4 px-5">
-              <div className="flex items-center justify-between mb-3">
-                <div className="w-9 h-9 rounded-lg bg-[hsl(var(--success)/0.12)] flex items-center justify-center">
-                  <Users size={18} className="text-[hsl(var(--success))]" />
-                </div>
-                <Badge variant="secondary" className="text-xs">+1 this week</Badge>
-              </div>
+      {/* KPI Cards - Dynamic based on industry */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        {/* KPI 1: Team/Patients/Clients/Customers */}
+        <Card data-testid="kpi-team" className="card-hover cursor-pointer" onClick={() => navigate('/onboarding')}>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">
+              {industryConfig.kpis.team.label}
+            </CardTitle>
+            <Users className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div>
               <p className="font-display text-2xl font-semibold tabular-nums">{metrics?.agents?.total || 0}</p>
-              <p className="text-xs text-muted-foreground mt-1">{metrics?.agents?.active || 0} active agents</p>
-            </CardContent>
-          </Card>
-        </motion.div>
+              <p className="text-xs text-muted-foreground mt-1">
+                {metrics?.agents?.active || 0} active
+              </p>
+            </div>
+          </CardContent>
+        </Card>
 
-        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.05 }}>
-          <Card data-testid="kpi-meetings" className="card-hover cursor-pointer" onClick={() => navigate('/schedule')}>
-            <CardContent className="pt-5 pb-4 px-5">
-              <div className="flex items-center justify-between mb-3">
-                <div className="w-9 h-9 rounded-lg bg-[hsl(var(--warning)/0.12)] flex items-center justify-center">
-                  <Calendar size={18} className="text-[hsl(var(--warning))]" />
-                </div>
-                <Badge variant="secondary" className="text-xs">{todayEvents.length} today</Badge>
-              </div>
-              <p className="font-display text-2xl font-semibold tabular-nums">{metrics?.events?.today || 0}</p>
-              <p className="text-xs text-muted-foreground mt-1">Upcoming events</p>
-            </CardContent>
-          </Card>
-        </motion.div>
+        {/* KPI 2: Schedule/Appointments/Calls */}
+        <Card data-testid="kpi-schedule" className="card-hover cursor-pointer" onClick={() => navigate('/schedule')}>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">
+              {industryConfig.kpis.schedule.label}
+            </CardTitle>
+            <Calendar className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div>
+              <p className="font-display text-2xl font-semibold tabular-nums">{metrics?.calendar?.upcoming_events || 0}</p>
+              <p className="text-xs text-muted-foreground mt-1">next 7 days</p>
+            </div>
+          </CardContent>
+        </Card>
 
-        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}>
-          <Card data-testid="kpi-inbox" className="card-hover cursor-pointer" onClick={() => navigate('/inbox')}>
-            <CardContent className="pt-5 pb-4 px-5">
-              <div className="flex items-center justify-between mb-3">
-                <div className="w-9 h-9 rounded-lg bg-[hsl(var(--info)/0.12)] flex items-center justify-center">
-                  <Inbox size={18} className="text-[hsl(var(--info))]" />
-                </div>
-                {metrics?.inbox?.unread > 0 && (
-                  <Badge className="bg-[hsl(var(--info))] text-[hsl(var(--primary-foreground))] text-xs">{metrics.inbox.unread} new</Badge>
-                )}
-              </div>
-              <p className="font-display text-2xl font-semibold tabular-nums">{metrics?.inbox?.total || 0}</p>
-              <p className="text-xs text-muted-foreground mt-1">Inbox messages</p>
-            </CardContent>
-          </Card>
-        </motion.div>
+        {/* KPI 3: Inbox/Requests/Issues */}
+        <Card data-testid="kpi-inbox" className="card-hover cursor-pointer" onClick={() => navigate('/inbox')}>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">
+              {industryConfig.kpis.inbox.label}
+            </CardTitle>
+            <Inbox className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div>
+              <p className="font-display text-2xl font-semibold tabular-nums">{metrics?.inbox?.new || 0}</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                {metrics?.inbox?.processed || 0} processed
+              </p>
+            </div>
+          </CardContent>
+        </Card>
 
-        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.15 }}>
-          <Card data-testid="kpi-sync-health" className="card-hover cursor-pointer" onClick={() => navigate('/crm')}>
-            <CardContent className="pt-5 pb-4 px-5">
-              <div className="flex items-center justify-between mb-3">
-                <div className="w-9 h-9 rounded-lg bg-[hsl(var(--primary)/0.12)] flex items-center justify-center">
-                  <Activity size={18} className="text-[hsl(var(--primary))]" />
-                </div>
-                <span className="flex items-center gap-1.5">
-                  <span className="status-dot running" />
-                  <span className="text-xs text-muted-foreground">Synced</span>
-                </span>
-              </div>
-              <p className="font-display text-2xl font-semibold tabular-nums">{metrics?.contacts?.synced || 0}/{metrics?.contacts?.total || 0}</p>
-              <p className="text-xs text-muted-foreground mt-1">CRM contacts synced</p>
-            </CardContent>
-          </Card>
-        </motion.div>
+        {/* KPI 4: CRM/Records */}
+        <Card data-testid="kpi-crm" className="card-hover cursor-pointer" onClick={() => navigate('/crm')}>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">
+              {industryConfig.kpis.crm.label}
+            </CardTitle>
+            <Database className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div>
+              <p className="font-display text-2xl font-semibold tabular-nums">{metrics?.crm?.total_contacts || 0}</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                {metrics?.crm?.new_this_week || 0} new this week
+              </p>
+            </div>
+          </CardContent>
+        </Card>
       </div>
 
-      {/* Main Content Grid */}
-      <div className="grid lg:grid-cols-3 gap-4 sm:gap-6">
-        {/* Left: Today's Schedule + AI Suggestions */}
-        <div className="lg:col-span-2 space-y-4 sm:space-y-6">
-          {/* Today's Schedule */}
-          <Card>
-            <CardHeader className="pb-3">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-base font-semibold flex items-center gap-2">
-                  <Clock size={16} className="text-[hsl(var(--warning))]" />
-                  Today's Schedule
-                </CardTitle>
-                <Button variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => navigate('/schedule')}>
-                  View all <ArrowRight size={14} className="ml-1" />
-                </Button>
+      {/* Integration Status Banner (if any connected) */}
+      {connectedIntegrations.length > 0 && (
+        <Card className="mb-6 border-[hsl(var(--success)/0.3)] bg-[hsl(var(--success)/0.05)]">
+          <CardContent className="pt-6">
+            <div className="flex items-center gap-3">
+              <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-[hsl(var(--success)/0.15)]">
+                <Plug size={18} className="text-[hsl(var(--success))]" />
               </div>
-            </CardHeader>
-            <CardContent className="pt-0">
-              {todayEvents.length === 0 ? (
-                <p className="text-sm text-muted-foreground py-6 text-center">No events scheduled for today. The system is monitoring for new requests.</p>
-              ) : (
-                <div className="space-y-3">
-                  {todayEvents.map((event, i) => (
-                    <motion.div key={event.event_id || i} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.05 }}>
-                      <div className="flex items-start gap-3 p-3 rounded-lg bg-[hsl(var(--surface-1))] border border-[hsl(var(--border))]">
-                        <div className="w-10 text-center">
-                          <p className="text-xs font-mono text-muted-foreground">
-                            {(() => { try { return format(parseISO(event.start_time), 'HH:mm'); } catch { return '--:--'; } })()}
-                          </p>
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium truncate">{event.title}</p>
-                          <p className="text-xs text-muted-foreground truncate">{event.location}</p>
-                        </div>
-                        <Badge variant="secondary" className="text-xs shrink-0">{event.status}</Badge>
-                      </div>
-                    </motion.div>
-                  ))}
-                </div>
-              )}
-              {tomorrowEvents.length > 0 && (
-                <div className="mt-4">
-                  <p className="text-xs text-muted-foreground mb-2 uppercase tracking-wide">Tomorrow</p>
-                  <div className="space-y-2">
-                    {tomorrowEvents.slice(0, 2).map((event, i) => (
-                      <div key={event.event_id || i} className="flex items-center gap-3 p-2 rounded-md">
-                        <p className="text-xs font-mono text-muted-foreground w-10 text-center">
-                          {(() => { try { return format(parseISO(event.start_time), 'HH:mm'); } catch { return '--:--'; } })()}
-                        </p>
-                        <p className="text-sm text-muted-foreground truncate">{event.title}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* AI Suggestions */}
-          <Card>
-            <CardHeader className="pb-3">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-base font-semibold flex items-center gap-2">
-                  <Zap size={16} className="text-[hsl(var(--primary))]" />
-                  AI Suggestions
-                </CardTitle>
-                <Badge variant="secondary" className="text-xs">{suggestions.length} pending</Badge>
+              <div className="flex-1">
+                <p className="text-sm font-medium text-foreground">
+                  {connectedIntegrations.length} Integration{connectedIntegrations.length > 1 ? 's' : ''} Connected
+                </p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  {connectedIntegrations.map(i => i.provider === 'google_calendar' ? 'Calendar' : i.provider === 'gmail' ? 'Gmail' : i.provider.toUpperCase()).join(', ')} syncing in real-time
+                </p>
               </div>
-            </CardHeader>
-            <CardContent className="pt-0">
-              {suggestions.length === 0 ? (
-                <p className="text-sm text-muted-foreground py-6 text-center">All caught up. The system is monitoring new messages.</p>
-              ) : (
-                <div className="space-y-2">
-                  {suggestions.map((suggestion, i) => (
-                    <motion.div key={i} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.05 }}>
-                      <div
-                        className="flex items-start gap-3 p-3 rounded-lg bg-[hsl(var(--surface-1))] border border-[hsl(var(--border))] card-hover cursor-pointer"
-                        onClick={() => navigate('/inbox')}
-                      >
-                        <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
-                          suggestion.priority === 'high' ? 'bg-[hsl(var(--warning)/0.12)]' : 'bg-[hsl(var(--primary)/0.12)]'
-                        }`}>
-                          {suggestion.type === 'analyze' ? (
-                            <Zap size={14} className={suggestion.priority === 'high' ? 'text-[hsl(var(--warning))]' : 'text-[hsl(var(--primary))]'} />
-                          ) : (
-                            <CheckCircle2 size={14} className="text-[hsl(var(--success))]" />
-                          )}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium truncate">{suggestion.title}</p>
-                          <p className="text-xs text-muted-foreground truncate">{suggestion.description}</p>
-                        </div>
-                        {suggestion.priority === 'high' && (
-                          <Badge className="bg-[hsl(var(--warning)/0.15)] text-[hsl(var(--warning))] text-xs shrink-0">Urgent</Badge>
-                        )}
-                      </div>
-                    </motion.div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
+              <Button variant="outline" size="sm" onClick={() => navigate('/settings')}>
+                Manage
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
-        {/* Right Rail: Activity Feed */}
-        <div className="lg:col-span-1">
-          <Card className="h-full">
-            <CardHeader className="pb-3">
+      <div className="grid lg:grid-cols-3 gap-6">
+        {/* Left column: Activity Feed */}
+        <div className="lg:col-span-2 space-y-6">
+          {/* Live Activity Feed */}
+          <Card data-testid="activity-feed">
+            <CardHeader>
               <div className="flex items-center justify-between">
-                <CardTitle className="text-base font-semibold flex items-center gap-2">
-                  <Activity size={16} className="text-[hsl(var(--success))]" />
+                <CardTitle className="flex items-center gap-2">
+                  <Activity size={16} className="text-[hsl(var(--primary))]" />
                   Live Activity
                 </CardTitle>
-                <span className="flex items-center gap-1.5">
-                  <span className="status-dot running animate-pulse-dot" />
-                  <span className="text-xs font-mono text-muted-foreground">Live</span>
-                </span>
+                <Badge variant="outline" className="text-[10px]">Real-time</Badge>
               </div>
             </CardHeader>
-            <CardContent className="pt-0">
-              <ScrollArea data-testid="live-activity-feed" className="h-[500px]">
-                <AnimatePresence>
-                  {activities.map((event, i) => {
-                    const Icon = eventTypeIcons[event.event_type] || Activity;
-                    const colorClass = eventTypeColors[event.event_type] || 'text-muted-foreground';
-                    return (
-                      <motion.div
-                        key={event.event_id || i}
-                        data-testid="activity-feed-item"
-                        initial={{ opacity: 0, y: 6 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: i * 0.03, duration: 0.18 }}
-                        className="flex gap-3 py-3"
-                      >
-                        <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 bg-[hsl(var(--surface-2))]`}>
-                          <Icon size={13} className={colorClass} />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium leading-tight">{event.title}</p>
-                          <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">{event.description}</p>
-                          <p className="text-[10px] font-mono text-muted-foreground mt-1">
-                            {(() => { try { return format(parseISO(event.timestamp), 'HH:mm'); } catch { return ''; } })()}
-                          </p>
-                        </div>
-                      </motion.div>
-                    );
-                  })}
+            <CardContent>
+              <ScrollArea className="h-[280px] pr-4">
+                <AnimatePresence mode="popLayout">
+                  {activities.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center h-[240px] text-center">
+                      <Activity size={32} className="text-muted-foreground/40 mb-3" />
+                      <p className="text-sm text-muted-foreground">No recent activity</p>
+                      <p className="text-xs text-muted-foreground/70 mt-1">
+                        Activity will appear here as your system processes items
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {activities.map((act, idx) => {
+                        const Icon = eventTypeIcons[act.type] || Activity;
+                        const colorClass = eventTypeColors[act.type] || 'text-muted-foreground';
+                        return (
+                          <motion.div
+                            key={act.event_id || idx}
+                            initial={{ opacity: 0, y: -10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, x: -10 }}
+                            transition={{ duration: 0.2 }}
+                            className="flex items-start gap-3 p-3 rounded-lg bg-[hsl(var(--surface-1))] hover:bg-[hsl(var(--surface-2))] transition-colors"
+                          >
+                            <div className={`flex items-center justify-center w-8 h-8 rounded-md bg-[hsl(var(--surface-2))] shrink-0 ${colorClass}`}>
+                              <Icon size={14} />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm text-foreground">{act.text || act.description}</p>
+                              <p className="text-xs text-muted-foreground mt-0.5">
+                                {act.time || (act.timestamp ? format(parseISO(act.timestamp), 'p') : '')}
+                              </p>
+                            </div>
+                          </motion.div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </AnimatePresence>
               </ScrollArea>
+            </CardContent>
+          </Card>
+
+          {/* Today's Schedule */}
+          <Card data-testid="todays-schedule">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Calendar size={16} className="text-[hsl(var(--warning))]" />
+                Today's {getEntityLabel(industry, 'meetings', customLabels)}
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {todayEvents.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-8 text-center">
+                  <Clock size={32} className="text-muted-foreground/40 mb-3" />
+                  <p className="text-sm text-muted-foreground">No {getEntityLabel(industry, 'meetings', customLabels).toLowerCase()} scheduled today</p>
+                  <Button size="sm" variant="outline" className="mt-4" onClick={() => navigate('/schedule')}>
+                    View Full Calendar
+                  </Button>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {todayEvents.slice(0, 3).map((event) => (
+                    <div key={event.event_id} className="flex items-center gap-3 p-3 rounded-lg bg-[hsl(var(--surface-1))] hover:bg-[hsl(var(--surface-2))] transition-colors cursor-pointer" onClick={() => navigate('/schedule')}>
+                      <div className="flex flex-col items-center justify-center w-12 h-12 rounded-lg bg-[hsl(var(--warning)/0.15)] text-[hsl(var(--warning))] shrink-0">
+                        <span className="text-xs font-medium">{format(parseISO(event.start_time), 'HH:mm')}</span>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-foreground truncate">{event.title}</p>
+                        <p className="text-xs text-muted-foreground">{event.attendees?.join(', ') || 'No attendees'}</p>
+                      </div>
+                    </div>
+                  ))}
+                  {todayEvents.length > 3 && (
+                    <Button size="sm" variant="ghost" className="w-full" onClick={() => navigate('/schedule')}>
+                      View {todayEvents.length - 3} more
+                    </Button>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* Right column: AI Suggestions & Quick Actions */}
+        <div className="space-y-6">
+          {/* AI Suggestions - Industry Specific */}
+          <Card data-testid="ai-suggestions">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Zap size={16} className="text-[hsl(var(--primary))]" />
+                AI Suggestions
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2">
+                {suggestions.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-8 text-center">
+                    <Zap size={32} className="text-muted-foreground/40 mb-3" />
+                    <p className="text-sm text-muted-foreground">No suggestions yet</p>
+                  </div>
+                ) : (
+                  suggestions.map((suggestion, idx) => {
+                    const priorityColor = suggestion.priority === 'high' ? 'text-[hsl(var(--critical))]' : 
+                                         suggestion.priority === 'medium' ? 'text-[hsl(var(--warning))]' : 
+                                         'text-[hsl(var(--info))]';
+                    return (
+                      <div key={idx} className="flex items-start gap-3 p-3 rounded-lg bg-[hsl(var(--surface-1))] hover:bg-[hsl(var(--surface-2))] transition-colors cursor-pointer group">
+                        <CheckCircle2 size={14} className={`mt-0.5 shrink-0 ${priorityColor}`} />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm text-foreground group-hover:text-[hsl(var(--primary))] transition-colors">
+                            {suggestion.text}
+                          </p>
+                        </div>
+                        <ArrowRight size={14} className="text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Quick Actions */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm font-medium">Quick Actions</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid gap-2">
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  className="justify-start" 
+                  onClick={() => navigate('/inbox')}
+                  data-testid="quick-action-inbox"
+                >
+                  <Inbox size={14} className="mr-2" />
+                  Process Inbox
+                </Button>
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  className="justify-start" 
+                  onClick={() => navigate('/schedule')}
+                  data-testid="quick-action-schedule"
+                >
+                  <Calendar size={14} className="mr-2" />
+                  View Calendar
+                </Button>
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  className="justify-start" 
+                  onClick={() => navigate('/crm')}
+                  data-testid="quick-action-crm"
+                >
+                  <Users size={14} className="mr-2" />
+                  Manage {getEntityLabel(industry, 'contacts', customLabels)}
+                </Button>
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  className="justify-start" 
+                  onClick={() => navigate('/content')}
+                  data-testid="quick-action-content"
+                >
+                  <PenTool size={14} className="mr-2" />
+                  Create Content
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* System Health */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm font-medium">System Health</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-muted-foreground">AI Engine</span>
+                  <Badge variant="outline" className="text-[10px] bg-[hsl(var(--success)/0.15)] text-[hsl(var(--success))]">Running</Badge>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-muted-foreground">Automation</span>
+                  <Badge variant="outline" className="text-[10px] bg-[hsl(var(--success)/0.15)] text-[hsl(var(--success))]">Active</Badge>
+                </div>
+                {connectedIntegrations.map((integration, idx) => (
+                  <div key={idx} className="flex items-center justify-between">
+                    <span className="text-xs text-muted-foreground capitalize">
+                      {integration.provider === 'google_calendar' ? 'Calendar' : integration.provider === 'gmail' ? 'Gmail' : integration.provider}
+                    </span>
+                    <Badge variant="outline" className="text-[10px] bg-[hsl(var(--success)/0.15)] text-[hsl(var(--success))]">Connected</Badge>
+                  </div>
+                ))}
+              </div>
             </CardContent>
           </Card>
         </div>

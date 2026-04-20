@@ -1,22 +1,14 @@
 [
   {
-    "content": "Update Sidebar with Settings link and dynamic labels from BusinessProfile",
+    "content": "Transform Dashboard with dynamic industry-aware KPIs, AI suggestions, activity feed, and integration status",
     "status": "completed"
   },
   {
-    "content": "Global rebrand: Replace 'Realty OS' with 'Business OS' and update terminology across all pages",
+    "content": "Update CRM page to use dynamic labels from BusinessProfile",
     "status": "in_progress"
   },
   {
-    "content": "Update Dashboard to show integration connection status and industry-based content",
-    "status": "pending"
-  },
-  {
-    "content": "Update CRM page to use dynamic labels",
-    "status": "pending"
-  },
-  {
-    "content": "Update Schedule page to use dynamic event types",
+    "content": "Update Schedule page to use dynamic event types from industry config",
     "status": "pending"
   },
   {
@@ -32,7 +24,7 @@
     "status": "pending"
   },
   {
-    "content": "Update AutomationPolicies page title to be generic",
+    "content": "Update AutomationPolicies page to be fully generic",
     "status": "pending"
   },
   {
