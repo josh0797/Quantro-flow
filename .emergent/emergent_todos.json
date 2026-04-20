@@ -1,22 +1,14 @@
 [
   {
-    "content": "Session 3A: Batch update CRM, Schedule, Onboarding, ContentEngine, AutomationPolicies with dynamic labels",
-    "status": "completed"
-  },
-  {
-    "content": "Session 3A: Verify all pages compile cleanly",
-    "status": "completed"
-  },
-  {
-    "content": "Session 3B: Create industry-specific simulation data generator (backend)",
+    "content": "Session 3B: Add simulation_mode to business_profile schema",
     "status": "in_progress"
   },
   {
-    "content": "Session 3B: Add simulation_mode field to business_profile",
+    "content": "Session 3B: Create industry-specific data generators (backend)",
     "status": "pending"
   },
   {
-    "content": "Session 3B: Create simulation endpoints (generate/clear)",
+    "content": "Session 3B: Create simulation API endpoints (generate/clear/status)",
     "status": "pending"
   },
   {
@@ -24,11 +16,15 @@
     "status": "pending"
   },
   {
-    "content": "Session 3B: Update Dashboard to show simulation indicator",
+    "content": "Session 3B: Add simulation indicator badge in Dashboard",
     "status": "pending"
   },
   {
-    "content": "Session 3C: Run comprehensive testing",
+    "content": "Session 3B: Test simulation with one industry",
+    "status": "pending"
+  },
+  {
+    "content": "Session 3C: Run comprehensive testing all industries",
     "status": "pending"
   },
   {

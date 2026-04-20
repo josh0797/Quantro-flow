@@ -463,6 +463,7 @@ async def seed_database():
             "events": "Events",
             "services": "Services"
         },
+        "simulation_mode": False,
         "created_at": now,
         "updated_at": now
     }
@@ -1675,6 +1676,7 @@ class BusinessProfileUpdate(BaseModel):
     industry: str
     use_case: str = ""
     entity_labels: dict
+    simulation_mode: bool = False
 
 @app.get("/api/business-profile")
 async def get_business_profile():
@@ -1699,10 +1701,16 @@ async def get_business_profile():
 @app.put("/api/business-profile")
 async def update_business_profile(req: BusinessProfileUpdate):
     """Update the business profile configuration."""
+    # Get current profile to check if we need to generate simulation data
+    current_profile = await business_profile_col.find_one({"profile_id": "default"}, {"_id": 0})
+    old_simulation_mode = current_profile.get("simulation_mode", False) if current_profile else False
+    old_industry = current_profile.get("industry", "other") if current_profile else "other"
+    
     update_data = {
         "industry": req.industry,
         "use_case": req.use_case,
         "entity_labels": req.entity_labels,
+        "simulation_mode": req.simulation_mode,
         "updated_at": now_iso()
     }
     
@@ -1712,7 +1720,23 @@ async def update_business_profile(req: BusinessProfileUpdate):
         upsert=True
     )
     
-    await log_activity("system", "Business Profile updated", f"Industry changed to {req.industry}", "default", "profile")
+    await log_activity("system", "Business Profile updated", f"Industry: {req.industry}, Simulation: {req.simulation_mode}", "default", "profile")
+    
+    # Auto-generate simulation data if:
+    # 1. Simulation mode was just enabled, OR
+    # 2. Simulation is active and industry changed
+    if req.simulation_mode and (not old_simulation_mode or req.industry != old_industry):
+        await generate_simulation_data(req.industry)
+        await log_activity("system", "Simulation data auto-generated", f"Generated {req.industry} data", "simulation", "system")
+    
+    # Clear simulation data if simulation mode was disabled
+    if old_simulation_mode and not req.simulation_mode:
+        await contacts_col.delete_many({"is_simulation": True})
+        await inbox_col.delete_many({"is_simulation": True})
+        await calendar_col.delete_many({"is_simulation": True})
+        await agents_col.delete_many({"is_simulation": True})
+        await activity_col.delete_many({"is_simulation": True})
+        await log_activity("system", "Simulation data cleared", "Simulation mode disabled", "simulation", "system")
     
     updated = await business_profile_col.find_one({"profile_id": "default"}, {"_id": 0})
     return serialize_doc(updated)
@@ -1773,3 +1797,268 @@ async def test_integration(provider: str):
         return {"success": True, "message": f"{provider.title()} connection is healthy"}
     else:
         return {"success": False, "message": f"{provider.title()} is not connected"}
+
+
+
+# ─── Simulation Layer ──────────────────────────────────────────────────────
+# Production-quality simulation system for industry validation
+
+async def generate_simulation_data(industry: str):
+    """Generate realistic operational data for the selected industry."""
+    now = datetime.utcnow()
+    
+    # Clear existing simulation data
+    await inbox_col.delete_many({"is_simulation": True})
+    await contacts_col.delete_many({"is_simulation": True})
+    await calendar_col.delete_many({"is_simulation": True})
+    await agents_col.delete_many({"is_simulation": True})
+    await activity_col.delete_many({"is_simulation": True})
+    
+    simulation_data = {}
+    
+    if industry == "real_estate":
+        # Real Estate operational data
+        contacts = [
+            {"contact_id": str(uuid.uuid4()), "name": "Sarah Johnson", "email": "sarah.j@email.com", "phone": "555-0101", "type": "buyer", "status": "active", "lifecycle_stage": "lead", "last_contact": now - timedelta(days=2), "notes": "Looking for 3BR in downtown area", "is_simulation": True, "created_at": now},
+            {"contact_id": str(uuid.uuid4()), "name": "Michael Chen", "email": "mchen@email.com", "phone": "555-0102", "type": "seller", "status": "active", "lifecycle_stage": "client", "last_contact": now - timedelta(days=1), "notes": "Ready to list 2BR condo", "is_simulation": True, "created_at": now},
+            {"contact_id": str(uuid.uuid4()), "name": "Emily Rodriguez", "email": "emily.r@email.com", "phone": "555-0103", "type": "buyer", "status": "active", "lifecycle_stage": "hot_lead", "last_contact": now - timedelta(hours=6), "notes": "Interested in viewing 456 Oak Ave", "is_simulation": True, "created_at": now},
+            {"contact_id": str(uuid.uuid4()), "name": "David Park", "email": "david.park@email.com", "phone": "555-0104", "type": "investor", "status": "nurturing", "lifecycle_stage": "lead", "last_contact": now - timedelta(days=5), "notes": "Looking for investment properties", "is_simulation": True, "created_at": now},
+            {"contact_id": str(uuid.uuid4()), "name": "Lisa Thompson", "email": "lisa.t@email.com", "phone": "555-0105", "type": "buyer", "status": "active", "lifecycle_stage": "client", "last_contact": now - timedelta(hours=12), "notes": "First-time homebuyer, pre-approved", "is_simulation": True, "created_at": now},
+        ]
+        
+        inbox_items = [
+            {"inbox_id": str(uuid.uuid4()), "from_name": "Emily Rodriguez", "from_email": "emily.r@email.com", "subject": "Property viewing - 456 Oak Ave", "body": "Hi, I'm very interested in viewing the property at 456 Oak Avenue. Would Friday at 3pm work?", "received_at": now - timedelta(hours=2), "read": False, "status": "new", "ai_intent": None, "contact_id": None, "source": "gmail", "is_simulation": True},
+            {"inbox_id": str(uuid.uuid4()), "from_name": "Michael Chen", "from_email": "mchen@email.com", "subject": "Ready to list my condo", "body": "I'd like to schedule a time to discuss listing my 2-bedroom condo. What's your availability this week?", "received_at": now - timedelta(hours=5), "read": False, "status": "new", "ai_intent": None, "contact_id": None, "source": "gmail", "is_simulation": True},
+            {"inbox_id": str(uuid.uuid4()), "from_name": "Sarah Johnson", "from_email": "sarah.j@email.com", "subject": "Follow-up: Downtown properties", "body": "Thanks for sending those listings! I'd love to see the 3BR on Main Street. Can we schedule a viewing?", "received_at": now - timedelta(hours=8), "read": False, "status": "new", "ai_intent": None, "contact_id": None, "source": "gmail", "is_simulation": True},
+            {"inbox_id": str(uuid.uuid4()), "from_name": "New Lead", "from_email": "buyer.inquiry@web.com", "subject": "Interested in downtown properties", "body": "I'm relocating to the area and interested in 2-3 bedroom properties downtown. Budget around $500k. Can you help?", "received_at": now - timedelta(hours=12), "read": False, "status": "new", "ai_intent": None, "contact_id": None, "source": "website", "is_simulation": True},
+        ]
+        
+        calendar_events = [
+            {"event_id": str(uuid.uuid4()), "title": "Property viewing - 456 Oak Ave", "description": "Showing with Emily Rodriguez", "start_time": (now + timedelta(days=2, hours=3)).isoformat(), "end_time": (now + timedelta(days=2, hours=4)).isoformat(), "attendees": ["Emily Rodriguez"], "location": "456 Oak Avenue", "type": "viewing", "status": "confirmed", "is_simulation": True, "created_at": now},
+            {"event_id": str(uuid.uuid4()), "title": "Open House - 123 Main St", "description": "Public open house event", "start_time": (now + timedelta(days=3, hours=10)).isoformat(), "end_time": (now + timedelta(days=3, hours=13)).isoformat(), "attendees": [], "location": "123 Main Street", "type": "open_house", "status": "confirmed", "is_simulation": True, "created_at": now},
+            {"event_id": str(uuid.uuid4()), "title": "Listing consultation - Michael Chen", "description": "Discuss listing strategy for condo", "start_time": (now + timedelta(days=1, hours=14)).isoformat(), "end_time": (now + timedelta(days=1, hours=15)).isoformat(), "attendees": ["Michael Chen"], "location": "Office", "type": "consultation", "status": "confirmed", "is_simulation": True, "created_at": now},
+        ]
+        
+        agents = [
+            {"agent_id": str(uuid.uuid4()), "name": "Jessica Martinez", "email": "jmartinez@agency.com", "phone": "555-0201", "role": "agent", "status": "onboarding", "start_date": (now - timedelta(days=5)).isoformat(), "license_number": "RE-12345", "is_simulation": True, "created_at": now},
+            {"agent_id": str(uuid.uuid4()), "name": "Robert Kim", "email": "rkim@agency.com", "phone": "555-0202", "role": "agent", "status": "active", "start_date": (now - timedelta(days=90)).isoformat(), "license_number": "RE-12346", "is_simulation": True, "created_at": now},
+        ]
+        
+        activities = [
+            {"event_id": str(uuid.uuid4()), "event_type": "inbox", "title": "New property inquiry", "description": "Emily Rodriguez interested in viewing", "related_id": None, "related_type": "inbox", "timestamp": now - timedelta(hours=2), "is_simulation": True},
+            {"event_id": str(uuid.uuid4()), "event_type": "calendar", "title": "Viewing scheduled", "description": "456 Oak Ave - Friday 3pm", "related_id": None, "related_type": "calendar", "timestamp": now - timedelta(hours=1), "is_simulation": True},
+            {"event_id": str(uuid.uuid4()), "event_type": "crm", "title": "Contact updated", "description": "Michael Chen marked as active client", "related_id": None, "related_type": "contact", "timestamp": now - timedelta(hours=5), "is_simulation": True},
+        ]
+        
+        simulation_data = {"contacts": contacts, "inbox": inbox_items, "events": calendar_events, "agents": agents, "activities": activities}
+    
+    elif industry == "healthcare":
+        # Healthcare operational data
+        contacts = [
+            {"contact_id": str(uuid.uuid4()), "name": "John Miller", "email": "john.m@email.com", "phone": "555-1101", "type": "patient", "status": "active", "lifecycle_stage": "active_patient", "last_contact": now - timedelta(days=1), "notes": "Annual checkup scheduled", "is_simulation": True, "created_at": now},
+            {"contact_id": str(uuid.uuid4()), "name": "Maria Garcia", "email": "maria.g@email.com", "phone": "555-1102", "type": "patient", "status": "active", "lifecycle_stage": "new_patient", "last_contact": now - timedelta(hours=8), "notes": "New patient intake pending", "is_simulation": True, "created_at": now},
+            {"contact_id": str(uuid.uuid4()), "name": "Robert Taylor", "email": "rtaylor@email.com", "phone": "555-1103", "type": "patient", "status": "active", "lifecycle_stage": "follow_up", "last_contact": now - timedelta(days=3), "notes": "Post-consultation follow-up needed", "is_simulation": True, "created_at": now},
+            {"contact_id": str(uuid.uuid4()), "name": "Amanda White", "email": "amanda.w@email.com", "phone": "555-1104", "type": "patient", "status": "active", "lifecycle_stage": "active_patient", "last_contact": now - timedelta(hours=16), "notes": "Referred by Dr. Smith", "is_simulation": True, "created_at": now},
+        ]
+        
+        inbox_items = [
+            {"inbox_id": str(uuid.uuid4()), "from_name": "Maria Garcia", "from_email": "maria.g@email.com", "subject": "New patient appointment request", "body": "I'd like to schedule an initial consultation. I'm available Tuesday or Thursday afternoons. Thank you!", "received_at": now - timedelta(hours=3), "read": False, "status": "new", "ai_intent": None, "contact_id": None, "source": "patient_portal", "is_simulation": True},
+            {"inbox_id": str(uuid.uuid4()), "from_name": "John Miller", "from_email": "john.m@email.com", "subject": "Annual checkup confirmation", "body": "Just confirming my annual checkup appointment on Thursday at 10am. Looking forward to it.", "received_at": now - timedelta(hours=6), "read": False, "status": "new", "ai_intent": None, "contact_id": None, "source": "email", "is_simulation": True},
+            {"inbox_id": str(uuid.uuid4()), "from_name": "Robert Taylor", "from_email": "rtaylor@email.com", "subject": "Follow-up question", "body": "I have a question about the treatment plan we discussed. Can I schedule a quick follow-up call?", "received_at": now - timedelta(hours=10), "read": False, "status": "new", "ai_intent": None, "contact_id": None, "source": "email", "is_simulation": True},
+        ]
+        
+        calendar_events = [
+            {"event_id": str(uuid.uuid4()), "title": "Consultation - Maria Garcia", "description": "New patient initial consultation", "start_time": (now + timedelta(days=2, hours=14)).isoformat(), "end_time": (now + timedelta(days=2, hours=15)).isoformat(), "attendees": ["Maria Garcia"], "location": "Exam Room 2", "type": "consultation", "status": "confirmed", "is_simulation": True, "created_at": now},
+            {"event_id": str(uuid.uuid4()), "title": "Annual checkup - John Miller", "description": "Annual physical examination", "start_time": (now + timedelta(days=1, hours=10)).isoformat(), "end_time": (now + timedelta(days=1, hours=11)).isoformat(), "attendees": ["John Miller"], "location": "Exam Room 1", "type": "checkup", "status": "confirmed", "is_simulation": True, "created_at": now},
+            {"event_id": str(uuid.uuid4()), "title": "Follow-up call - Robert Taylor", "description": "Post-treatment follow-up", "start_time": (now + timedelta(days=3, hours=9)).isoformat(), "end_time": (now + timedelta(days=3, hours=9, minutes=30)).isoformat(), "attendees": ["Robert Taylor"], "location": "Phone", "type": "follow_up", "status": "confirmed", "is_simulation": True, "created_at": now},
+        ]
+        
+        agents = [
+            {"agent_id": str(uuid.uuid4()), "name": "Dr. Lisa Wong", "email": "lwong@clinic.com", "phone": "555-1201", "role": "physician", "status": "active", "start_date": (now - timedelta(days=180)).isoformat(), "license_number": "MD-98765", "is_simulation": True, "created_at": now},
+            {"agent_id": str(uuid.uuid4()), "name": "Nurse Sarah Davis", "email": "sdavis@clinic.com", "phone": "555-1202", "role": "nurse", "status": "onboarding", "start_date": (now - timedelta(days=7)).isoformat(), "license_number": "RN-45678", "is_simulation": True, "created_at": now},
+        ]
+        
+        activities = [
+            {"event_id": str(uuid.uuid4()), "event_type": "inbox", "title": "New appointment request", "description": "Maria Garcia - new patient", "related_id": None, "related_type": "inbox", "timestamp": now - timedelta(hours=3), "is_simulation": True},
+            {"event_id": str(uuid.uuid4()), "event_type": "calendar", "title": "Appointment confirmed", "description": "John Miller - annual checkup", "related_id": None, "related_type": "calendar", "timestamp": now - timedelta(hours=6), "is_simulation": True},
+            {"event_id": str(uuid.uuid4()), "event_type": "system", "title": "Intake form reviewed", "description": "New patient intake completed", "related_id": None, "related_type": "patient", "timestamp": now - timedelta(hours=8), "is_simulation": True},
+        ]
+        
+        simulation_data = {"contacts": contacts, "inbox": inbox_items, "events": calendar_events, "agents": agents, "activities": activities}
+    
+    elif industry == "consulting":
+        # Consulting operational data
+        contacts = [
+            {"contact_id": str(uuid.uuid4()), "name": "TechCorp Inc", "email": "contact@techcorp.com", "phone": "555-2101", "type": "lead", "status": "active", "lifecycle_stage": "qualified_lead", "last_contact": now - timedelta(hours=12), "notes": "Interested in digital transformation consulting", "is_simulation": True, "created_at": now},
+            {"contact_id": str(uuid.uuid4()), "name": "Innovate Solutions", "email": "team@innovate.com", "phone": "555-2102", "type": "client", "status": "active", "lifecycle_stage": "active_client", "last_contact": now - timedelta(days=2), "notes": "Q2 strategy review scheduled", "is_simulation": True, "created_at": now},
+            {"contact_id": str(uuid.uuid4()), "name": "GrowthMax LLC", "email": "hello@growthmax.com", "phone": "555-2103", "type": "lead", "status": "nurturing", "lifecycle_stage": "discovery", "last_contact": now - timedelta(days=5), "notes": "Sent initial proposal, awaiting response", "is_simulation": True, "created_at": now},
+            {"contact_id": str(uuid.uuid4()), "name": "Retail Dynamics", "email": "info@retaildynamics.com", "phone": "555-2104", "type": "client", "status": "active", "lifecycle_stage": "active_client", "last_contact": now - timedelta(hours=20), "notes": "Mid-project check-in next week", "is_simulation": True, "created_at": now},
+        ]
+        
+        inbox_items = [
+            {"inbox_id": str(uuid.uuid4()), "from_name": "TechCorp - Jane Smith", "from_email": "jane@techcorp.com", "subject": "Discovery call request", "body": "We're exploring digital transformation initiatives and would love to schedule a discovery call. Are you available this week?", "received_at": now - timedelta(hours=4), "read": False, "status": "new", "ai_intent": None, "contact_id": None, "source": "email", "is_simulation": True},
+            {"inbox_id": str(uuid.uuid4()), "from_name": "Innovate Solutions", "from_email": "team@innovate.com", "subject": "Q2 strategy review", "body": "Looking forward to our strategy session next week. Can you send the prep materials beforehand?", "received_at": now - timedelta(hours=8), "read": False, "status": "new", "ai_intent": None, "contact_id": None, "source": "email", "is_simulation": True},
+            {"inbox_id": str(uuid.uuid4()), "from_name": "New Inquiry", "from_email": "founder@startup.io", "subject": "Growth strategy consulting", "body": "We're a Series A startup looking for help with growth strategy. Would you be open to an introductory call?", "received_at": now - timedelta(hours=15), "read": False, "status": "new", "ai_intent": None, "contact_id": None, "source": "website", "is_simulation": True},
+        ]
+        
+        calendar_events = [
+            {"event_id": str(uuid.uuid4()), "title": "Discovery call - TechCorp", "description": "Initial discovery call with Jane Smith", "start_time": (now + timedelta(days=1, hours=14)).isoformat(), "end_time": (now + timedelta(days=1, hours=15)).isoformat(), "attendees": ["Jane Smith - TechCorp"], "location": "Zoom", "type": "discovery_call", "status": "confirmed", "is_simulation": True, "created_at": now},
+            {"event_id": str(uuid.uuid4()), "title": "Strategy review - Innovate Solutions", "description": "Q2 strategy session", "start_time": (now + timedelta(days=4, hours=10)).isoformat(), "end_time": (now + timedelta(days=4, hours=12)).isoformat(), "attendees": ["Innovate Solutions team"], "location": "Office - Conference Room A", "type": "strategy_session", "status": "confirmed", "is_simulation": True, "created_at": now},
+            {"event_id": str(uuid.uuid4()), "title": "Check-in - Retail Dynamics", "description": "Mid-project status update", "start_time": (now + timedelta(days=6, hours=15)).isoformat(), "end_time": (now + timedelta(days=6, hours=16)).isoformat(), "attendees": ["Retail Dynamics"], "location": "Zoom", "type": "client_check_in", "status": "confirmed", "is_simulation": True, "created_at": now},
+        ]
+        
+        agents = [
+            {"agent_id": str(uuid.uuid4()), "name": "Alex Thompson", "email": "alex.t@consulting.com", "phone": "555-2201", "role": "senior_consultant", "status": "active", "start_date": (now - timedelta(days=365)).isoformat(), "license_number": None, "is_simulation": True, "created_at": now},
+            {"agent_id": str(uuid.uuid4()), "name": "Maya Patel", "email": "maya.p@consulting.com", "phone": "555-2202", "role": "consultant", "status": "onboarding", "start_date": (now - timedelta(days=14)).isoformat(), "license_number": None, "is_simulation": True, "created_at": now},
+        ]
+        
+        activities = [
+            {"event_id": str(uuid.uuid4()), "event_type": "inbox", "title": "New lead inquiry", "description": "TechCorp discovery call request", "related_id": None, "related_type": "inbox", "timestamp": now - timedelta(hours=4), "is_simulation": True},
+            {"event_id": str(uuid.uuid4()), "event_type": "calendar", "title": "Discovery call scheduled", "description": "TechCorp - Friday 2pm", "related_id": None, "related_type": "calendar", "timestamp": now - timedelta(hours=2), "is_simulation": True},
+            {"event_id": str(uuid.uuid4()), "event_type": "crm", "title": "Proposal sent", "description": "GrowthMax LLC - awaiting response", "related_id": None, "related_type": "contact", "timestamp": now - timedelta(days=5), "is_simulation": True},
+        ]
+        
+        simulation_data = {"contacts": contacts, "inbox": inbox_items, "events": calendar_events, "agents": agents, "activities": activities}
+    
+    elif industry == "ecommerce":
+        # E-commerce operational data
+        contacts = [
+            {"contact_id": str(uuid.uuid4()), "name": "Emma Wilson", "email": "emma.w@email.com", "phone": "555-3101", "type": "customer", "status": "active", "lifecycle_stage": "active_customer", "last_contact": now - timedelta(hours=6), "notes": "VIP customer, recent order #1234", "is_simulation": True, "created_at": now},
+            {"contact_id": str(uuid.uuid4()), "name": "James Brown", "email": "jbrown@email.com", "phone": "555-3102", "type": "customer", "status": "active", "lifecycle_stage": "support_pending", "last_contact": now - timedelta(hours=3), "notes": "Refund request for order #1235", "is_simulation": True, "created_at": now},
+            {"contact_id": str(uuid.uuid4()), "name": "Sophia Lee", "email": "sophia.l@email.com", "phone": "555-3103", "type": "customer", "status": "active", "lifecycle_stage": "active_customer", "last_contact": now - timedelta(days=1), "notes": "Interested in subscription plan", "is_simulation": True, "created_at": now},
+            {"contact_id": str(uuid.uuid4()), "name": "Oliver Martinez", "email": "oliver.m@email.com", "phone": "555-3104", "type": "customer", "status": "at_risk", "lifecycle_stage": "support_escalation", "last_contact": now - timedelta(hours=12), "notes": "Order delayed, needs immediate attention", "is_simulation": True, "created_at": now},
+        ]
+        
+        inbox_items = [
+            {"inbox_id": str(uuid.uuid4()), "from_name": "James Brown", "from_email": "jbrown@email.com", "subject": "Refund request - Order #1235", "body": "I received the wrong item in my order. I'd like to request a refund or exchange. Order #1235.", "received_at": now - timedelta(hours=3), "read": False, "status": "new", "ai_intent": None, "contact_id": None, "source": "support_email", "is_simulation": True},
+            {"inbox_id": str(uuid.uuid4()), "from_name": "Oliver Martinez", "from_email": "oliver.m@email.com", "subject": "Urgent: Order delay", "body": "My order was supposed to arrive yesterday but tracking shows it's still in transit. This is urgent as it's a gift. Order #1236.", "received_at": now - timedelta(hours=5), "read": False, "status": "new", "ai_intent": None, "contact_id": None, "source": "support_email", "is_simulation": True},
+            {"inbox_id": str(uuid.uuid4()), "from_name": "Emma Wilson", "from_email": "emma.w@email.com", "subject": "Product inquiry", "body": "Do you have the blue version of SKU-789 in stock? I'd like to order 3 units.", "received_at": now - timedelta(hours=8), "read": False, "status": "new", "ai_intent": None, "contact_id": None, "source": "support_email", "is_simulation": True},
+        ]
+        
+        calendar_events = [
+            {"event_id": str(uuid.uuid4()), "title": "Customer call - Oliver Martinez", "description": "Resolve order delay issue", "start_time": (now + timedelta(hours=4)).isoformat(), "end_time": (now + timedelta(hours=4, minutes=30)).isoformat(), "attendees": ["Oliver Martinez"], "location": "Phone", "type": "support_call", "status": "confirmed", "is_simulation": True, "created_at": now},
+            {"event_id": str(uuid.uuid4()), "title": "Campaign planning meeting", "description": "Q2 marketing campaign strategy", "start_time": (now + timedelta(days=2, hours=11)).isoformat(), "end_time": (now + timedelta(days=2, hours=12)).isoformat(), "attendees": ["Marketing team"], "location": "Office - Conference Room B", "type": "internal_meeting", "status": "confirmed", "is_simulation": True, "created_at": now},
+            {"event_id": str(uuid.uuid4()), "title": "Operations review", "description": "Weekly ops and fulfillment review", "start_time": (now + timedelta(days=1, hours=9)).isoformat(), "end_time": (now + timedelta(days=1, hours=10)).isoformat(), "attendees": ["Ops team"], "location": "Zoom", "type": "ops_review", "status": "confirmed", "is_simulation": True, "created_at": now},
+        ]
+        
+        agents = [
+            {"agent_id": str(uuid.uuid4()), "name": "Customer Support - Katie Johnson", "email": "katie.j@support.com", "phone": "555-3201", "role": "support_specialist", "status": "active", "start_date": (now - timedelta(days=120)).isoformat(), "license_number": None, "is_simulation": True, "created_at": now},
+            {"agent_id": str(uuid.uuid4()), "name": "Support - Tom Anderson", "email": "tom.a@support.com", "phone": "555-3202", "role": "support_specialist", "status": "onboarding", "start_date": (now - timedelta(days=10)).isoformat(), "license_number": None, "is_simulation": True, "created_at": now},
+        ]
+        
+        activities = [
+            {"event_id": str(uuid.uuid4()), "event_type": "inbox", "title": "Support ticket received", "description": "James Brown - refund request", "related_id": None, "related_type": "inbox", "timestamp": now - timedelta(hours=3), "is_simulation": True},
+            {"event_id": str(uuid.uuid4()), "event_type": "inbox", "title": "Urgent issue flagged", "description": "Oliver Martinez - order delay escalation", "related_id": None, "related_type": "support", "timestamp": now - timedelta(hours=5), "is_simulation": True},
+            {"event_id": str(uuid.uuid4()), "event_type": "crm", "title": "Customer profile updated", "description": "Emma Wilson marked as VIP", "related_id": None, "related_type": "customer", "timestamp": now - timedelta(hours=6), "is_simulation": True},
+        ]
+        
+        simulation_data = {"contacts": contacts, "inbox": inbox_items, "events": calendar_events, "agents": agents, "activities": activities}
+    
+    else:  # "other" - generic fallback
+        # Generic business operational data
+        contacts = [
+            {"contact_id": str(uuid.uuid4()), "name": "Alex Morgan", "email": "alex.m@email.com", "phone": "555-4101", "type": "contact", "status": "active", "lifecycle_stage": "active", "last_contact": now - timedelta(days=1), "notes": "Regular business contact", "is_simulation": True, "created_at": now},
+            {"contact_id": str(uuid.uuid4()), "name": "Jordan Smith", "email": "jordan.s@email.com", "phone": "555-4102", "type": "contact", "status": "active", "lifecycle_stage": "new", "last_contact": now - timedelta(hours=10), "notes": "New connection", "is_simulation": True, "created_at": now},
+            {"contact_id": str(uuid.uuid4()), "name": "Casey Williams", "email": "casey.w@email.com", "phone": "555-4103", "type": "contact", "status": "nurturing", "lifecycle_stage": "follow_up", "last_contact": now - timedelta(days=3), "notes": "Follow-up needed", "is_simulation": True, "created_at": now},
+        ]
+        
+        inbox_items = [
+            {"inbox_id": str(uuid.uuid4()), "from_name": "Jordan Smith", "from_email": "jordan.s@email.com", "subject": "Meeting request", "body": "I'd like to schedule a meeting to discuss potential collaboration. Are you available this week?", "received_at": now - timedelta(hours=4), "read": False, "status": "new", "ai_intent": None, "contact_id": None, "source": "email", "is_simulation": True},
+            {"inbox_id": str(uuid.uuid4()), "from_name": "Alex Morgan", "from_email": "alex.m@email.com", "subject": "Follow-up", "body": "Following up on our previous conversation. Let me know if you need any additional information.", "received_at": now - timedelta(hours=8), "read": False, "status": "new", "ai_intent": None, "contact_id": None, "source": "email", "is_simulation": True},
+        ]
+        
+        calendar_events = [
+            {"event_id": str(uuid.uuid4()), "title": "Team meeting", "description": "Weekly team sync", "start_time": (now + timedelta(days=1, hours=10)).isoformat(), "end_time": (now + timedelta(days=1, hours=11)).isoformat(), "attendees": ["Team"], "location": "Office", "type": "meeting", "status": "confirmed", "is_simulation": True, "created_at": now},
+            {"event_id": str(uuid.uuid4()), "title": "Call - Jordan Smith", "description": "Collaboration discussion", "start_time": (now + timedelta(days=2, hours=14)).isoformat(), "end_time": (now + timedelta(days=2, hours=15)).isoformat(), "attendees": ["Jordan Smith"], "location": "Phone", "type": "call", "status": "confirmed", "is_simulation": True, "created_at": now},
+        ]
+        
+        agents = [
+            {"agent_id": str(uuid.uuid4()), "name": "Team Member - Sam Lee", "email": "sam.l@business.com", "phone": "555-4201", "role": "team_member", "status": "active", "start_date": (now - timedelta(days=60)).isoformat(), "license_number": None, "is_simulation": True, "created_at": now},
+        ]
+        
+        activities = [
+            {"event_id": str(uuid.uuid4()), "event_type": "inbox", "title": "New request received", "description": "Jordan Smith - meeting request", "related_id": None, "related_type": "inbox", "timestamp": now - timedelta(hours=4), "is_simulation": True},
+            {"event_id": str(uuid.uuid4()), "event_type": "calendar", "title": "Meeting scheduled", "description": "Team meeting tomorrow", "related_id": None, "related_type": "calendar", "timestamp": now - timedelta(hours=2), "is_simulation": True},
+        ]
+        
+        simulation_data = {"contacts": contacts, "inbox": inbox_items, "events": calendar_events, "agents": agents, "activities": activities}
+    
+    # Insert all simulation data into database
+    if simulation_data.get("contacts"):
+        await contacts_col.insert_many(simulation_data["contacts"])
+    if simulation_data.get("inbox"):
+        await inbox_col.insert_many(simulation_data["inbox"])
+    if simulation_data.get("events"):
+        await calendar_col.insert_many(simulation_data["events"])
+    if simulation_data.get("agents"):
+        await agents_col.insert_many(simulation_data["agents"])
+    if simulation_data.get("activities"):
+        await activity_col.insert_many(simulation_data["activities"])
+    
+    return {
+        "success": True,
+        "industry": industry,
+        "data_generated": {
+            "contacts": len(simulation_data.get("contacts", [])),
+            "inbox": len(simulation_data.get("inbox", [])),
+            "events": len(simulation_data.get("events", [])),
+            "agents": len(simulation_data.get("agents", [])),
+            "activities": len(simulation_data.get("activities", []))
+        }
+    }
+
+
+@app.post("/api/simulation/generate")
+async def generate_simulation():
+    """Generate simulation data for the current industry."""
+    profile = await business_profile_col.find_one({"profile_id": "default"}, {"_id": 0})
+    if not profile:
+        raise HTTPException(status_code=404, detail="Business profile not found")
+    
+    if not profile.get("simulation_mode", False):
+        raise HTTPException(status_code=400, detail="Simulation mode is not enabled")
+    
+    industry = profile.get("industry", "other")
+    result = await generate_simulation_data(industry)
+    
+    await log_activity("system", "Simulation data generated", f"Generated {industry} operational data", "simulation", "system")
+    
+    return result
+
+
+@app.post("/api/simulation/clear")
+async def clear_simulation():
+    """Clear all simulation data."""
+    deleted_counts = {
+        "contacts": (await contacts_col.delete_many({"is_simulation": True})).deleted_count,
+        "inbox": (await inbox_col.delete_many({"is_simulation": True})).deleted_count,
+        "events": (await calendar_col.delete_many({"is_simulation": True})).deleted_count,
+        "agents": (await agents_col.delete_many({"is_simulation": True})).deleted_count,
+        "activities": (await activity_col.delete_many({"is_simulation": True})).deleted_count,
+    }
+    
+    await log_activity("system", "Simulation data cleared", "All simulation data removed", "simulation", "system")
+    
+    return {"success": True, "deleted": deleted_counts}
+
+
+@app.get("/api/simulation/status")
+async def simulation_status():
+    """Get simulation mode status and data counts."""
+    profile = await business_profile_col.find_one({"profile_id": "default"}, {"_id": 0})
+    simulation_mode = profile.get("simulation_mode", False) if profile else False
+    
+    counts = {
+        "contacts": await contacts_col.count_documents({"is_simulation": True}),
+        "inbox": await inbox_col.count_documents({"is_simulation": True}),
+        "events": await calendar_col.count_documents({"is_simulation": True}),
+        "agents": await agents_col.count_documents({"is_simulation": True}),
+        "activities": await activity_col.count_documents({"is_simulation": True}),
+    }
+    
+    return {
+        "simulation_mode": simulation_mode,
+        "industry": profile.get("industry", "other") if profile else "other",
+        "data_counts": counts,
+        "has_data": sum(counts.values()) > 0
+    }
