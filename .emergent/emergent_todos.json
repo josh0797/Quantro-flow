@@ -1,34 +1,46 @@
 [
   {
-    "content": "Backend: Create business_profile collection with schema, API endpoints, and seed default profile",
-    "status": "completed"
-  },
-  {
-    "content": "Backend: Create integrations_config collection for storing integration settings",
-    "status": "completed"
-  },
-  {
-    "content": "Backend: Update AI prompts to include Business Profile context (industry + entity naming)",
-    "status": "completed"
-  },
-  {
-    "content": "Frontend: Global rebrand - Replace 'Realty OS' with 'Business OS' and update all terminology",
+    "content": "Frontend: Create complete Settings page with all 4 tabs (Integrations, Automation, Business Profile, Workspace)",
     "status": "in_progress"
   },
   {
-    "content": "Frontend: Create BusinessProfileContext provider for dynamic labels",
+    "content": "Frontend: Wire BusinessProfileContext into App.js",
     "status": "pending"
   },
   {
-    "content": "Frontend: Create Settings page with tab navigation (Integrations, Automation, Business Profile, Workspace)",
+    "content": "Frontend: Global rebrand - Replace 'Realty OS' with 'Business OS' across all pages",
     "status": "pending"
   },
   {
-    "content": "Frontend: Update all pages to use dynamic labels from BusinessProfileContext",
+    "content": "Frontend: Create industry configuration mappings for dynamic content",
     "status": "pending"
   },
   {
-    "content": "Frontend: Update navigation sidebar to use dynamic labels and add Settings link",
+    "content": "Frontend: Update Dashboard with dynamic KPIs, AI suggestions, and activity feed based on industry",
+    "status": "pending"
+  },
+  {
+    "content": "Frontend: Update CRM page to use dynamic labels from BusinessProfile",
+    "status": "pending"
+  },
+  {
+    "content": "Frontend: Update Schedule page to use dynamic event types",
+    "status": "pending"
+  },
+  {
+    "content": "Frontend: Update Smart Inbox to use dynamic terminology",
+    "status": "pending"
+  },
+  {
+    "content": "Frontend: Update Onboarding to use dynamic terminology",
+    "status": "pending"
+  },
+  {
+    "content": "Frontend: Update navigation sidebar with dynamic labels and Settings link",
+    "status": "pending"
+  },
+  {
+    "content": "Frontend: Update ContentEngine to use dynamic terminology",
     "status": "pending"
   },
   {
@@ -40,7 +52,7 @@
     "status": "pending"
   },
   {
-    "content": "Update plan.md to mark Phase 6 (Business OS) as COMPLETED",
+    "content": "Update plan.md to mark Business OS Phase as COMPLETED",
     "status": "pending"
   }
 ]

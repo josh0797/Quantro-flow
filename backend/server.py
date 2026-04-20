@@ -1667,6 +1667,7 @@ async def get_system_status():
             "ai_engine": {"status": "running", "model": "gpt-4o", "requests_today": 12},
         },
         "timestamp": datetime.utcnow().isoformat(),
+    }
 
 
 # ─── Business Profile ──────────────────────────────────────────────────
