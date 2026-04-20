@@ -1773,5 +1773,3 @@ async def test_integration(provider: str):
         return {"success": True, "message": f"{provider.title()} connection is healthy"}
     else:
         return {"success": False, "message": f"{provider.title()} is not connected"}
-
-    }
