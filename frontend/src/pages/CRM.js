@@ -17,6 +17,7 @@ import { toast } from 'sonner';
 import { format, parseISO } from 'date-fns';
 import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 import { getEntityLabel } from '../config/industryConfig';
+import { useLanguage } from '../context/LanguageContext';
 
 const lifecycleColors = {
   new: 'bg-[hsl(var(--info)/0.15)] text-[hsl(var(--info))]',
@@ -33,6 +34,7 @@ const syncStatusColors = {
 
 export default function CRM() {
   const { profile } = useBusinessProfile();
+  const { t } = useLanguage();
   const industry = profile?.industry || 'other';
   const customLabels = profile?.entity_labels || {};
   const contactsLabel = getEntityLabel(industry, 'contacts', customLabels);
@@ -75,18 +77,18 @@ export default function CRM() {
 
   const handleCreate = async () => {
     if (!form.name || !form.email) {
-      toast.error('Name and email are required');
+      toast.error(t('crm.toasts.save_failed'));
       return;
     }
     setCreating(true);
     try {
       await createContact(form);
-      toast.success('Contact created', { description: `${form.name} added to CRM.` });
+      toast.success(t('crm.toasts.created'), { description: form.name });
       setForm({ name: '', email: '', phone: '', type: 'lead', source: 'manual', notes: '' });
       setDialogOpen(false);
       fetchContacts();
     } catch (err) {
-      toast.error('Failed to create contact');
+      toast.error(t('crm.toasts.save_failed'));
     } finally {
       setCreating(false);
     }
@@ -97,40 +99,40 @@ export default function CRM() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="font-display text-2xl font-semibold tracking-tight">{contactsLabel}</h1>
-          <p className="text-sm text-muted-foreground mt-1">Manage your {contactsLabel.toLowerCase()} and sync with CRM</p>
+          <p className="text-sm text-muted-foreground mt-1">{t('crm.subtitle')}</p>
         </div>
         <div className="flex items-center gap-2">
           <span className="flex items-center gap-1.5">
             <span className="status-dot running" />
-            <span className="text-xs text-muted-foreground">GHL Synced</span>
+            <span className="text-xs text-muted-foreground">CRM Sync</span>
           </span>
           <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
             <DialogTrigger asChild>
-              <Button size="sm"><Plus size={14} className="mr-1" /> Add {contactsLabel.slice(0, -1)}</Button>
+              <Button size="sm"><Plus size={14} className="mr-1" /> {t('crm.add_contact')}</Button>
             </DialogTrigger>
             <DialogContent className="bg-[hsl(var(--card))] border-[hsl(var(--border))]">
-              <DialogHeader><DialogTitle>Add {contactsLabel.slice(0, -1)}</DialogTitle></DialogHeader>
+              <DialogHeader><DialogTitle>{t('crm.new_contact')}</DialogTitle></DialogHeader>
               <div className="space-y-4 py-4">
-                <div><Label>Name *</Label><Input value={form.name} onChange={e => setForm({...form, name: e.target.value})} placeholder="Full name" /></div>
-                <div><Label>Email *</Label><Input value={form.email} onChange={e => setForm({...form, email: e.target.value})} placeholder="Email address" /></div>
-                <div><Label>Phone</Label><Input value={form.phone} onChange={e => setForm({...form, phone: e.target.value})} placeholder="Phone number" /></div>
-                <div><Label>Type</Label>
+                <div><Label>{t('crm.form.name_label')} *</Label><Input value={form.name} onChange={e => setForm({...form, name: e.target.value})} placeholder={t('crm.form.name_label')} /></div>
+                <div><Label>{t('crm.form.email_label')} *</Label><Input value={form.email} onChange={e => setForm({...form, email: e.target.value})} placeholder={t('crm.form.email_label')} /></div>
+                <div><Label>{t('crm.form.phone_label')}</Label><Input value={form.phone} onChange={e => setForm({...form, phone: e.target.value})} placeholder={t('crm.form.phone_label')} /></div>
+                <div><Label>{t('crm.form.status_label')}</Label>
                   <Select value={form.type} onValueChange={v => setForm({...form, type: v})}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="lead">Lead</SelectItem>
-                      <SelectItem value="client">Client</SelectItem>
+                      <SelectItem value="lead">{t('crm.status.lead')}</SelectItem>
+                      <SelectItem value="client">{t('crm.status.customer')}</SelectItem>
                       <SelectItem value="investor">Investor</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
-                <div><Label>Notes</Label><Input value={form.notes} onChange={e => setForm({...form, notes: e.target.value})} placeholder="Optional notes" /></div>
+                <div><Label>{t('crm.form.notes_label')}</Label><Input value={form.notes} onChange={e => setForm({...form, notes: e.target.value})} placeholder={t('common.optional')} /></div>
               </div>
               <DialogFooter>
-                <Button variant="secondary" onClick={() => setDialogOpen(false)}>Cancel</Button>
+                <Button variant="secondary" onClick={() => setDialogOpen(false)}>{t('common.cancel')}</Button>
                 <Button onClick={handleCreate} disabled={creating}>
                   {creating ? <Loader2 size={14} className="animate-spin mr-1" /> : <Plus size={14} className="mr-1" />}
-                  Add Contact
+                  {t('crm.add_contact')}
                 </Button>
               </DialogFooter>
             </DialogContent>
@@ -166,11 +168,11 @@ export default function CRM() {
                 <Table data-testid="crm-contacts-table">
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Name</TableHead>
-                      <TableHead>Type</TableHead>
-                      <TableHead>Stage</TableHead>
-                      <TableHead>GHL Sync</TableHead>
-                      <TableHead>Updated</TableHead>
+                      <TableHead>{t('crm.table.name')}</TableHead>
+                      <TableHead>{t('crm.table.status')}</TableHead>
+                      <TableHead>{t('crm.status.active')}</TableHead>
+                      <TableHead>{t('integrations.groups.crm')}</TableHead>
+                      <TableHead>{t('common.edit')}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -317,7 +319,7 @@ export default function CRM() {
             <Card className="h-full flex items-center justify-center min-h-[300px]">
               <CardContent className="text-center">
                 <Users size={32} className="mx-auto text-muted-foreground mb-3" />
-                <p className="text-sm text-muted-foreground">Select a contact to view profile</p>
+                <p className="text-sm text-muted-foreground">{t('crm.empty_state')}</p>
               </CardContent>
             </Card>
           )}

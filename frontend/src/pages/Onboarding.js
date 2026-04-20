@@ -17,6 +17,7 @@ import { toast } from 'sonner';
 import { format, parseISO } from 'date-fns';
 import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 import { getEntityLabel } from '../config/industryConfig';
+import { useLanguage } from '../context/LanguageContext';
 
 const statusColors = {
   onboarding: 'bg-[hsl(var(--warning)/0.15)] text-[hsl(var(--warning))]',
@@ -26,6 +27,7 @@ const statusColors = {
 
 export default function Onboarding() {
   const { profile } = useBusinessProfile();
+  const { t } = useLanguage();
   const industry = profile?.industry || 'other';
   const customLabels = profile?.entity_labels || {};
   const teamLabel = getEntityLabel(industry, 'team_members', customLabels);
@@ -55,18 +57,18 @@ export default function Onboarding() {
 
   const handleCreate = async () => {
     if (!form.name || !form.email) {
-      toast.error('Name and email are required');
+      toast.error(t('onboarding.toasts.save_failed'));
       return;
     }
     setCreating(true);
     try {
       await createAgent(form);
-      toast.success('Agent added', { description: `${form.name} onboarding initiated.` });
+      toast.success(t('onboarding.toasts.created'), { description: form.name });
       setForm({ name: '', email: '', phone: '', role: 'agent' });
       setDialogOpen(false);
       fetchAgents();
     } catch (err) {
-      toast.error('Failed to add agent');
+      toast.error(t('onboarding.toasts.save_failed'));
     } finally {
       setCreating(false);
     }
@@ -78,7 +80,7 @@ export default function Onboarding() {
       await updateOnboardingTask(taskId, newStatus);
       fetchAgents();
     } catch (err) {
-      toast.error('Failed to update task');
+      toast.error(t('onboarding.toasts.save_failed'));
     }
   };
 
@@ -89,22 +91,22 @@ export default function Onboarding() {
     <div className="page-container relative z-[1]">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="font-display text-2xl font-semibold tracking-tight">{teamLabel} Onboarding</h1>
-          <p className="text-sm text-muted-foreground mt-1">Track and manage team setup workflows</p>
+          <h1 className="font-display text-2xl font-semibold tracking-tight">{teamLabel} {t('onboarding.title')}</h1>
+          <p className="text-sm text-muted-foreground mt-1">{t('onboarding.subtitle')}</p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
           <DialogTrigger asChild>
             <Button data-testid="onboarding-add-agent" size="sm">
-              <Plus size={14} className="mr-1" /> Add {teamLabel.slice(0, -1)}
+              <Plus size={14} className="mr-1" /> {t('onboarding.new_flow')}
             </Button>
           </DialogTrigger>
           <DialogContent className="bg-[hsl(var(--card))] border-[hsl(var(--border))]">
-            <DialogHeader><DialogTitle>Add New {teamLabel.slice(0, -1)}</DialogTitle></DialogHeader>
+            <DialogHeader><DialogTitle>{t('onboarding.new_flow')}</DialogTitle></DialogHeader>
             <div className="space-y-4 py-4">
-              <div><Label>Full Name *</Label><Input value={form.name} onChange={e => setForm({...form, name: e.target.value})} placeholder="Full name" /></div>
-              <div><Label>Email *</Label><Input value={form.email} onChange={e => setForm({...form, email: e.target.value})} placeholder="Email address" /></div>
-              <div><Label>Phone</Label><Input value={form.phone} onChange={e => setForm({...form, phone: e.target.value})} placeholder="Phone number" /></div>
-              <div><Label>Role</Label>
+              <div><Label>{t('crm.form.name_label')} *</Label><Input value={form.name} onChange={e => setForm({...form, name: e.target.value})} placeholder={t('crm.form.name_label')} /></div>
+              <div><Label>{t('crm.form.email_label')} *</Label><Input value={form.email} onChange={e => setForm({...form, email: e.target.value})} placeholder={t('crm.form.email_label')} /></div>
+              <div><Label>{t('crm.form.phone_label')}</Label><Input value={form.phone} onChange={e => setForm({...form, phone: e.target.value})} placeholder={t('crm.form.phone_label')} /></div>
+              <div><Label>{t('onboarding.form.type_label')}</Label>
                 <Select value={form.role} onValueChange={v => setForm({...form, role: v})}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
@@ -116,10 +118,10 @@ export default function Onboarding() {
               </div>
             </div>
             <DialogFooter>
-              <Button variant="secondary" onClick={() => setDialogOpen(false)}>Cancel</Button>
+              <Button variant="secondary" onClick={() => setDialogOpen(false)}>{t('common.cancel')}</Button>
               <Button onClick={handleCreate} disabled={creating}>
                 {creating ? <Loader2 size={14} className="animate-spin mr-1" /> : <UserPlus size={14} className="mr-1" />}
-                Add Agent
+                {t('common.create')}
               </Button>
             </DialogFooter>
           </DialogContent>

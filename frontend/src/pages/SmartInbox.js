@@ -26,6 +26,7 @@ import { toast } from 'sonner';
 import { format, parseISO } from 'date-fns';
 import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 import { getEntityLabel } from '../config/industryConfig';
+import { useLanguage } from '../context/LanguageContext';
 
 // Human-friendly intent labels (no AI jargon)
 const intentConfig = {
@@ -73,6 +74,7 @@ function getConfidenceLabel(confidence) {
 
 export default function SmartInbox() {
   const { profile } = useBusinessProfile();
+  const { t } = useLanguage();
   const industry = profile?.industry || 'other';
   const customLabels = profile?.entity_labels || {};
   
@@ -135,7 +137,7 @@ export default function SmartInbox() {
   const handleBatchAnalyze = async () => {
     const idsToAnalyze = selectedNewIds.length > 0 ? selectedNewIds : newItems.map(i => i.inbox_id);
     if (idsToAnalyze.length === 0) {
-      toast.info('No new messages to process');
+      toast.info(t('smart_inbox.empty_state'));
       return;
     }
     setBatchProcessing(true);
@@ -145,13 +147,13 @@ export default function SmartInbox() {
     ));
     try {
       const result = await batchAnalyzeInbox(idsToAnalyze);
-      toast.success('Batch triage complete', {
+      toast.success(t('smart_inbox.toasts.batch_done', { count: result.analyzed_count ?? result.items?.length ?? '' }), {
         description: `${result.classified} of ${result.total} messages classified`
       });
       setSelectedIds(new Set());
       fetchInbox();
     } catch (err) {
-      toast.error('Batch triage failed', { description: err.message });
+      toast.error(t('smart_inbox.toasts.batch_failed'), { description: err.message });
       fetchInbox();
     } finally {
       setBatchProcessing(false);
@@ -162,20 +164,20 @@ export default function SmartInbox() {
   const handleBatchApprove = async () => {
     const idsToApprove = selectedProcessedIds.length > 0 ? selectedProcessedIds : processedItems.map(i => i.inbox_id);
     if (idsToApprove.length === 0) {
-      toast.info('No classified messages to approve');
+      toast.info(t('smart_inbox.empty_state'));
       return;
     }
     setBatchApproving(true);
     try {
       const result = await batchApproveInbox(idsToApprove);
-      toast.success('Batch approval complete', {
+      toast.success(t('smart_inbox.toasts.batch_done', { count: result.approved_count ?? '' }), {
         description: `${result.actioned} of ${result.total} actions executed`
       });
       setSelectedIds(new Set());
       fetchInbox();
       setSelectedItem(null);
     } catch (err) {
-      toast.error('Batch approval failed');
+      toast.error(t('smart_inbox.toasts.batch_failed'));
     } finally {
       setBatchApproving(false);
     }
@@ -189,9 +191,9 @@ export default function SmartInbox() {
       const result = await analyzeInboxItem(inboxId);
       setItems(prev => prev.map(i => i.inbox_id === inboxId ? result : i));
       if (selectedItem?.inbox_id === inboxId) setSelectedItem(result);
-      toast.success('Message classified', { description: `${intentConfig[result.ai_intent?.intent]?.label || result.ai_intent?.intent}` });
+      toast.success(t('smart_inbox.toasts.analyzed'), { description: `${intentConfig[result.ai_intent?.intent]?.label || result.ai_intent?.intent}` });
     } catch (err) {
-      toast.error('Classification failed');
+      toast.error(t('smart_inbox.toasts.analyze_failed'));
       fetchInbox();
     } finally {
       setAnalyzing(null);
@@ -203,12 +205,12 @@ export default function SmartInbox() {
     setApproving(true);
     try {
       await approveWithOverrides(inboxId, overrides);
-      toast.success('Action executed', { description: 'The system has completed the requested action.' });
+      toast.success(t('smart_inbox.toasts.marked_processed'), { description: t('smart_inbox.toasts.analyzed') });
       fetchInbox();
       setSelectedItem(null);
       setEditDialogOpen(false);
     } catch (err) {
-      toast.error('Action failed', { description: err.response?.data?.detail || err.message });
+      toast.error(t('smart_inbox.toasts.mark_failed'), { description: err.response?.data?.detail || err.message });
     } finally {
       setApproving(false);
     }
@@ -217,11 +219,11 @@ export default function SmartInbox() {
   const handleDecline = async (inboxId) => {
     try {
       await declineInboxAction(inboxId);
-      toast.info('Action skipped');
+      toast.info(t('smart_inbox.toasts.escalated'));
       fetchInbox();
       setSelectedItem(null);
     } catch (err) {
-      toast.error('Failed to skip');
+      toast.error(t('smart_inbox.toasts.mark_failed'));
     }
   };
 
@@ -278,7 +280,7 @@ export default function SmartInbox() {
 
       await handleApproveWithOverrides(selectedItem.inbox_id, overrides);
     } catch (err) {
-      toast.error('Failed to save changes');
+      toast.error(t('smart_inbox.toasts.mark_failed'));
     } finally {
       setSaving(false);
     }
@@ -289,7 +291,7 @@ export default function SmartInbox() {
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="font-display text-2xl font-semibold tracking-tight">Smart Inbox</h1>
+          <h1 className="font-display text-2xl font-semibold tracking-tight">{t('smart_inbox.title')}</h1>
           <p className="text-sm text-muted-foreground mt-1">Intelligent message processing and workflow automation</p>
         </div>
         <div className="flex items-center gap-3">

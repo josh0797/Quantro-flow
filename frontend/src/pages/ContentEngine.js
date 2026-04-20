@@ -22,6 +22,7 @@ import {
 import { toast } from 'sonner';
 import { format, parseISO } from 'date-fns';
 import { useBusinessProfile } from '../contexts/BusinessProfileContext';
+import { useLanguage } from '../context/LanguageContext';
 
 const categoryLabels = {
   welcome: { label: 'Welcome', color: 'bg-[hsl(var(--success)/0.15)] text-[hsl(var(--success))]' },
@@ -33,6 +34,7 @@ const categoryLabels = {
 
 export default function ContentEngine() {
   const { profile } = useBusinessProfile();
+  const { t } = useLanguage();
   const industry = profile?.industry || 'other';
   
   const [content, setContent] = useState([]);
@@ -81,17 +83,17 @@ export default function ContentEngine() {
 
   const handleGenerate = async () => {
     if (!prompt.trim()) {
-      toast.error('Please enter a prompt');
+      toast.error(t('content_engine.toasts.generate_failed'));
       return;
     }
     setGenerating(true);
     try {
       const result = await generateContent({ prompt, type: 'both' });
-      toast.success('Content generated', { description: `${result.items.length} item(s) created` });
+      toast.success(t('content_engine.toasts.generated'), { description: `${result.items.length} item(s)` });
       setPrompt('');
       fetchContent();
     } catch (err) {
-      toast.error('Generation failed', { description: err.response?.data?.detail || err.message });
+      toast.error(t('content_engine.toasts.generate_failed'), { description: err.response?.data?.detail || err.message });
     } finally {
       setGenerating(false);
     }
@@ -100,11 +102,11 @@ export default function ContentEngine() {
   const handleDelete = async (contentId) => {
     try {
       await deleteContent(contentId);
-      toast.success('Content deleted');
+      toast.success(t('content_engine.toasts.template_deleted'));
       fetchContent();
       if (previewItem?.content_id === contentId) setPreviewItem(null);
     } catch (err) {
-      toast.error('Delete failed');
+      toast.error(t('content_engine.toasts.save_failed'));
     }
   };
 
@@ -115,7 +117,7 @@ export default function ContentEngine() {
 
   const handleCreateTemplate = async () => {
     if (!templateForm.name || !templateForm.body_template) {
-      toast.error('Name and body are required');
+      toast.error(t('content_engine.toasts.save_failed'));
       return;
     }
     setSavingTemplate(true);
@@ -125,7 +127,7 @@ export default function ContentEngine() {
         variables: templateForm.variables ? templateForm.variables.split(',').map(s => s.trim()) : [],
         tags: templateForm.tags ? templateForm.tags.split(',').map(s => s.trim()) : [],
       });
-      toast.success('Template created');
+      toast.success(t('content_engine.toasts.template_saved'));
       setTemplateDialogOpen(false);
       setTemplateForm({ name: '', category: 'welcome', template_type: 'email', subject_template: '', body_template: '', variables: '', tags: '' });
       fetchTemplates();
@@ -143,7 +145,7 @@ export default function ContentEngine() {
       fetchTemplates();
       if (selectedTemplate?.template_id === templateId) setSelectedTemplate(null);
     } catch (err) {
-      toast.error('Delete failed');
+      toast.error(t('content_engine.toasts.save_failed'));
     }
   };
 
@@ -179,13 +181,13 @@ export default function ContentEngine() {
     setGeneratingFromTemplate(true);
     try {
       const result = await generateFromTemplate(genTemplate.template_id, genContext);
-      toast.success('Content generated from template', {
+      toast.success(t('content_engine.toasts.generated'), {
         description: result.enhanced ? 'AI-enhanced version created' : 'Template filled with your content'
       });
       setGenDialogOpen(false);
       fetchContent();
     } catch (err) {
-      toast.error('Generation failed', { description: err.response?.data?.detail || err.message });
+      toast.error(t('content_engine.toasts.generate_failed'), { description: err.response?.data?.detail || err.message });
     } finally {
       setGeneratingFromTemplate(false);
     }
@@ -198,7 +200,7 @@ export default function ContentEngine() {
     <div className="page-container relative z-[1]">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="font-display text-2xl font-semibold tracking-tight">Content Engine</h1>
+          <h1 className="font-display text-2xl font-semibold tracking-tight">{t('content_engine.title')}</h1>
           <p className="text-sm text-muted-foreground mt-1">AI-powered content generation and template management</p>
         </div>
         <Badge variant="secondary" className="text-xs">{content.length} items | {templates.length} templates</Badge>

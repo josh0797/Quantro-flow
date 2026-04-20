@@ -155,7 +155,7 @@ export default function Dashboard() {
         <Card data-testid="kpi-team" className="card-hover cursor-pointer" onClick={() => navigate('/onboarding')}>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">
-              {industryConfig.kpis.team.label}
+              {industry === 'other' ? t('dashboard.kpi.team') : industryConfig.kpis.team.label}
             </CardTitle>
             <Users className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
@@ -163,7 +163,7 @@ export default function Dashboard() {
             <div>
               <p className="font-display text-2xl font-semibold tabular-nums">{metrics?.agents?.total || 0}</p>
               <p className="text-xs text-muted-foreground mt-1">
-                {metrics?.agents?.active || 0} active
+                {t('dashboard.kpi.team_active', { count: metrics?.agents?.active || 0 })}
               </p>
             </div>
           </CardContent>
@@ -173,14 +173,14 @@ export default function Dashboard() {
         <Card data-testid="kpi-schedule" className="card-hover cursor-pointer" onClick={() => navigate('/schedule')}>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">
-              {industryConfig.kpis.schedule.label}
+              {industry === 'other' ? t('dashboard.kpi.schedule') : industryConfig.kpis.schedule.label}
             </CardTitle>
             <Calendar className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
             <div>
               <p className="font-display text-2xl font-semibold tabular-nums">{metrics?.calendar?.upcoming_events || 0}</p>
-              <p className="text-xs text-muted-foreground mt-1">next 7 days</p>
+              <p className="text-xs text-muted-foreground mt-1">{t('dashboard.kpi.schedule_window')}</p>
             </div>
           </CardContent>
         </Card>
@@ -189,7 +189,7 @@ export default function Dashboard() {
         <Card data-testid="kpi-inbox" className="card-hover cursor-pointer" onClick={() => navigate('/inbox')}>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">
-              {industryConfig.kpis.inbox.label}
+              {industry === 'other' ? t('dashboard.kpi.inbox') : industryConfig.kpis.inbox.label}
             </CardTitle>
             <Inbox className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
@@ -197,7 +197,7 @@ export default function Dashboard() {
             <div>
               <p className="font-display text-2xl font-semibold tabular-nums">{metrics?.inbox?.new || 0}</p>
               <p className="text-xs text-muted-foreground mt-1">
-                {metrics?.inbox?.processed || 0} processed
+                {t('dashboard.kpi.inbox_processed', { count: metrics?.inbox?.processed || 0 })}
               </p>
             </div>
           </CardContent>
@@ -207,7 +207,7 @@ export default function Dashboard() {
         <Card data-testid="kpi-crm" className="card-hover cursor-pointer" onClick={() => navigate('/crm')}>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">
-              {industryConfig.kpis.crm.label}
+              {industry === 'other' ? t('dashboard.kpi.crm') : industryConfig.kpis.crm.label}
             </CardTitle>
             <Database className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
@@ -215,7 +215,7 @@ export default function Dashboard() {
             <div>
               <p className="font-display text-2xl font-semibold tabular-nums">{metrics?.crm?.total_contacts || 0}</p>
               <p className="text-xs text-muted-foreground mt-1">
-                {metrics?.crm?.new_this_week || 0} new this week
+                {t('dashboard.kpi.crm_new', { count: metrics?.crm?.new_this_week || 0 })}
               </p>
             </div>
           </CardContent>
@@ -237,14 +237,16 @@ export default function Dashboard() {
               </div>
               <div className="flex-1">
                 <p className="text-sm font-medium text-foreground">
-                  {connectedIntegrations.length} Integration{connectedIntegrations.length > 1 ? 's' : ''} Connected
+                  {connectedIntegrations.length > 1
+                    ? t('dashboard.integrations_connected', { count: connectedIntegrations.length })
+                    : t('dashboard.integration_connected', { count: connectedIntegrations.length })}
                 </p>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  {connectedIntegrations.map(i => i.provider === 'google_calendar' ? 'Calendar' : i.provider === 'gmail' ? 'Gmail' : i.provider.toUpperCase()).join(', ')} syncing in real-time
+                  {connectedIntegrations.map(i => i.provider === 'google_calendar' ? t('integrations.calendar.name') : i.provider === 'gmail' ? t('integrations.gmail.name') : i.provider.toUpperCase()).join(', ')} · {t('dashboard.integration_sync_status')}
                 </p>
               </div>
               <Button variant="outline" size="sm" onClick={() => navigate('/settings')}>
-                Manage
+                {t('dashboard.manage')}
               </Button>
             </div>
           </CardContent>
@@ -260,9 +262,9 @@ export default function Dashboard() {
               <div className="flex items-center justify-between">
                 <CardTitle className="flex items-center gap-2">
                   <Activity size={16} className="text-[hsl(var(--primary))]" />
-                  Live Activity
+                  {t('dashboard.live_activity')}
                 </CardTitle>
-                <Badge variant="outline" className="text-[10px]">Real-time</Badge>
+                <Badge variant="outline" className="text-[10px]">{t('dashboard.real_time')}</Badge>
               </div>
             </CardHeader>
             <CardContent>
@@ -271,9 +273,9 @@ export default function Dashboard() {
                   {activities.length === 0 ? (
                     <div className="flex flex-col items-center justify-center h-[240px] text-center">
                       <Activity size={32} className="text-muted-foreground/40 mb-3" />
-                      <p className="text-sm text-muted-foreground">No recent activity</p>
+                      <p className="text-sm text-muted-foreground">{t('dashboard.no_recent_activity')}</p>
                       <p className="text-xs text-muted-foreground/70 mt-1">
-                        Activity will appear here as your system processes items
+                        {t('dashboard.activity_hint')}
                       </p>
                     </div>
                   ) : (
@@ -314,16 +316,16 @@ export default function Dashboard() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Calendar size={16} className="text-[hsl(var(--warning))]" />
-                Today's {getEntityLabel(industry, 'meetings', customLabels)}
+                {t('dashboard.today_meetings')}
               </CardTitle>
             </CardHeader>
             <CardContent>
               {todayEvents.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-8 text-center">
                   <Clock size={32} className="text-muted-foreground/40 mb-3" />
-                  <p className="text-sm text-muted-foreground">No {getEntityLabel(industry, 'meetings', customLabels).toLowerCase()} scheduled today</p>
+                  <p className="text-sm text-muted-foreground">{t('dashboard.no_meetings')}</p>
                   <Button size="sm" variant="outline" className="mt-4" onClick={() => navigate('/schedule')}>
-                    View Full Calendar
+                    {t('dashboard.view_full_calendar')}
                   </Button>
                 </div>
               ) : (
@@ -357,7 +359,7 @@ export default function Dashboard() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Zap size={16} className="text-[hsl(var(--primary))]" />
-                AI Suggestions
+                {t('dashboard.ai_suggestions')}
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -365,7 +367,7 @@ export default function Dashboard() {
                 {suggestions.length === 0 ? (
                   <div className="flex flex-col items-center justify-center py-8 text-center">
                     <Zap size={32} className="text-muted-foreground/40 mb-3" />
-                    <p className="text-sm text-muted-foreground">No suggestions yet</p>
+                    <p className="text-sm text-muted-foreground">{t('dashboard.no_suggestions')}</p>
                   </div>
                 ) : (
                   suggestions.map((suggestion, idx) => {
@@ -392,7 +394,7 @@ export default function Dashboard() {
           {/* Quick Actions */}
           <Card>
             <CardHeader>
-              <CardTitle className="text-sm font-medium">Quick Actions</CardTitle>
+              <CardTitle className="text-sm font-medium">{t('dashboard.quick_actions')}</CardTitle>
             </CardHeader>
             <CardContent>
               <div className="grid gap-2">
@@ -404,7 +406,7 @@ export default function Dashboard() {
                   data-testid="quick-action-inbox"
                 >
                   <Inbox size={14} className="mr-2" />
-                  Process Inbox
+                  {t('smart_inbox.process_inbox')}
                 </Button>
                 <Button 
                   variant="outline" 
@@ -414,7 +416,7 @@ export default function Dashboard() {
                   data-testid="quick-action-schedule"
                 >
                   <Calendar size={14} className="mr-2" />
-                  View Calendar
+                  {t('dashboard.view_full_calendar')}
                 </Button>
                 <Button 
                   variant="outline" 
@@ -424,7 +426,7 @@ export default function Dashboard() {
                   data-testid="quick-action-crm"
                 >
                   <Users size={14} className="mr-2" />
-                  Manage {getEntityLabel(industry, 'contacts', customLabels)}
+                  {t('dashboard.manage')} {getEntityLabel(industry, 'contacts', customLabels)}
                 </Button>
                 <Button 
                   variant="outline" 
@@ -434,7 +436,7 @@ export default function Dashboard() {
                   data-testid="quick-action-content"
                 >
                   <PenTool size={14} className="mr-2" />
-                  Create Content
+                  {t('content_engine.generate.generate_button')}
                 </Button>
               </div>
             </CardContent>
@@ -443,24 +445,24 @@ export default function Dashboard() {
           {/* System Health */}
           <Card>
             <CardHeader>
-              <CardTitle className="text-sm font-medium">System Health</CardTitle>
+              <CardTitle className="text-sm font-medium">{t('system_health.title')}</CardTitle>
             </CardHeader>
             <CardContent>
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs text-muted-foreground">AI Engine</span>
-                  <Badge variant="outline" className="text-[10px] bg-[hsl(var(--success)/0.15)] text-[hsl(var(--success))]">Running</Badge>
+                  <span className="text-xs text-muted-foreground">{t('dashboard.ai_engine')}</span>
+                  <Badge variant="outline" className="text-[10px] bg-[hsl(var(--success)/0.15)] text-[hsl(var(--success))]">{t('dashboard.running')}</Badge>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-xs text-muted-foreground">Automation</span>
-                  <Badge variant="outline" className="text-[10px] bg-[hsl(var(--success)/0.15)] text-[hsl(var(--success))]">Active</Badge>
+                  <span className="text-xs text-muted-foreground">{t('sidebar.automation')}</span>
+                  <Badge variant="outline" className="text-[10px] bg-[hsl(var(--success)/0.15)] text-[hsl(var(--success))]">{t('dashboard.active')}</Badge>
                 </div>
                 {connectedIntegrations.map((integration, idx) => (
                   <div key={idx} className="flex items-center justify-between">
                     <span className="text-xs text-muted-foreground capitalize">
-                      {integration.provider === 'google_calendar' ? 'Calendar' : integration.provider === 'gmail' ? 'Gmail' : integration.provider}
+                      {integration.provider === 'google_calendar' ? t('integrations.calendar.name') : integration.provider === 'gmail' ? t('integrations.gmail.name') : integration.provider}
                     </span>
-                    <Badge variant="outline" className="text-[10px] bg-[hsl(var(--success)/0.15)] text-[hsl(var(--success))]">Connected</Badge>
+                    <Badge variant="outline" className="text-[10px] bg-[hsl(var(--success)/0.15)] text-[hsl(var(--success))]">{t('integrations.status.connected')}</Badge>
                   </div>
                 ))}
               </div>

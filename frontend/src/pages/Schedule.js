@@ -14,9 +14,11 @@ import { toast } from 'sonner';
 import { format, parseISO, isToday, isTomorrow, addDays, isBefore, isAfter, startOfDay } from 'date-fns';
 import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 import { getEntityLabel, getIndustryConfig } from '../config/industryConfig';
+import { useLanguage } from '../context/LanguageContext';
 
 export default function Schedule() {
   const { profile } = useBusinessProfile();
+  const { t } = useLanguage();
   const industry = profile?.industry || 'other';
   const customLabels = profile?.entity_labels || {};
   const meetingsLabel = getEntityLabel(industry, 'meetings', customLabels);
@@ -43,7 +45,7 @@ export default function Schedule() {
 
   const handleCreate = async () => {
     if (!form.title || !form.start_time || !form.end_time) {
-      toast.error('Please fill in required fields');
+      toast.error(t('schedule.toasts.save_failed'));
       return;
     }
     setCreating(true);
@@ -52,12 +54,12 @@ export default function Schedule() {
         ...form,
         attendees: form.attendees ? form.attendees.split(',').map(s => s.trim()) : [],
       });
-      toast.success('Event created', { description: `${form.title} has been scheduled.` });
+      toast.success(t('schedule.toasts.created'), { description: form.title });
       setForm({ title: '', description: '', start_time: '', end_time: '', location: '', attendees: '' });
       setDialogOpen(false);
       fetchEvents();
     } catch (err) {
-      toast.error('Failed to create event');
+      toast.error(t('schedule.toasts.save_failed'));
     } finally {
       setCreating(false);
     }
@@ -66,10 +68,10 @@ export default function Schedule() {
   const handleDelete = async (eventId) => {
     try {
       await deleteCalendarEvent(eventId);
-      toast.success('Event deleted');
+      toast.success(t('schedule.toasts.cancelled'));
       fetchEvents();
     } catch (err) {
-      toast.error('Failed to delete event');
+      toast.error(t('schedule.toasts.save_failed'));
     }
   };
 
@@ -160,33 +162,33 @@ export default function Schedule() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="font-display text-2xl font-semibold tracking-tight">{meetingsLabel}</h1>
-          <p className="text-sm text-muted-foreground mt-1">{industryConfig.name} scheduling and calendar events</p>
+          <p className="text-sm text-muted-foreground mt-1">{industryConfig.name} · {t('schedule.subtitle')}</p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
           <DialogTrigger asChild>
             <Button data-testid="schedule-create-event-button" size="sm">
-              <Plus size={14} className="mr-1" /> New Event
+              <Plus size={14} className="mr-1" /> {t('schedule.add_event')}
             </Button>
           </DialogTrigger>
           <DialogContent data-testid="schedule-event-dialog" className="bg-[hsl(var(--card))] border-[hsl(var(--border))]">
             <DialogHeader>
-              <DialogTitle>Create Event</DialogTitle>
+              <DialogTitle>{t('schedule.add_event')}</DialogTitle>
             </DialogHeader>
             <div className="space-y-4 py-4">
-              <div><Label>Title *</Label><Input value={form.title} onChange={e => setForm({...form, title: e.target.value})} placeholder="Meeting title" /></div>
-              <div><Label>Description</Label><Input value={form.description} onChange={e => setForm({...form, description: e.target.value})} placeholder="Optional description" /></div>
+              <div><Label>{t('schedule.form.title_label')} *</Label><Input value={form.title} onChange={e => setForm({...form, title: e.target.value})} placeholder={t('schedule.form.title_label')} /></div>
+              <div><Label>{t('schedule.form.notes_label')}</Label><Input value={form.description} onChange={e => setForm({...form, description: e.target.value})} placeholder={t('common.optional')} /></div>
               <div className="grid grid-cols-2 gap-4">
-                <div><Label>Start *</Label><Input type="datetime-local" value={form.start_time} onChange={e => setForm({...form, start_time: e.target.value})} /></div>
-                <div><Label>End *</Label><Input type="datetime-local" value={form.end_time} onChange={e => setForm({...form, end_time: e.target.value})} /></div>
+                <div><Label>{t('schedule.form.date_label')} *</Label><Input type="datetime-local" value={form.start_time} onChange={e => setForm({...form, start_time: e.target.value})} /></div>
+                <div><Label>{t('schedule.form.time_label')} *</Label><Input type="datetime-local" value={form.end_time} onChange={e => setForm({...form, end_time: e.target.value})} /></div>
               </div>
-              <div><Label>Location</Label><Input value={form.location} onChange={e => setForm({...form, location: e.target.value})} placeholder="Address or virtual link" /></div>
-              <div><Label>Attendees</Label><Input value={form.attendees} onChange={e => setForm({...form, attendees: e.target.value})} placeholder="Comma-separated names" /></div>
+              <div><Label>{t('schedule.form.location_label')}</Label><Input value={form.location} onChange={e => setForm({...form, location: e.target.value})} placeholder={t('schedule.form.location_label')} /></div>
+              <div><Label>{t('schedule.form.attendees_label')}</Label><Input value={form.attendees} onChange={e => setForm({...form, attendees: e.target.value})} placeholder={t('schedule.form.attendees_label')} /></div>
             </div>
             <DialogFooter>
-              <Button variant="secondary" onClick={() => setDialogOpen(false)}>Cancel</Button>
+              <Button variant="secondary" onClick={() => setDialogOpen(false)}>{t('common.cancel')}</Button>
               <Button onClick={handleCreate} disabled={creating}>
                 {creating ? <Loader2 size={14} className="animate-spin mr-1" /> : <Calendar size={14} className="mr-1" />}
-                Create
+                {t('common.create')}
               </Button>
             </DialogFooter>
           </DialogContent>
@@ -199,9 +201,9 @@ export default function Schedule() {
         </div>
       ) : (
         <div data-testid="schedule-calendar">
-          <EventSection title="Today" events={groups.today} emptyText="No events today. The system is monitoring for new requests." />
-          <EventSection title="Tomorrow" events={groups.tomorrow} emptyText="No events scheduled for tomorrow." />
-          <EventSection title="Upcoming" events={groups.upcoming} emptyText="No upcoming events." />
+          <EventSection title={t('schedule.today')} events={groups.today} emptyText={t('schedule.empty_hint')} />
+          <EventSection title={t('schedule.tomorrow')} events={groups.tomorrow} emptyText={t('schedule.empty_hint')} />
+          <EventSection title={t('schedule.upcoming')} events={groups.upcoming} emptyText={t('schedule.empty_state')} />
         </div>
       )}
     </div>

@@ -1,34 +1,42 @@
 [
   {
-    "content": "Create translations.js (es + en) with hierarchical keys covering all live views + scaffolding for decisions/agents/login",
+    "content": "Expand translations.js with deep keys for remaining views (inbox, crm, schedule, content, onboarding, automation, dashboard)",
     "status": "completed"
   },
   {
-    "content": "Create LanguageContext.js with t() fn, dot-notation resolver, EN fallback, localStorage + profile persistence",
+    "content": "Migrate Schedule.js (209 lines)",
     "status": "completed"
   },
   {
-    "content": "Create LanguageSwitcher component (used in Sidebar + Settings)",
+    "content": "Migrate Onboarding.js (244 lines)",
     "status": "completed"
   },
   {
-    "content": "Backend: add language field to business_profile (GET/PUT accept + store)",
+    "content": "Migrate CRM.js (328 lines)",
     "status": "completed"
   },
   {
-    "content": "Wrap App.js with LanguageProvider",
+    "content": "Migrate AutomationPolicies.js (421 lines)",
     "status": "completed"
   },
   {
-    "content": "Migrate Sidebar, Dashboard header, Settings tabs, System Health banner, Integrations microcopy to t()",
+    "content": "Migrate Dashboard.js deep content (KPIs, AI suggestions, quick actions, meetings)",
     "status": "completed"
   },
   {
-    "content": "Wire AI prompt to inject 'Respond in Spanish/English' per current language (backend /api/analyze, etc)",
+    "content": "Migrate ContentEngine.js (687 lines)",
     "status": "completed"
   },
   {
-    "content": "Show decision translation pattern with an example + verify switching ES⇄EN end-to-end",
+    "content": "Migrate SmartInbox.js (1003 lines)",
     "status": "completed"
+  },
+  {
+    "content": "Lint + esbuild compile verify + screenshot verification (ES + EN)",
+    "status": "completed"
+  },
+  {
+    "content": "Pause for Phase 7 approval",
+    "status": "in_progress"
   }
 ]

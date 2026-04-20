@@ -19,6 +19,7 @@ import { motion } from 'framer-motion';
 import { getPolicies, updatePolicy, getEscalationRules, createEscalationRule, updateEscalationRule, deleteEscalationRule } from '../lib/api';
 import { toast } from 'sonner';
 import { useBusinessProfile } from '../contexts/BusinessProfileContext';
+import { useLanguage } from '../context/LanguageContext';
 
 const intentLabels = {
   booking: { label: 'Booking Request', icon: Calendar, color: 'bg-[hsl(var(--info)/0.12)] text-[hsl(var(--info))]' },
@@ -45,6 +46,7 @@ const priorityColors = {
 
 export default function AutomationPolicies() {
   const { profile } = useBusinessProfile();
+  const { t } = useLanguage();
   const industry = profile?.industry || 'other';
   
   const [policies, setPolicies] = useState([]);
@@ -76,9 +78,9 @@ export default function AutomationPolicies() {
       const updated = { ...policy, [field]: value };
       await updatePolicy(policy.policy_id, updated);
       setPolicies(prev => prev.map(p => p.policy_id === policy.policy_id ? { ...p, [field]: value } : p));
-      toast.success('Policy updated');
+      toast.success(t('automation.toasts.policy_saved'));
     } catch (err) {
-      toast.error('Failed to update policy');
+      toast.error(t('automation.toasts.save_failed'));
     } finally {
       setSaving(null);
     }
@@ -86,24 +88,24 @@ export default function AutomationPolicies() {
 
   const handleSaveRule = async () => {
     if (!ruleForm.name || !ruleForm.condition_value || !ruleForm.route_to) {
-      toast.error('Please fill in all required fields');
+      toast.error(t('automation.toasts.save_failed'));
       return;
     }
     setSavingRule(true);
     try {
       if (editingRule) {
         await updateEscalationRule(editingRule.rule_id, ruleForm);
-        toast.success('Rule updated');
+        toast.success(t('automation.toasts.rule_saved'));
       } else {
         await createEscalationRule(ruleForm);
-        toast.success('Rule created');
+        toast.success(t('automation.toasts.rule_saved'));
       }
       setRuleDialogOpen(false);
       setEditingRule(null);
       setRuleForm({ name: '', condition_type: 'intent', condition_value: '', route_to: '', priority: 'normal', enabled: true });
       fetchData();
     } catch (err) {
-      toast.error('Failed to save rule');
+      toast.error(t('automation.toasts.save_failed'));
     } finally {
       setSavingRule(false);
     }
@@ -112,10 +114,10 @@ export default function AutomationPolicies() {
   const handleDeleteRule = async (ruleId) => {
     try {
       await deleteEscalationRule(ruleId);
-      toast.success('Rule deleted');
+      toast.success(t('automation.toasts.rule_deleted'));
       fetchData();
     } catch (err) {
-      toast.error('Failed to delete rule');
+      toast.error(t('automation.toasts.save_failed'));
     }
   };
 
@@ -145,8 +147,8 @@ export default function AutomationPolicies() {
     <div className="page-container relative z-[1]">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="font-display text-2xl font-semibold tracking-tight">Automation Policies</h1>
-          <p className="text-sm text-muted-foreground mt-1">Configure how the system handles different request types and escalations</p>
+          <h1 className="font-display text-2xl font-semibold tracking-tight">{t('automation.title')}</h1>
+          <p className="text-sm text-muted-foreground mt-1">{t('automation.subtitle')}</p>
         </div>
       </div>
 

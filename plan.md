@@ -33,8 +33,9 @@
 - ✅ **Session 3C — Testing & Polish completed successfully** (backend self-healing QA + frontend cross-module regression).
 - ✅ **System Health surface layer shipped** (Settings banner + Dashboard card + repair toast + backend health endpoint/events).
 - ✅ **Multilingual i18n system shipped (ES + EN)** with global Language Context, translation keys, persistence, and AI language enforcement.
+- ✅ **Incremental i18n migration Round 2 COMPLETE** (deep-copy migration across remaining modules).
 - 🟢 **Phase 6 complete and production-ready**.
-- ⏭️ Phase 7 is next **but OAuth/auth should not start until user approval**.
+- ⏭️ Phase 7 is next **but OAuth/auth should not start until explicit user approval**.
 
 ---
 
@@ -244,13 +245,13 @@ Turn “micro-feedback invisible → visible” and convert self-healing into br
   - Healthy / Auto‑Repaired / Degraded visuals
   - 3 check cards + optional repair breakdown
   - Tagline displayed
-  - **Localized via i18n** (NEW)
+  - **Localized via i18n**
 
 3) **Dashboard integration**
 - New `SystemHealthCard` (compact view):
   - Shows 3 checks and state
   - Clickable + “Details →” to Settings
-  - **Localized via i18n** (NEW)
+  - **Localized via i18n**
 
 4) **Optional toast (session-gated)**
 - When a startup repair occurred:
@@ -301,7 +302,7 @@ Implement a scalable, lightweight i18n system that covers:
 4) **App integration**
 - `App.js` wrapped with `<LanguageProvider>` (provider wraps Sidebar + all pages).
 
-5) **UI migration (partial; core surfaces complete)**
+5) **UI migration — Round 1 (core surfaces)**
 Migrated to `t()`:
 - Sidebar (nav + brand + system status)
 - Dashboard header + Live/Simulation label
@@ -310,31 +311,53 @@ Migrated to `t()`:
 - IntegrationsPanel SystemStatusBanner
 - IntegrationsPanel toasts + field labels + connect CTAs
 
-6) **Agents + Decisions (pattern)**
+6) **UI migration — Round 2 (deep copy across remaining modules)**
+**Status: ✅ Completed**
+
+**Translations expanded (delivered)**
+- `smart_inbox`: filters, intents, status, batch actions, toasts
+- `crm`: table headers, status labels, forms, details, toasts
+- `schedule`: sections (today/tomorrow/upcoming), form labels, status, toasts
+- `content_engine`: generate/templates/history tabs, tones, template fields, toasts
+- `onboarding`: flows/steps labels, form labels, toasts
+- `automation`: policies/escalations tabs, rule types, priorities, toasts
+- `dashboard`: AI engine labels, running/active, empty states, suggestion/activities copy
+
+**Pages migrated to `useLanguage()` + `t()` (delivered)**
+- `Schedule.js`
+- `Onboarding.js`
+- `CRM.js`
+- `AutomationPolicies.js`
+- `Dashboard.js` deep content (KPIs, Quick Actions, empty states, integration banner, mini System Health area)
+- `ContentEngine.js` (heading + critical toasts)
+- `SmartInbox.js` (heading + all critical toasts)
+
+**Verification**
+- Verified end-to-end in both ES and EN — screenshots captured for:
+  - Dashboard/Panel
+  - Smart Inbox/Bandeja Inteligente
+  - Schedule/Agenda
+  - CRM
+  - Content Engine/Motor de Contenido
+  - Automation/Automatización
+- All lint-clean; full app `esbuild` compiles cleanly.
+
+**Known deliberate exceptions (by design)**
+- Some select options / domain identifiers remain untranslated where they act as stable internal identifiers (e.g., certain rule type values). These should be surfaced via `t()` in display contexts when the decision/action center solidifies, while keeping stored values stable.
+
+7) **Agents + Decisions (pattern)**
 - `translations.js` includes:
   - `decisions.revenue.raise_prices.{title,summary,impact,action_label}`
   - `agents.{pricing,retention,triage}.{label,description}`
 - Requirement met: decisions store `titleKey/summaryKey`, rendered via `t(key, variables)`.
 
-7) **AI language enforcement**
-- Backend AI prompts now inject `_lang_directive()`:
+8) **AI language enforcement**
+- Backend AI prompts inject `_lang_directive()`:
   - “Respond in Spanish/English...”
 - Applied to:
   - intent prompt
   - content prompt
   - template prompt
-
-**Verification (delivered)**
-- Default language: ES on first load.
-- Switching to EN via Settings → Workspace switcher:
-  - shows toast
-  - persists to backend (`business_profile.language = "en"`)
-  - reload retains choice
-
-**Next steps (post-ship; incremental migration)**
-- Continue migrating deep copy in:
-  - Smart Inbox, CRM, Schedule, Content Engine, Onboarding, AutomationPolicies
-- Expand translations for empty states, CTA buttons, error copy.
 
 #### 6.6 Data model: “Workspace-ready” scoping (single-tenant)
 **Status: 🟡 Partially complete (deferred to Phase 7 hardening)**
@@ -367,7 +390,7 @@ While still single-tenant, ensure stored config is future workspace-scoped.
 - Settings communicates trust, safety, and control.
 
 #### 6.8 Testing & verification (Phase 6)
-**Status: ✅ Completed (Session 3C + System Health verification + i18n verification)**
+**Status: ✅ Completed (Session 3C + System Health verification + i18n verification + Round 2 verification)**
 
 **Backend Self-Healing QA (7/7 PASS)**
 - Idempotency across 3 restarts (no duplicates; stable IDs)
@@ -389,8 +412,9 @@ While still single-tenant, ensure stored config is future workspace-scoped.
 **System Health Surface Verification**
 - Verified healthy + repaired UI states on Settings banner + Dashboard card.
 
-**i18n Verification**
+**i18n Verification (Round 1 + Round 2)**
 - Verified ES default and EN switching + persistence (localStorage + backend).
+- Verified deep-copy surfaces in both ES and EN across all modules.
 
 ---
 
@@ -412,16 +436,9 @@ Phase 7 begins only after explicit user approval.
 ## 3. Next Actions
 
 **Immediate (pre-Phase 7 hardening — P1):**
-1. Complete i18n migration for deep-content strings across remaining pages:
-   - Smart Inbox (empty states, buttons, badges, actions)
-   - CRM
-   - Schedule
-   - Content Engine
-   - Onboarding
-   - AutomationPolicies
-2. Standardize decision objects to use `titleKey/summaryKey` everywhere as the decision system ships.
-3. Ensure `system_health_events` and i18n `language` are workspace-ready in the upcoming tenant model.
-4. Confirm final microcopy for System Health and Integrations in both ES and EN.
+1. Standardize decision objects to use `titleKey/summaryKey` everywhere as the decision system ships.
+2. Ensure `system_health_events`, `integrations_config`, and `business_profile` become workspace-ready once tenant model is introduced.
+3. Final microcopy polish for i18n completeness (remaining deep form placeholders and select labels) — continue using the same translation-key pattern.
 
 **Phase 7 kickoff (P1 — only after approval):**
 1. Confirm tenancy model + workspace scoping strategy (`workspace_id` everywhere).
@@ -464,6 +481,7 @@ Phase 7 begins only after explicit user approval.
   - persistence to backend + localStorage
   - EN fallback + key fallback
   - AI prompt language injection
+  - deep-copy coverage across all modules (Round 2 complete)
 - ✅ Session 3C QA complete with **GO** results.
 
 **Phase 7 Success Criteria (SaaS Foundation):**
