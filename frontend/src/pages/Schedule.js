@@ -12,8 +12,16 @@ import { motion } from 'framer-motion';
 import { getCalendarEvents, createCalendarEvent, deleteCalendarEvent } from '../lib/api';
 import { toast } from 'sonner';
 import { format, parseISO, isToday, isTomorrow, addDays, isBefore, isAfter, startOfDay } from 'date-fns';
+import { useBusinessProfile } from '../contexts/BusinessProfileContext';
+import { getEntityLabel, getIndustryConfig } from '../config/industryConfig';
 
 export default function Schedule() {
+  const { profile } = useBusinessProfile();
+  const industry = profile?.industry || 'other';
+  const customLabels = profile?.entity_labels || {};
+  const meetingsLabel = getEntityLabel(industry, 'meetings', customLabels);
+  const industryConfig = getIndustryConfig(industry);
+  
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -151,8 +159,8 @@ export default function Schedule() {
     <div className="page-container relative z-[1]">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="font-display text-2xl font-semibold tracking-tight">Schedule</h1>
-          <p className="text-sm text-muted-foreground mt-1">Meetings, viewings, and calendar events</p>
+          <h1 className="font-display text-2xl font-semibold tracking-tight">{meetingsLabel}</h1>
+          <p className="text-sm text-muted-foreground mt-1">{industryConfig.name} scheduling and calendar events</p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
           <DialogTrigger asChild>

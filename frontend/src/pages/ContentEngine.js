@@ -21,6 +21,7 @@ import {
 } from '../lib/api';
 import { toast } from 'sonner';
 import { format, parseISO } from 'date-fns';
+import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 
 const categoryLabels = {
   welcome: { label: 'Welcome', color: 'bg-[hsl(var(--success)/0.15)] text-[hsl(var(--success))]' },
@@ -31,6 +32,9 @@ const categoryLabels = {
 };
 
 export default function ContentEngine() {
+  const { profile } = useBusinessProfile();
+  const industry = profile?.industry || 'other';
+  
   const [content, setContent] = useState([]);
   const [templates, setTemplates] = useState([]);
   const [loading, setLoading] = useState(true);

@@ -15,6 +15,8 @@ import { motion } from 'framer-motion';
 import { getContacts, getContact, createContact } from '../lib/api';
 import { toast } from 'sonner';
 import { format, parseISO } from 'date-fns';
+import { useBusinessProfile } from '../contexts/BusinessProfileContext';
+import { getEntityLabel } from '../config/industryConfig';
 
 const lifecycleColors = {
   new: 'bg-[hsl(var(--info)/0.15)] text-[hsl(var(--info))]',
@@ -30,6 +32,11 @@ const syncStatusColors = {
 };
 
 export default function CRM() {
+  const { profile } = useBusinessProfile();
+  const industry = profile?.industry || 'other';
+  const customLabels = profile?.entity_labels || {};
+  const contactsLabel = getEntityLabel(industry, 'contacts', customLabels);
+  
   const [contacts, setContacts] = useState([]);
   const [selectedContact, setSelectedContact] = useState(null);
   const [contactDetail, setContactDetail] = useState(null);
@@ -89,8 +96,8 @@ export default function CRM() {
     <div className="page-container relative z-[1]">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="font-display text-2xl font-semibold tracking-tight">CRM</h1>
-          <p className="text-sm text-muted-foreground mt-1">Contact management synced with GoHighLevel</p>
+          <h1 className="font-display text-2xl font-semibold tracking-tight">{contactsLabel}</h1>
+          <p className="text-sm text-muted-foreground mt-1">Manage your {contactsLabel.toLowerCase()} and sync with CRM</p>
         </div>
         <div className="flex items-center gap-2">
           <span className="flex items-center gap-1.5">
@@ -99,10 +106,10 @@ export default function CRM() {
           </span>
           <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
             <DialogTrigger asChild>
-              <Button size="sm"><Plus size={14} className="mr-1" /> Add Contact</Button>
+              <Button size="sm"><Plus size={14} className="mr-1" /> Add {contactsLabel.slice(0, -1)}</Button>
             </DialogTrigger>
             <DialogContent className="bg-[hsl(var(--card))] border-[hsl(var(--border))]">
-              <DialogHeader><DialogTitle>Add Contact</DialogTitle></DialogHeader>
+              <DialogHeader><DialogTitle>Add {contactsLabel.slice(0, -1)}</DialogTitle></DialogHeader>
               <div className="space-y-4 py-4">
                 <div><Label>Name *</Label><Input value={form.name} onChange={e => setForm({...form, name: e.target.value})} placeholder="Full name" /></div>
                 <div><Label>Email *</Label><Input value={form.email} onChange={e => setForm({...form, email: e.target.value})} placeholder="Email address" /></div>

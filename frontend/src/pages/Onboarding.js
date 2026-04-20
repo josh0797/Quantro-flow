@@ -15,6 +15,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { getAgents, createAgent, updateOnboardingTask } from '../lib/api';
 import { toast } from 'sonner';
 import { format, parseISO } from 'date-fns';
+import { useBusinessProfile } from '../contexts/BusinessProfileContext';
+import { getEntityLabel } from '../config/industryConfig';
 
 const statusColors = {
   onboarding: 'bg-[hsl(var(--warning)/0.15)] text-[hsl(var(--warning))]',
@@ -23,6 +25,11 @@ const statusColors = {
 };
 
 export default function Onboarding() {
+  const { profile } = useBusinessProfile();
+  const industry = profile?.industry || 'other';
+  const customLabels = profile?.entity_labels || {};
+  const teamLabel = getEntityLabel(industry, 'team_members', customLabels);
+  
   const [agents, setAgents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [expandedAgent, setExpandedAgent] = useState(null);
@@ -82,19 +89,19 @@ export default function Onboarding() {
     <div className="page-container relative z-[1]">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="font-display text-2xl font-semibold tracking-tight">Agent Onboarding</h1>
-          <p className="text-sm text-muted-foreground mt-1">Track and manage agent setup workflows</p>
+          <h1 className="font-display text-2xl font-semibold tracking-tight">{teamLabel} Onboarding</h1>
+          <p className="text-sm text-muted-foreground mt-1">Track and manage team setup workflows</p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
           <DialogTrigger asChild>
             <Button data-testid="onboarding-add-agent" size="sm">
-              <Plus size={14} className="mr-1" /> Add Agent
+              <Plus size={14} className="mr-1" /> Add {teamLabel.slice(0, -1)}
             </Button>
           </DialogTrigger>
           <DialogContent className="bg-[hsl(var(--card))] border-[hsl(var(--border))]">
-            <DialogHeader><DialogTitle>Add New Agent</DialogTitle></DialogHeader>
+            <DialogHeader><DialogTitle>Add New {teamLabel.slice(0, -1)}</DialogTitle></DialogHeader>
             <div className="space-y-4 py-4">
-              <div><Label>Full Name *</Label><Input value={form.name} onChange={e => setForm({...form, name: e.target.value})} placeholder="Agent name" /></div>
+              <div><Label>Full Name *</Label><Input value={form.name} onChange={e => setForm({...form, name: e.target.value})} placeholder="Full name" /></div>
               <div><Label>Email *</Label><Input value={form.email} onChange={e => setForm({...form, email: e.target.value})} placeholder="Email address" /></div>
               <div><Label>Phone</Label><Input value={form.phone} onChange={e => setForm({...form, phone: e.target.value})} placeholder="Phone number" /></div>
               <div><Label>Role</Label>

@@ -18,6 +18,7 @@ import {
 import { motion } from 'framer-motion';
 import { getPolicies, updatePolicy, getEscalationRules, createEscalationRule, updateEscalationRule, deleteEscalationRule } from '../lib/api';
 import { toast } from 'sonner';
+import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 
 const intentLabels = {
   booking: { label: 'Booking Request', icon: Calendar, color: 'bg-[hsl(var(--info)/0.12)] text-[hsl(var(--info))]' },
@@ -43,6 +44,9 @@ const priorityColors = {
 };
 
 export default function AutomationPolicies() {
+  const { profile } = useBusinessProfile();
+  const industry = profile?.industry || 'other';
+  
   const [policies, setPolicies] = useState([]);
   const [rules, setRules] = useState([]);
   const [loading, setLoading] = useState(true);
