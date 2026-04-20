@@ -563,10 +563,51 @@ class GenerateFromTemplateRequest(BaseModel):
     template_id: str
     context: dict = {}  # e.g. {"contact_name": "Sarah", "situation": "new lead"}
 
+# ─── Integrations Catalog (self-healing) ───────────────────────────────
+DEFAULT_INTEGRATIONS_CATALOG = [
+    {"provider": "gmail",            "category": "email",        "display_name": "Gmail"},
+    {"provider": "google_calendar",  "category": "calendar",     "display_name": "Google Calendar"},
+    {"provider": "crm",              "category": "crm",          "display_name": "CRM (HubSpot / GoHighLevel)"},
+    {"provider": "openai",           "category": "ai",           "display_name": "OpenAI / LLM Provider"},
+    {"provider": "webhook",          "category": "automation",   "display_name": "Webhooks & Endpoints"},
+]
+
+async def ensure_integrations_seeded():
+    """Idempotently ensure every provider in the catalog has a row.
+    Self-healing: this runs on every startup so missing rows are created even
+    if the main seed_database() was skipped because inbox already had data."""
+    now = datetime.utcnow()
+    for item in DEFAULT_INTEGRATIONS_CATALOG:
+        existing = await integrations_config_col.find_one({"provider": item["provider"]})
+        if not existing:
+            await integrations_config_col.insert_one({
+                "integration_id": str(uuid.uuid4()),
+                "provider": item["provider"],
+                "category": item["category"],
+                "display_name": item["display_name"],
+                "status": "disconnected",
+                "last_sync_at": None,
+                "config": {},
+                "created_at": now,
+                "updated_at": now,
+            })
+        else:
+            # Backfill missing metadata on legacy rows
+            patch = {}
+            if not existing.get("category"):
+                patch["category"] = item["category"]
+            if not existing.get("display_name"):
+                patch["display_name"] = item["display_name"]
+            if patch:
+                await integrations_config_col.update_one(
+                    {"provider": item["provider"]}, {"$set": patch}
+                )
+
 # ─── Lifespan ──────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await seed_database()
+    await ensure_integrations_seeded()
     yield
     client.close()
 

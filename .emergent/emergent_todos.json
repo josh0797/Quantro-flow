@@ -1,38 +1,26 @@
 [
   {
-    "content": "CRITICAL: Fix undefined variable 'resolved_action' in server.py",
-    "status": "in_progress"
+    "content": "Diagnose Settings.js blank TabsContent root cause (inspect file, context, console logs)",
+    "status": "completed"
   },
   {
-    "content": "CRITICAL: Remove hardcoded secret in Settings.js line 406",
-    "status": "pending"
+    "content": "Backend: Auto-seed integrations separately from inbox seed (self-healing). Add openai + webhook providers.",
+    "status": "completed"
   },
   {
-    "content": "CRITICAL: Fix stale closure bugs - add missing hook dependencies",
-    "status": "pending"
+    "content": "Frontend: Redesign Integrations tab to use STATIC manifest + merge backend status (resilient to empty array)",
+    "status": "completed"
   },
   {
-    "content": "IMPORTANT: Fix incorrect comparison operators (is vs ==) in server.py",
-    "status": "pending"
+    "content": "Add real-input fields: OpenAI LLM key, CRM (HubSpot/GHL), Gmail/Calendar OAuth stubs, Webhook endpoint viewer",
+    "status": "completed"
   },
   {
-    "content": "IMPORTANT: Fix unstable component keys (index to unique IDs)",
-    "status": "pending"
+    "content": "Verify all 4 tabs render + test Simulation Mode / Business Profile switching",
+    "status": "completed"
   },
   {
-    "content": "IMPORTANT: Add error logging to empty catch blocks",
-    "status": "pending"
-  },
-  {
-    "content": "IMPORTANT: Remove production console.error statements",
-    "status": "pending"
-  },
-  {
-    "content": "Session 3C: Run comprehensive testing",
-    "status": "pending"
-  },
-  {
-    "content": "Session 3C: Mark Business OS transformation COMPLETED",
-    "status": "pending"
+    "content": "Update plan.md and hand back for user approval of Session 3C (Testing & Polish)",
+    "status": "completed"
   }
 ]

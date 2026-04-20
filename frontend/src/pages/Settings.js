@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Settings as SettingsIcon, Plug, Bot, Building2, Users, CheckCircle2, XCircle, Loader2, RefreshCw, Zap } from 'lucide-react';
+import { Settings as SettingsIcon, Plug, Bot, Building2, Users, Loader2, Zap } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -7,23 +7,16 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
-import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
 import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 import { INDUSTRIES } from '../config/industryConfig';
 import { toast } from 'sonner';
+import IntegrationsPanel from '../components/IntegrationsPanel';
 
 export default function Settings() {
   const { profile, updateProfile, refetch } = useBusinessProfile();
   const [activeTab, setActiveTab] = useState('integrations');
-  
-  // Integrations state
-  const [integrations, setIntegrations] = useState([]);
-  const [loadingIntegrations, setLoadingIntegrations] = useState(true);
-  const [testingConnection, setTestingConnection] = useState(null);
-  const [crmApiKey, setCrmApiKey] = useState('');
-  const [crmBaseUrl, setCrmBaseUrl] = useState('');
-  
+
   // Business Profile state
   const [profileForm, setProfileForm] = useState({
     industry: 'other',
@@ -44,73 +37,17 @@ export default function Settings() {
       setProfileForm({
         industry: profile.industry || 'other',
         use_case: profile.use_case || '',
-        entity_labels: profile.entity_labels || profileForm.entity_labels,
+        entity_labels: profile.entity_labels || {
+          contacts: 'Contacts',
+          team_members: 'Team Members',
+          meetings: 'Meetings',
+          events: 'Events',
+          services: 'Services'
+        },
         simulation_mode: profile.simulation_mode || false
       });
     }
   }, [profile]);
-
-  useEffect(() => {
-    if (activeTab === 'integrations') {
-      fetchIntegrations();
-    }
-  }, [activeTab]);
-
-  const fetchIntegrations = async () => {
-    try {
-      setLoadingIntegrations(true);
-      const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
-      const response = await fetch(`${backendUrl}/api/integrations`);
-      if (response.ok) {
-        const data = await response.json();
-        setIntegrations(data);
-      }
-    } catch (error) {
-      console.error('Failed to fetch integrations:', error);
-      toast.error('Failed to load integrations');
-    } finally {
-      setLoadingIntegrations(false);
-    }
-  };
-
-  const testIntegration = async (provider) => {
-    try {
-      setTestingConnection(provider);
-      const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
-      const response = await fetch(`${backendUrl}/api/integrations/${provider}/test`, {
-        method: 'POST'
-      });
-      const result = await response.json();
-      
-      if (result.success) {
-        toast.success(result.message);
-      } else {
-        toast.error(result.message);
-      }
-    } catch (error) {
-      toast.error('Connection test failed');
-    } finally {
-      setTestingConnection(null);
-    }
-  };
-
-  const updateIntegration = async (provider, status, config = {}) => {
-    try {
-      const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
-      const response = await fetch(`${backendUrl}/api/integrations/${provider}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status, config })
-      });
-      
-      if (response.ok) {
-        toast.success(`${provider} integration updated`);
-        fetchIntegrations();
-      }
-    } catch (error) {
-      toast.error('Failed to update integration');
-    }
-  };
 
   const saveBusinessProfile = async () => {
     try {
@@ -123,22 +60,6 @@ export default function Settings() {
     } finally {
       setSavingProfile(false);
     }
-  };
-
-  const getIntegrationIcon = (provider) => {
-    const integration = integrations.find(i => i.provider === provider);
-    if (!integration) return null;
-    
-    const isConnected = integration.status === 'connected';
-    return isConnected ? (
-      <CheckCircle2 size={16} className="text-[hsl(var(--success))]" />
-    ) : (
-      <XCircle size={16} className="text-[hsl(var(--muted-foreground))]" />
-    );
-  };
-
-  const getIntegration = (provider) => {
-    return integrations.find(i => i.provider === provider);
   };
 
   return (
@@ -178,256 +99,7 @@ export default function Settings() {
 
           {/* Integrations Tab */}
           <TabsContent value="integrations" className="space-y-4 mt-6">
-            {loadingIntegrations ? (
-              <div className="flex items-center justify-center py-12">
-                <Loader2 className="animate-spin text-muted-foreground" size={32} />
-              </div>
-            ) : (
-              <>
-                {/* Gmail Integration */}
-                {(() => {
-                  const gmail = getIntegration('gmail');
-                  if (!gmail) return null;
-                  return (
-                    <Card data-testid="gmail-integration-card" className="p-6 bg-[hsl(var(--card))] border-[hsl(var(--border))]">
-                      <div className="flex items-start justify-between">
-                        <div className="space-y-3 flex-1">
-                          <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-red-500 to-orange-500 flex items-center justify-center text-white font-semibold">
-                              G
-                            </div>
-                            <div>
-                              <h3 className="text-base font-semibold text-foreground flex items-center gap-2">
-                                Gmail
-                                {getIntegrationIcon('gmail')}
-                              </h3>
-                              <p className="text-xs text-muted-foreground">Connect your Gmail account to sync inbox items</p>
-                            </div>
-                          </div>
-                          
-                          <div className="flex items-center gap-2">
-                            <Badge className={gmail.status === 'connected' ? 'bg-[hsl(var(--success)/0.15)] text-[hsl(var(--success))]' : 'bg-[hsl(var(--muted-foreground)/0.15)] text-[hsl(var(--muted-foreground))]'}>
-                              {gmail.status === 'connected' ? 'Connected' : 'Not Connected'}
-                            </Badge>
-                            {gmail.last_sync_at && (
-                              <span className="text-xs text-muted-foreground">
-                                Last sync: {new Date(gmail.last_sync_at).toLocaleString()}
-                              </span>
-                            )}
-                          </div>
-
-                          <div className="flex gap-2">
-                            {gmail.status === 'connected' ? (
-                              <>
-                                <Button 
-                                  variant="outline" 
-                                  size="sm"
-                                  onClick={() => testIntegration('gmail')}
-                                  disabled={testingConnection === 'gmail'}
-                                  data-testid="test-gmail-button"
-                                >
-                                  {testingConnection === 'gmail' ? <Loader2 className="animate-spin" size={14} /> : <RefreshCw size={14} />}
-                                  <span className="ml-2">Test Connection</span>
-                                </Button>
-                                <Button 
-                                  variant="outline" 
-                                  size="sm"
-                                  onClick={() => updateIntegration('gmail', 'disconnected')}
-                                  data-testid="disconnect-gmail-button"
-                                >
-                                  Disconnect
-                                </Button>
-                              </>
-                            ) : (
-                              <Button 
-                                size="sm"
-                                onClick={() => updateIntegration('gmail', 'connected', { email: 'user@example.com' })}
-                                data-testid="connect-gmail-button"
-                              >
-                                <Plug size={14} className="mr-2" />
-                                Connect Gmail
-                              </Button>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    </Card>
-                  );
-                })()}
-
-                {/* Google Calendar Integration */}
-                {(() => {
-                  const calendar = getIntegration('google_calendar');
-                  if (!calendar) return null;
-                  return (
-                    <Card data-testid="calendar-integration-card" className="p-6 bg-[hsl(var(--card))] border-[hsl(var(--border))]">
-                      <div className="flex items-start justify-between">
-                        <div className="space-y-3 flex-1">
-                          <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center text-white font-semibold">
-                              📅
-                            </div>
-                            <div>
-                              <h3 className="text-base font-semibold text-foreground flex items-center gap-2">
-                                Google Calendar
-                                {getIntegrationIcon('google_calendar')}
-                              </h3>
-                              <p className="text-xs text-muted-foreground">Sync your calendar for automated scheduling</p>
-                            </div>
-                          </div>
-                          
-                          <div className="flex items-center gap-2">
-                            <Badge className={calendar.status === 'connected' ? 'bg-[hsl(var(--success)/0.15)] text-[hsl(var(--success))]' : 'bg-[hsl(var(--muted-foreground)/0.15)] text-[hsl(var(--muted-foreground))]'}>
-                              {calendar.status === 'connected' ? 'Connected' : 'Not Connected'}
-                            </Badge>
-                            {calendar.last_sync_at && (
-                              <span className="text-xs text-muted-foreground">
-                                Last sync: {new Date(calendar.last_sync_at).toLocaleString()}
-                              </span>
-                            )}
-                          </div>
-
-                          <div className="flex gap-2">
-                            {calendar.status === 'connected' ? (
-                              <>
-                                <Button 
-                                  variant="outline" 
-                                  size="sm"
-                                  onClick={() => testIntegration('google_calendar')}
-                                  disabled={testingConnection === 'google_calendar'}
-                                  data-testid="test-calendar-button"
-                                >
-                                  {testingConnection === 'google_calendar' ? <Loader2 className="animate-spin" size={14} /> : <RefreshCw size={14} />}
-                                  <span className="ml-2">Test Connection</span>
-                                </Button>
-                                <Button 
-                                  variant="outline" 
-                                  size="sm"
-                                  onClick={() => updateIntegration('google_calendar', 'disconnected')}
-                                  data-testid="disconnect-calendar-button"
-                                >
-                                  Disconnect
-                                </Button>
-                              </>
-                            ) : (
-                              <Button 
-                                size="sm"
-                                onClick={() => updateIntegration('google_calendar', 'connected', { calendar_id: 'primary' })}
-                                data-testid="connect-calendar-button"
-                              >
-                                <Plug size={14} className="mr-2" />
-                                Connect Calendar
-                              </Button>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    </Card>
-                  );
-                })()}
-
-                {/* CRM Integration */}
-                {(() => {
-                  const crm = getIntegration('crm');
-                  if (!crm) return null;
-                  return (
-                    <Card data-testid="crm-integration-card" className="p-6 bg-[hsl(var(--card))] border-[hsl(var(--border))]">
-                      <div className="flex items-start justify-between">
-                        <div className="space-y-3 flex-1">
-                          <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center text-white font-semibold">
-                              CRM
-                            </div>
-                            <div>
-                              <h3 className="text-base font-semibold text-foreground flex items-center gap-2">
-                                CRM System
-                                {getIntegrationIcon('crm')}
-                              </h3>
-                              <p className="text-xs text-muted-foreground">Connect your CRM (GoHighLevel, HubSpot, etc.)</p>
-                            </div>
-                          </div>
-                          
-                          <div className="flex items-center gap-2">
-                            <Badge className={crm.status === 'connected' ? 'bg-[hsl(var(--success)/0.15)] text-[hsl(var(--success))]' : 'bg-[hsl(var(--muted-foreground)/0.15)] text-[hsl(var(--muted-foreground))]'}>
-                              {crm.status === 'connected' ? 'Connected' : 'Not Connected'}
-                            </Badge>
-                            {crm.last_sync_at && (
-                              <span className="text-xs text-muted-foreground">
-                                Last sync: {new Date(crm.last_sync_at).toLocaleString()}
-                              </span>
-                            )}
-                          </div>
-
-                          {crm.status !== 'connected' && (
-                            <div className="space-y-2">
-                              <div>
-                                <Label className="text-xs">API Key</Label>
-                                <Input 
-                                  placeholder="Enter your CRM API key" 
-                                  type="password"
-                                  value={crmApiKey}
-                                  onChange={(e) => setCrmApiKey(e.target.value)}
-                                  className="bg-[hsl(var(--background))] mt-1"
-                                  data-testid="crm-api-key-input"
-                                />
-                              </div>
-                              <div>
-                                <Label className="text-xs">Base URL (optional)</Label>
-                                <Input 
-                                  placeholder="https://api.yourcrm.com" 
-                                  value={crmBaseUrl}
-                                  onChange={(e) => setCrmBaseUrl(e.target.value)}
-                                  className="bg-[hsl(var(--background))] mt-1"
-                                  data-testid="crm-url-input"
-                                />
-                              </div>
-                            </div>
-                          )}
-
-                          <div className="flex gap-2">
-                            {crm.status === 'connected' ? (
-                              <>
-                                <Button 
-                                  variant="outline" 
-                                  size="sm"
-                                  onClick={() => testIntegration('crm')}
-                                  disabled={testingConnection === 'crm'}
-                                  data-testid="test-crm-button"
-                                >
-                                  {testingConnection === 'crm' ? <Loader2 className="animate-spin" size={14} /> : <RefreshCw size={14} />}
-                                  <span className="ml-2">Test Connection</span>
-                                </Button>
-                                <Button 
-                                  variant="outline" 
-                                  size="sm"
-                                  onClick={() => updateIntegration('crm', 'disconnected')}
-                                  data-testid="disconnect-crm-button"
-                                >
-                                  Disconnect
-                                </Button>
-                              </>
-                            ) : (
-                              <Button 
-                                size="sm"
-                                onClick={() => updateIntegration('crm', 'connected', { 
-                                  api_key: crmApiKey || 'simulation_key',
-                                  base_url: crmBaseUrl || ''
-                                })}
-                                disabled={!crmApiKey && !crmBaseUrl}
-                                data-testid="connect-crm-button"
-                              >
-                                <Plug size={14} className="mr-2" />
-                                Connect CRM
-                              </Button>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    </Card>
-                  );
-                })()}
-              </>
-            )}
+            <IntegrationsPanel />
           </TabsContent>
 
           {/* Automation Tab */}
