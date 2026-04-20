@@ -1,30 +1,18 @@
 [
   {
-    "content": "Transform Dashboard with dynamic industry-aware KPIs, AI suggestions, activity feed, and integration status",
-    "status": "completed"
-  },
-  {
-    "content": "Update CRM page to use dynamic labels from BusinessProfile",
+    "content": "Update all remaining pages (CRM, Schedule, SmartInbox, Onboarding, ContentEngine, Automation) with dynamic labels",
     "status": "in_progress"
   },
   {
-    "content": "Update Schedule page to use dynamic event types from industry config",
+    "content": "Create industry-specific simulation data generator (backend)",
     "status": "pending"
   },
   {
-    "content": "Update SmartInbox to use dynamic terminology",
+    "content": "Add Simulation Mode toggle in Settings",
     "status": "pending"
   },
   {
-    "content": "Update Onboarding to use dynamic terminology",
-    "status": "pending"
-  },
-  {
-    "content": "Update ContentEngine to use dynamic terminology",
-    "status": "pending"
-  },
-  {
-    "content": "Update AutomationPolicies page to be fully generic",
+    "content": "Update pages to show simulation indicator when active",
     "status": "pending"
   },
   {
