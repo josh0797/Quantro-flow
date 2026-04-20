@@ -1,46 +1,38 @@
 [
   {
-    "content": "Frontend: Create complete Settings page with all 4 tabs (Integrations, Automation, Business Profile, Workspace)",
+    "content": "Update Sidebar with Settings link and dynamic labels from BusinessProfile",
+    "status": "completed"
+  },
+  {
+    "content": "Global rebrand: Replace 'Realty OS' with 'Business OS' and update terminology across all pages",
     "status": "in_progress"
   },
   {
-    "content": "Frontend: Wire BusinessProfileContext into App.js",
+    "content": "Update Dashboard to show integration connection status and industry-based content",
     "status": "pending"
   },
   {
-    "content": "Frontend: Global rebrand - Replace 'Realty OS' with 'Business OS' across all pages",
+    "content": "Update CRM page to use dynamic labels",
     "status": "pending"
   },
   {
-    "content": "Frontend: Create industry configuration mappings for dynamic content",
+    "content": "Update Schedule page to use dynamic event types",
     "status": "pending"
   },
   {
-    "content": "Frontend: Update Dashboard with dynamic KPIs, AI suggestions, and activity feed based on industry",
+    "content": "Update SmartInbox to use dynamic terminology",
     "status": "pending"
   },
   {
-    "content": "Frontend: Update CRM page to use dynamic labels from BusinessProfile",
+    "content": "Update Onboarding to use dynamic terminology",
     "status": "pending"
   },
   {
-    "content": "Frontend: Update Schedule page to use dynamic event types",
+    "content": "Update ContentEngine to use dynamic terminology",
     "status": "pending"
   },
   {
-    "content": "Frontend: Update Smart Inbox to use dynamic terminology",
-    "status": "pending"
-  },
-  {
-    "content": "Frontend: Update Onboarding to use dynamic terminology",
-    "status": "pending"
-  },
-  {
-    "content": "Frontend: Update navigation sidebar with dynamic labels and Settings link",
-    "status": "pending"
-  },
-  {
-    "content": "Frontend: Update ContentEngine to use dynamic terminology",
+    "content": "Update AutomationPolicies page title to be generic",
     "status": "pending"
   },
   {

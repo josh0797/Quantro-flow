@@ -1,8 +1,9 @@
 import React from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Inbox, Calendar, Users, UserPlus, PenTool, ChevronLeft, ChevronRight, Zap, Settings2 } from 'lucide-react';
+import { LayoutDashboard, Inbox, Calendar, Users, UserPlus, PenTool, ChevronLeft, ChevronRight, Zap, Bot, Settings } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { getSystemStatus } from '../lib/api';
+import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 
 const navItems = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard', testId: 'nav-dashboard' },
@@ -11,13 +12,16 @@ const navItems = [
   { to: '/crm', icon: Users, label: 'CRM', testId: 'nav-crm' },
   { to: '/onboarding', icon: UserPlus, label: 'Onboarding', testId: 'nav-onboarding' },
   { to: '/content', icon: PenTool, label: 'Content Engine', testId: 'nav-content-engine' },
-  { to: '/automation', icon: Settings2, label: 'Automation', testId: 'nav-automation' },
+  { to: '/automation', icon: Bot, label: 'Automation', testId: 'nav-automation' },
+  { to: '/settings', icon: Settings, label: 'Settings', testId: 'nav-settings' },
 ];
 
 export default function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
   const [systemStatus, setSystemStatus] = useState(null);
+  const [integrationStatus, setIntegrationStatus] = useState({});
   const location = useLocation();
+  const { profile } = useBusinessProfile();
 
   useEffect(() => {
     const fetchStatus = async () => {
@@ -29,6 +33,24 @@ export default function Sidebar() {
     fetchStatus();
     const interval = setInterval(fetchStatus, 30000);
     return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const fetchIntegrations = async () => {
+      try {
+        const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
+        const response = await fetch(`${backendUrl}/api/integrations`);
+        if (response.ok) {
+          const data = await response.json();
+          const status = {};
+          data.forEach(integration => {
+            status[integration.provider] = integration.status === 'connected';
+          });
+          setIntegrationStatus(status);
+        }
+      } catch (e) { /* ignore */ }
+    };
+    fetchIntegrations();
   }, []);
 
   return (
@@ -47,7 +69,7 @@ export default function Sidebar() {
         {!collapsed && (
           <div className="flex flex-col">
             <span className="font-display text-sm font-semibold text-foreground tracking-tight">Quantro One</span>
-            <span className="text-[10px] text-muted-foreground tracking-wide uppercase">Realty OS</span>
+            <span className="text-[10px] text-muted-foreground tracking-wide uppercase">Business OS</span>
           </div>
         )}
       </div>
@@ -79,7 +101,7 @@ export default function Sidebar() {
       </nav>
 
       {/* System Status */}
-      <div className="px-3 pb-4">
+      <div className="px-3 pb-4 space-y-2">
         <div data-testid="system-status" className="flex items-center gap-2 px-3 py-2.5 rounded-lg bg-[hsl(var(--surface-1))] border border-[hsl(var(--border))]">
           <span className={`status-dot ${systemStatus?.overall || 'running'} animate-pulse-dot`} />
           {!collapsed && (
@@ -91,6 +113,33 @@ export default function Sidebar() {
             </div>
           )}
         </div>
+        
+        {/* Integration Status */}
+        {!collapsed && (integrationStatus.gmail || integrationStatus.google_calendar || integrationStatus.crm) && (
+          <div className="px-3 py-2 rounded-lg bg-[hsl(var(--surface-1)/0.5)] border border-[hsl(var(--border))]">
+            <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1.5">Integrations</div>
+            <div className="space-y-1">
+              {integrationStatus.gmail && (
+                <div className="flex items-center gap-1.5 text-[10px]">
+                  <div className="w-1.5 h-1.5 rounded-full bg-[hsl(var(--success))]"></div>
+                  <span className="text-muted-foreground">Gmail</span>
+                </div>
+              )}
+              {integrationStatus.google_calendar && (
+                <div className="flex items-center gap-1.5 text-[10px]">
+                  <div className="w-1.5 h-1.5 rounded-full bg-[hsl(var(--success))]"></div>
+                  <span className="text-muted-foreground">Calendar</span>
+                </div>
+              )}
+              {integrationStatus.crm && (
+                <div className="flex items-center gap-1.5 text-[10px]">
+                  <div className="w-1.5 h-1.5 rounded-full bg-[hsl(var(--success))]"></div>
+                  <span className="text-muted-foreground">CRM</span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Collapse toggle */}
