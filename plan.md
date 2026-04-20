@@ -12,6 +12,10 @@
   - Webhooks/endpoints
   - Automation governance
 - Keep integrations mocked/simulated for now, but ensure the UI/UX is **production-grade** and trust-building.
+- **Expose the self-healing layer as a user-facing trust signal** (Apple/Stripe-style):
+  - “System Status: Healthy / Auto‑Repaired / Degraded”
+  - “Quantro OS detects and fixes issues before you notice them.”
+  - Surface integrity checks + repair explanations.
 - Prepare for future SaaS scaling (multi-tenant, auth, RBAC, audit export) **without shipping auth yet**.
 
 **Current status (as of this update):**
@@ -21,8 +25,9 @@
 - ✅ **Settings Operational Control Center** complete.
 - ✅ Backend integrations config is **self-healing** (auto-seeded on startup; idempotent).
 - ✅ **Session 3C — Testing & Polish completed successfully** (backend self-healing QA + frontend cross-module regression).
+- ✅ **System Health surface layer shipped** (Settings banner + Dashboard card + repair toast + backend health endpoint/events).
 - 🟢 **Phase 6 complete and production-ready**.
-- ⏭️ Ready for **Phase 7: SaaS Foundation (Auth + Multi-tenant + RBAC + Audit Logs)** on user approval.
+- ⏭️ Phase 7 is next **but OAuth/auth should not start until user approval**.
 
 ---
 
@@ -132,11 +137,9 @@ This phase remains **single-tenant** (no auth yet) but is **designed for future 
 Configurable **Business Profile** layer (single-tenant for now; workspace-scoped later).
 
 **Business Profile fields (delivered)**
-- Industry (dropdown):
-  - Real Estate, Healthcare, Consulting, E-commerce, Other
+- Industry (dropdown): Real Estate, Healthcare, Consulting, E-commerce, Other
 - Use case (free text)
-- Entity naming overrides:
-  - Contacts, Team Members, Meetings, Events, Services
+- Entity naming overrides: Contacts, Team Members, Meetings, Events, Services
 - `simulation_mode` toggle (Simulation Layer)
 
 **Behavior requirements (delivered)**
@@ -204,7 +207,49 @@ Provide a SaaS-grade Settings section that functions as the **operational core**
 - ✅ Providers seed correctly on legacy instances.
 - ✅ Connect/test/disconnect UX works.
 
-#### 6.4 Data model: “Workspace-ready” scoping (single-tenant)
+#### 6.4 System Health / Self-Healing Surface Layer (Trust Signal)
+**Status: ✅ Completed (verified healthy + auto-repaired states)**
+
+**Goal (delivered)**
+Turn “micro-feedback invisible → visible” and convert self-healing into brand trust:
+- “Quantro OS detects and fixes issues before you notice them.”
+
+**Deliverables (delivered)**
+1) **Backend health surface**
+- New Mongo collection: `system_health_events`
+  - Records every startup integrity check for integrations
+  - Stores `status` (healthy/repaired), `repair_count`, and `repairs[]` details
+  - Keeps only the latest 50 events (bounded growth)
+- New endpoint: `GET /api/system/health`
+  - Returns overall status: `healthy` / `repaired` / `degraded`
+  - Returns check list:
+    - ✓ Integrations stable
+    - ✓ Data consistency verified
+    - ✓ No issues detected
+  - Returns latest check + recent repairs
+
+2) **Settings → Integrations banner**
+- `SystemStatusBanner` at the top of Integrations panel:
+  - Healthy / Auto‑Repaired / Degraded visuals
+  - 3 check cards + optional repair breakdown
+  - Tagline displayed
+
+3) **Dashboard integration**
+- New `SystemHealthCard` (compact view):
+  - Shows 3 checks and state
+  - Clickable + “Details →” to Settings
+
+4) **Optional toast (session-gated)**
+- When a startup repair occurred:
+  - Toast: “System repaired missing integrations automatically”
+  - Fires once per browser session per `event_id` (sessionStorage-gated)
+
+**Exit criteria**
+- ✅ Healthy state visible in both Settings + Dashboard.
+- ✅ Auto-repair state visible with repair detail.
+- ✅ Toast fires only once per event.
+
+#### 6.5 Data model: “Workspace-ready” scoping (single-tenant)
 **Status: 🟡 Partially complete (deferred to Phase 7 hardening)**
 
 **Goal**
@@ -217,6 +262,7 @@ While still single-tenant, ensure stored config is future workspace-scoped.
 - Add `workspace_id` consistently to:
   - `integrations_config`
   - `business_profile`
+  - `system_health_events`
   - relevant operational collections
 - Default `workspace_id = "default"`.
 
@@ -224,15 +270,15 @@ While still single-tenant, ensure stored config is future workspace-scoped.
 - No hard-coded global integration settings.
 - All config stored in DB in a workspace-compatible structure.
 
-#### 6.5 UX Guidelines (apply throughout Phase 6)
+#### 6.6 UX Guidelines (apply throughout Phase 6)
 **Status: ✅ Completed (validated)**
 - Dark mode, premium UI.
 - Minimal layout, subtle motion.
 - Clear status indicators.
 - Settings communicates trust, safety, and control.
 
-#### 6.6 Testing & verification (Phase 6)
-**Status: ✅ Completed (Session 3C)**
+#### 6.7 Testing & verification (Phase 6)
+**Status: ✅ Completed (Session 3C + System Health verification)**
 
 **Backend Self-Healing QA (7/7 PASS)**
 - Idempotency across 3 restarts (no duplicates; stable IDs)
@@ -251,12 +297,15 @@ While still single-tenant, ensure stored config is future workspace-scoped.
 - Industry switch + terminology updates
 - Dashboard/Smart Inbox/CRM/Schedule/Content Engine load; **zero JS console errors**
 
+**System Health Surface Verification**
+- Verified healthy + repaired UI states on Settings banner + Dashboard card.
+
 ---
 
 ### Phase 7 — SaaS Foundation (Auth + Multi-tenant + RBAC + Audit Logs)
-**Status: 🟢 Ready to start (pending user approval)**
+**Status: 🟡 Deferred (do NOT start OAuth yet)**
 
-**Phase 7 configuration (confirmed earlier)**
+**Phase 7 configuration (planned)**
 - Auth provider: Google OAuth via Emergent Integration
 - Roles: Owner / Admin / Manager / Operator / Agent
 - Multi-workspace per user + invitation flow
@@ -264,13 +313,18 @@ While still single-tenant, ensure stored config is future workspace-scoped.
 - Export: CSV + JSON
 
 **Note**
-Phase 7 begins only after Phase 6 stability — now achieved.
+Phase 7 begins only after explicit user approval.
 
 ---
 
 ## 3. Next Actions
 
-**Immediate (Phase 7 kickoff — P1):**
+**Immediate (pre-Phase 7 hardening — P1):**
+1. Confirm the System Health layer copy/branding (final microcopy) for production.
+2. Ensure `system_health_events` is workspace-ready in the upcoming tenant model.
+3. (Optional) Add UI entrypoint: “View system health details” linking to Settings.
+
+**Phase 7 kickoff (P1 — only after approval):**
 1. Confirm tenancy model + workspace scoping strategy (`workspace_id` everywhere).
 2. Implement Google OAuth login and session handling.
 3. Add workspace switching + invitation flow.
@@ -302,6 +356,7 @@ Phase 7 begins only after Phase 6 stability — now achieved.
   - Automation controls
   - Business Profile config
 - ✅ Integrations seeding is idempotent and self-healing; Integrations UI never blanks.
+- ✅ Self-healing is now **user-visible** as a trust signal (Settings banner + Dashboard card + repair toast).
 - ✅ Session 3C QA complete with **GO** results.
 
 **Phase 7 Success Criteria (SaaS Foundation):**

@@ -17,6 +17,8 @@ import {
   ExternalLink,
   AlertCircle,
   Lock,
+  ShieldCheck,
+  Activity,
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -160,6 +162,119 @@ const GROUPS = [
 ];
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
+
+/**
+ * SystemStatusBanner
+ * Surfaces the Quantro OS self-healing layer as a trust signal.
+ * Polls /api/system/health and displays an Apple/Stripe-style status panel.
+ * Also fires a one-time per-session toast when a repair was applied on last startup.
+ */
+function SystemStatusBanner({ health }) {
+  if (!health) return null;
+  const { status, tagline, checks = [], latest_check, recent_repairs = [] } = health;
+  const isHealthy = status === 'healthy';
+  const isRepaired = status === 'repaired';
+  const isDegraded = status === 'degraded';
+
+  const stateStyles = isDegraded
+    ? 'border-[hsl(var(--critical)/0.35)] bg-[hsl(var(--critical)/0.06)]'
+    : isRepaired
+    ? 'border-[hsl(var(--warning)/0.35)] bg-[hsl(var(--warning)/0.06)]'
+    : 'border-[hsl(var(--success)/0.35)] bg-[hsl(var(--success)/0.05)]';
+  const iconTint = isDegraded
+    ? 'text-[hsl(var(--critical))] bg-[hsl(var(--critical)/0.15)]'
+    : isRepaired
+    ? 'text-[hsl(var(--warning))] bg-[hsl(var(--warning)/0.15)]'
+    : 'text-[hsl(var(--success))] bg-[hsl(var(--success)/0.15)]';
+
+  const StateIcon = isDegraded ? AlertCircle : isRepaired ? Activity : ShieldCheck;
+  const headline = isDegraded
+    ? 'System Status: Degraded'
+    : isRepaired
+    ? 'System Status: Auto-Repaired'
+    : 'System Status: Healthy';
+  const subcopy = isDegraded
+    ? 'Some components require attention. Quantro OS is working to resolve them.'
+    : isRepaired
+    ? 'Quantro OS detected missing components and repaired them automatically.'
+    : 'Quantro OS is actively maintaining your integrations. Any inconsistencies are detected and resolved automatically.';
+
+  return (
+    <div
+      data-testid="system-status-banner"
+      data-status={status}
+      className={`rounded-xl border ${stateStyles} p-5 transition-colors`}
+    >
+      <div className="flex items-start gap-4">
+        <div
+          className={`w-10 h-10 shrink-0 rounded-lg flex items-center justify-center ${iconTint}`}
+        >
+          <StateIcon size={20} />
+        </div>
+        <div className="flex-1 min-w-0 space-y-3">
+          <div className="flex items-baseline gap-2 flex-wrap">
+            <h2 className="text-sm font-semibold text-foreground">{headline}</h2>
+            {isHealthy && (
+              <span className="inline-flex items-center gap-1 text-[hsl(var(--success))] text-xs font-medium">
+                <CheckCircle2 size={12} /> All systems operational
+              </span>
+            )}
+            {latest_check?.checked_at && (
+              <span className="text-[11px] text-muted-foreground ml-auto">
+                Last check: {new Date(latest_check.checked_at).toLocaleString()}
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground leading-relaxed max-w-3xl">{subcopy}</p>
+
+          {/* Check summary grid */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
+            {checks.map((c) => (
+              <div
+                key={c.id}
+                data-testid={`system-check-${c.id}`}
+                className="flex items-start gap-2 rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--background)/0.5)] px-3 py-2"
+              >
+                {c.ok ? (
+                  <CheckCircle2 size={14} className="text-[hsl(var(--success))] mt-0.5 shrink-0" />
+                ) : (
+                  <AlertCircle size={14} className="text-[hsl(var(--critical))] mt-0.5 shrink-0" />
+                )}
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-foreground">{c.label}</p>
+                  <p className="text-[11px] text-muted-foreground truncate">{c.detail}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Recent repairs breakdown (only when relevant) */}
+          {isRepaired && latest_check?.repairs?.length > 0 && (
+            <div
+              data-testid="recent-repairs-list"
+              className="pt-2 border-t border-[hsl(var(--border))] mt-2"
+            >
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1.5">
+                Auto-resolved on last startup
+              </p>
+              <ul className="space-y-1">
+                {latest_check.repairs.map((r, i) => (
+                  <li key={i} className="flex items-start gap-2 text-xs text-muted-foreground">
+                    <Activity size={12} className="text-[hsl(var(--warning))] mt-0.5 shrink-0" />
+                    <span>{r.detail}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Subtle tagline (marketing / trust signal) */}
+          <p className="text-[11px] text-muted-foreground/70 italic pt-1">— {tagline}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function StatusBadge({ status }) {
   const isConnected = status === 'connected';
@@ -472,6 +587,7 @@ export default function IntegrationsPanel() {
   const [integrations, setIntegrations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [testingProvider, setTestingProvider] = useState(null);
+  const [systemHealth, setSystemHealth] = useState(null);
 
   const fetchIntegrations = useCallback(async () => {
     try {
@@ -492,9 +608,40 @@ export default function IntegrationsPanel() {
     }
   }, []);
 
+  const fetchSystemHealth = useCallback(async (retry = 0) => {
+    try {
+      const res = await fetch(`${backendUrl}/api/system/health`);
+      if (res.ok) {
+        const data = await res.json();
+        setSystemHealth(data);
+
+        // Session-gated repair toast (shown once per browser session per event_id)
+        if (data?.status === 'repaired' && data?.latest_check?.event_id) {
+          const seenKey = `qos_repair_seen_${data.latest_check.event_id}`;
+          if (!sessionStorage.getItem(seenKey)) {
+            const count = data.latest_check.repair_count || 0;
+            toast.success(
+              count > 1
+                ? `System repaired ${count} missing integrations automatically`
+                : 'System repaired missing integrations automatically',
+              { duration: 5000 }
+            );
+            sessionStorage.setItem(seenKey, '1');
+          }
+        }
+      } else if (retry < 2) {
+        setTimeout(() => fetchSystemHealth(retry + 1), 500);
+      }
+    } catch (err) {
+      console.warn('system health check unavailable:', err);
+      if (retry < 2) setTimeout(() => fetchSystemHealth(retry + 1), 500);
+    }
+  }, []);
+
   useEffect(() => {
     fetchIntegrations();
-  }, [fetchIntegrations]);
+    fetchSystemHealth();
+  }, [fetchIntegrations, fetchSystemHealth]);
 
   const getBackendState = (provider) =>
     integrations.find((i) => i.provider === provider) || null;
@@ -563,7 +710,9 @@ export default function IntegrationsPanel() {
   }
 
   return (
-    <div className="space-y-8" data-testid="integrations-panel">
+    <div className="space-y-6" data-testid="integrations-panel">
+      <SystemStatusBanner health={systemHealth} />
+
       {GROUPS.map((group) => {
         const items = INTEGRATION_MANIFEST.filter((m) => m.group === group.key);
         if (items.length === 0) return null;

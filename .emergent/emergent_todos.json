@@ -1,26 +1,18 @@
 [
   {
-    "content": "Diagnose Settings.js blank TabsContent root cause (inspect file, context, console logs)",
+    "content": "Backend: record repair events in system_health_events + /api/system/health endpoint",
     "status": "completed"
   },
   {
-    "content": "Backend: Auto-seed integrations separately from inbox seed (self-healing). Add openai + webhook providers.",
+    "content": "IntegrationsPanel: add System Status banner + post-repair toast (session-gated)",
     "status": "completed"
   },
   {
-    "content": "Frontend: Redesign Integrations tab to use STATIC manifest + merge backend status (resilient to empty array)",
+    "content": "Dashboard: add SystemHealth card (Integrations stable / Data consistency / No issues)",
     "status": "completed"
   },
   {
-    "content": "Add real-input fields: OpenAI LLM key, CRM (HubSpot/GHL), Gmail/Calendar OAuth stubs, Webhook endpoint viewer",
-    "status": "completed"
-  },
-  {
-    "content": "Verify all 4 tabs render + test Simulation Mode / Business Profile switching",
-    "status": "completed"
-  },
-  {
-    "content": "Update plan.md and hand back for user approval of Session 3C (Testing & Polish)",
+    "content": "Verify end-to-end: trigger a repair, confirm banner + toast + dashboard card reflect it",
     "status": "completed"
   }
 ]

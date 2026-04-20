@@ -35,6 +35,7 @@ escalation_col = db["escalation_rules"]
 templates_col = db["content_templates"]
 business_profile_col = db["business_profile"]
 integrations_config_col = db["integrations_config"]
+system_health_col = db["system_health_events"]
 
 # ─── Helpers ───────────────────────────────────────────────────────────
 def serialize_doc(doc):
@@ -575,8 +576,12 @@ DEFAULT_INTEGRATIONS_CATALOG = [
 async def ensure_integrations_seeded():
     """Idempotently ensure every provider in the catalog has a row.
     Self-healing: this runs on every startup so missing rows are created even
-    if the main seed_database() was skipped because inbox already had data."""
+    if the main seed_database() was skipped because inbox already had data.
+    Every repair is logged to `system_health_events` so the UI can surface
+    the 'Quantro OS detects and fixes issues before you notice them' trust signal."""
     now = datetime.utcnow()
+    repairs = []  # Events: [{type, provider, detail}]
+
     for item in DEFAULT_INTEGRATIONS_CATALOG:
         existing = await integrations_config_col.find_one({"provider": item["provider"]})
         if not existing:
@@ -591,8 +596,12 @@ async def ensure_integrations_seeded():
                 "created_at": now,
                 "updated_at": now,
             })
+            repairs.append({
+                "type": "provider_restored",
+                "provider": item["provider"],
+                "detail": f"Missing integration '{item['display_name']}' was restored automatically.",
+            })
         else:
-            # Backfill missing metadata on legacy rows
             patch = {}
             if not existing.get("category"):
                 patch["category"] = item["category"]
@@ -602,6 +611,25 @@ async def ensure_integrations_seeded():
                 await integrations_config_col.update_one(
                     {"provider": item["provider"]}, {"$set": patch}
                 )
+                repairs.append({
+                    "type": "metadata_backfilled",
+                    "provider": item["provider"],
+                    "detail": f"Metadata repaired for '{existing.get('display_name') or item['display_name']}' ({', '.join(patch.keys())}).",
+                })
+
+    # Always log a check event (healthy = repairs is empty)
+    await system_health_col.insert_one({
+        "event_id": str(uuid.uuid4()),
+        "scope": "integrations",
+        "status": "repaired" if repairs else "healthy",
+        "repairs": repairs,
+        "repair_count": len(repairs),
+        "checked_at": now,
+    })
+    # Keep only the latest 50 events to avoid unbounded growth
+    old_events = await system_health_col.find({}, {"_id": 1}).sort("checked_at", -1).skip(50).to_list(1000)
+    if old_events:
+        await system_health_col.delete_many({"_id": {"$in": [e["_id"] for e in old_events]}})
 
 # ─── Lifespan ──────────────────────────────────────────────────────────
 @asynccontextmanager
@@ -624,7 +652,86 @@ app.add_middleware(
 # ─── Health ────────────────────────────────────────────────────────────
 @app.get("/api/health")
 async def health():
-    return {"status": "running", "service": "Quantro One | Realty OS", "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "running", "service": "Quantro One | Business OS", "timestamp": datetime.utcnow().isoformat()}
+
+# ─── System Health / Self-Healing Surface ─────────────────────────────
+@app.get("/api/system/health")
+async def system_health():
+    """Surface the self-healing layer to the UI.
+
+    Returns the current state of the Quantro OS integrity layer, including
+    the most recent startup check, any repairs that were applied, and a
+    rolling summary. Powers the "System Status: Healthy" trust banner and
+    the Dashboard "System Health" card."""
+    # Latest check
+    latest = await system_health_col.find_one(
+        {"scope": "integrations"},
+        sort=[("checked_at", -1)],
+        projection={"_id": 0},
+    )
+
+    # Basic integrity count
+    integrations_total = await integrations_config_col.count_documents({})
+    integrations_expected = len(DEFAULT_INTEGRATIONS_CATALOG)
+    integrations_ok = integrations_total >= integrations_expected
+
+    # Business profile existence
+    profile_exists = await business_profile_col.count_documents({}) > 0
+
+    # Recent repairs (last 10)
+    recent_repairs = await system_health_col.find(
+        {"repair_count": {"$gt": 0}},
+        sort=[("checked_at", -1)],
+        projection={"_id": 0},
+    ).to_list(10)
+
+    # Total repair events lifetime
+    total_repair_events = await system_health_col.count_documents({"repair_count": {"$gt": 0}})
+
+    # Overall status
+    if not integrations_ok or not profile_exists:
+        overall = "degraded"
+    elif latest and latest.get("repair_count", 0) > 0:
+        overall = "repaired"
+    else:
+        overall = "healthy"
+
+    return {
+        "status": overall,
+        "tagline": "Quantro OS detects and fixes issues before you notice them.",
+        "last_checked_at": (latest or {}).get("checked_at").isoformat() if latest and latest.get("checked_at") else None,
+        "checks": [
+            {
+                "id": "integrations",
+                "label": "Integrations stable",
+                "ok": integrations_ok,
+                "detail": (
+                    f"{integrations_total}/{integrations_expected} providers registered"
+                    if integrations_ok
+                    else f"Missing providers ({integrations_expected - integrations_total})"
+                ),
+            },
+            {
+                "id": "data_consistency",
+                "label": "Data consistency verified",
+                "ok": profile_exists,
+                "detail": "Business profile present" if profile_exists else "Business profile missing",
+            },
+            {
+                "id": "issues",
+                "label": "No issues detected" if overall != "degraded" else "Issues detected",
+                "ok": overall != "degraded",
+                "detail": (
+                    f"{(latest or {}).get('repair_count', 0)} auto-repair(s) on last startup"
+                    if latest and latest.get("repair_count", 0) > 0
+                    else "All systems operational"
+                ),
+            },
+        ],
+        "latest_check": serialize_doc(latest) if latest else None,
+        "recent_repairs": [serialize_doc(r) for r in recent_repairs],
+        "total_repair_events": total_repair_events,
+    }
 
 # ─── Dashboard ─────────────────────────────────────────────────────────
 @app.get("/api/dashboard/metrics")

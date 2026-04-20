@@ -12,6 +12,7 @@ import { useNavigate } from 'react-router-dom';
 import { format, parseISO, isToday, isTomorrow } from 'date-fns';
 import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 import { getIndustryConfig, getEntityLabel } from '../config/industryConfig';
+import SystemHealthCard from '../components/SystemHealthCard';
 
 const eventTypeIcons = {
   system: Zap,
@@ -217,6 +218,11 @@ export default function Dashboard() {
             </div>
           </CardContent>
         </Card>
+      </div>
+
+      {/* System Health — self-healing surface */}
+      <div className="mb-6">
+        <SystemHealthCard />
       </div>
 
       {/* Integration Status Banner (if any connected) */}
