@@ -12,6 +12,7 @@ import { useNavigate } from 'react-router-dom';
 import { format, parseISO, isToday, isTomorrow } from 'date-fns';
 import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 import { getIndustryConfig, getEntityLabel } from '../config/industryConfig';
+import { useLanguage } from '../context/LanguageContext';
 import SystemHealthCard from '../components/SystemHealthCard';
 
 const eventTypeIcons = {
@@ -46,6 +47,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
   const { profile, loading: profileLoading } = useBusinessProfile();
+  const { t } = useLanguage();
 
   // Get industry-specific config
   const industry = profile?.industry || 'other';
@@ -125,9 +127,9 @@ export default function Dashboard() {
       {/* Header */}
       <div className="flex items-center justify-between mb-8">
         <div>
-          <h1 className="font-display text-2xl font-semibold tracking-tight">Dashboard</h1>
+          <h1 className="font-display text-2xl font-semibold tracking-tight">{t('dashboard.title')}</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            {industryConfig.name} operations • Real-time overview
+            {industryConfig.name} · {t('dashboard.subtitle')}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -135,13 +137,13 @@ export default function Dashboard() {
             <>
               <Badge className="bg-[hsl(var(--warning)/0.15)] text-[hsl(var(--warning))] border-[hsl(var(--warning)/0.3)]">
                 <Zap size={12} className="mr-1" />
-                Simulation Mode Active
+                {t('dashboard.simulation_mode')}
               </Badge>
             </>
           ) : (
             <>
               <span className="status-dot running animate-pulse-dot" />
-              <span className="text-xs text-muted-foreground">Live Data Mode</span>
+              <span className="text-xs text-muted-foreground">{t('dashboard.live_mode')}</span>
             </>
           )}
         </div>

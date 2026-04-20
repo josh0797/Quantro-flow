@@ -28,6 +28,7 @@ import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { toast } from 'sonner';
+import { useLanguage } from '../context/LanguageContext';
 
 /**
  * Static manifest of supported integrations. This is the source of truth
@@ -38,19 +39,19 @@ import { toast } from 'sonner';
 const INTEGRATION_MANIFEST = [
   {
     id: 'openai',
+    i18nKey: 'integrations.openai',
     group: 'ai',
-    groupLabel: 'AI & Intelligence',
     name: 'OpenAI / LLM Provider',
-    description:
-      'Powers AI classification, drafting, and auto-execution across your workflows.',
+    description: 'Powers AI classification, drafting, and auto-execution across your workflows.',
+    helper: 'This workspace is currently powered by the Emergent Universal Key. Add your own key to override it per workspace.',
     icon: Sparkles,
     gradient: 'from-emerald-500 to-teal-500',
-    connectLabel: 'Save & Connect',
+    connectLabelKey: 'integrations.actions.save_and_connect',
     fields: [
-      { key: 'api_key', label: 'API Key', placeholder: 'sk-...', secret: true, required: true },
+      { key: 'api_key', labelKey: 'integrations.openai.api_key', placeholder: 'sk-...', secret: true, required: true },
       {
         key: 'model',
-        label: 'Default Model',
+        labelKey: 'integrations.openai.default_model',
         type: 'select',
         required: false,
         options: [
@@ -61,37 +62,35 @@ const INTEGRATION_MANIFEST = [
         default: 'gpt-4o',
       },
     ],
-    helper:
-      'This workspace is currently powered by the Emergent Universal Key. Add your own key to override it per workspace.',
   },
   {
     id: 'gmail',
+    i18nKey: 'integrations.gmail',
     group: 'email',
-    groupLabel: 'Email & Calendar',
     name: 'Gmail',
     description: 'Sync incoming email into Smart Inbox and let the system draft replies.',
     icon: Mail,
     gradient: 'from-red-500 to-orange-500',
-    connectLabel: 'Connect with Google',
+    connectLabelKey: 'integrations.actions.connect_google',
     oauth: true,
     fields: [
-      { key: 'email', label: 'Connected Account', placeholder: 'you@company.com', required: true },
+      { key: 'email', labelKey: 'integrations.gmail.account', placeholder: 'you@company.com', required: true },
     ],
   },
   {
     id: 'google_calendar',
+    i18nKey: 'integrations.calendar',
     group: 'email',
-    groupLabel: 'Email & Calendar',
     name: 'Google Calendar',
     description: 'Two-way sync events, bookings, and availability windows.',
     icon: Calendar,
     gradient: 'from-blue-500 to-indigo-500',
-    connectLabel: 'Connect with Google',
+    connectLabelKey: 'integrations.actions.connect_google',
     oauth: true,
     fields: [
       {
         key: 'calendar_id',
-        label: 'Calendar ID',
+        labelKey: 'integrations.calendar.calendar_id',
         placeholder: 'primary',
         default: 'primary',
         required: true,
@@ -100,18 +99,17 @@ const INTEGRATION_MANIFEST = [
   },
   {
     id: 'crm',
+    i18nKey: 'integrations.crm',
     group: 'crm',
-    groupLabel: 'CRM',
     name: 'CRM System',
-    description:
-      'Bi-directional sync with HubSpot, GoHighLevel, Pipedrive, or any CRM with an API.',
+    description: 'Bi-directional sync with HubSpot, GoHighLevel, Pipedrive, or any CRM with an API.',
     icon: Users,
     gradient: 'from-purple-500 to-pink-500',
-    connectLabel: 'Save & Connect',
+    connectLabelKey: 'integrations.actions.save_and_connect',
     fields: [
       {
         key: 'provider',
-        label: 'CRM Provider',
+        labelKey: 'integrations.crm.provider',
         type: 'select',
         required: true,
         options: [
@@ -122,10 +120,10 @@ const INTEGRATION_MANIFEST = [
           { value: 'custom', label: 'Custom / Other' },
         ],
       },
-      { key: 'api_key', label: 'API Key', placeholder: 'Your CRM API key', secret: true, required: true },
+      { key: 'api_key', labelKey: 'integrations.crm.api_key', placeholder: 'Your CRM API key', secret: true, required: true },
       {
         key: 'base_url',
-        label: 'Base URL (optional)',
+        labelKey: 'integrations.crm.base_url',
         placeholder: 'https://api.yourcrm.com',
         required: false,
       },
@@ -133,18 +131,17 @@ const INTEGRATION_MANIFEST = [
   },
   {
     id: 'webhook',
+    i18nKey: 'integrations.webhook',
     group: 'automation',
-    groupLabel: 'Webhooks & Endpoints',
     name: 'Inbound Webhooks',
-    description:
-      'Forward events from any service into Business OS. Use the endpoint below in your external tools.',
+    description: 'Forward events from any service into Business OS. Use the endpoint below in your external tools.',
     icon: Webhook,
     gradient: 'from-amber-500 to-yellow-500',
-    connectLabel: 'Enable Webhooks',
+    connectLabelKey: 'integrations.actions.enable_webhooks',
     fields: [
       {
         key: 'secret',
-        label: 'Shared Secret (optional)',
+        labelKey: 'integrations.webhook.shared_secret',
         placeholder: 'Generate a random string',
         secret: true,
         required: false,
@@ -155,10 +152,10 @@ const INTEGRATION_MANIFEST = [
 ];
 
 const GROUPS = [
-  { key: 'ai', label: 'AI & Intelligence', icon: Sparkles },
-  { key: 'email', label: 'Email & Calendar', icon: Mail },
-  { key: 'crm', label: 'CRM', icon: Users },
-  { key: 'automation', label: 'Webhooks & Endpoints', icon: Webhook },
+  { key: 'ai', i18nKey: 'integrations.groups.ai', icon: Sparkles },
+  { key: 'email', i18nKey: 'integrations.groups.email', icon: Mail },
+  { key: 'crm', i18nKey: 'integrations.groups.crm', icon: Users },
+  { key: 'automation', i18nKey: 'integrations.groups.automation', icon: Webhook },
 ];
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
@@ -169,9 +166,9 @@ const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
  * Polls /api/system/health and displays an Apple/Stripe-style status panel.
  * Also fires a one-time per-session toast when a repair was applied on last startup.
  */
-function SystemStatusBanner({ health }) {
+function SystemStatusBanner({ health, t }) {
   if (!health) return null;
-  const { status, tagline, checks = [], latest_check, recent_repairs = [] } = health;
+  const { status, checks = [], latest_check } = health;
   const isHealthy = status === 'healthy';
   const isRepaired = status === 'repaired';
   const isDegraded = status === 'degraded';
@@ -189,15 +186,22 @@ function SystemStatusBanner({ health }) {
 
   const StateIcon = isDegraded ? AlertCircle : isRepaired ? Activity : ShieldCheck;
   const headline = isDegraded
-    ? 'System Status: Degraded'
+    ? t('system_health.status_degraded')
     : isRepaired
-    ? 'System Status: Auto-Repaired'
-    : 'System Status: Healthy';
+    ? t('system_health.status_repaired')
+    : t('system_health.status_healthy');
   const subcopy = isDegraded
-    ? 'Some components require attention. Quantro OS is working to resolve them.'
+    ? t('system_health.subcopy_degraded')
     : isRepaired
-    ? 'Quantro OS detected missing components and repaired them automatically.'
-    : 'Quantro OS is actively maintaining your integrations. Any inconsistencies are detected and resolved automatically.';
+    ? t('system_health.subcopy_repaired')
+    : t('system_health.subcopy_healthy');
+
+  // Map backend check.id → localized label
+  const checkLabelKey = {
+    integrations: 'system_health.checks.integrations_stable',
+    data_consistency: 'system_health.checks.data_consistency',
+    issues: 'system_health.checks.no_issues',
+  };
 
   return (
     <div
@@ -216,12 +220,12 @@ function SystemStatusBanner({ health }) {
             <h2 className="text-sm font-semibold text-foreground">{headline}</h2>
             {isHealthy && (
               <span className="inline-flex items-center gap-1 text-[hsl(var(--success))] text-xs font-medium">
-                <CheckCircle2 size={12} /> All systems operational
+                <CheckCircle2 size={12} /> {t('system_health.all_operational')}
               </span>
             )}
             {latest_check?.checked_at && (
               <span className="text-[11px] text-muted-foreground ml-auto">
-                Last check: {new Date(latest_check.checked_at).toLocaleString()}
+                {t('system_health.last_check', { time: new Date(latest_check.checked_at).toLocaleString() })}
               </span>
             )}
           </div>
@@ -229,33 +233,36 @@ function SystemStatusBanner({ health }) {
 
           {/* Check summary grid */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
-            {checks.map((c) => (
-              <div
-                key={c.id}
-                data-testid={`system-check-${c.id}`}
-                className="flex items-start gap-2 rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--background)/0.5)] px-3 py-2"
-              >
-                {c.ok ? (
-                  <CheckCircle2 size={14} className="text-[hsl(var(--success))] mt-0.5 shrink-0" />
-                ) : (
-                  <AlertCircle size={14} className="text-[hsl(var(--critical))] mt-0.5 shrink-0" />
-                )}
-                <div className="min-w-0">
-                  <p className="text-xs font-medium text-foreground">{c.label}</p>
-                  <p className="text-[11px] text-muted-foreground truncate">{c.detail}</p>
+            {checks.map((c) => {
+              const localizedLabel = checkLabelKey[c.id] ? t(checkLabelKey[c.id]) : c.label;
+              return (
+                <div
+                  key={c.id}
+                  data-testid={`system-check-${c.id}`}
+                  className="flex items-start gap-2 rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--background)/0.5)] px-3 py-2"
+                >
+                  {c.ok ? (
+                    <CheckCircle2 size={14} className="text-[hsl(var(--success))] mt-0.5 shrink-0" />
+                  ) : (
+                    <AlertCircle size={14} className="text-[hsl(var(--critical))] mt-0.5 shrink-0" />
+                  )}
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium text-foreground">{localizedLabel}</p>
+                    <p className="text-[11px] text-muted-foreground truncate">{c.detail}</p>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
-          {/* Recent repairs breakdown (only when relevant) */}
+          {/* Recent repairs breakdown */}
           {isRepaired && latest_check?.repairs?.length > 0 && (
             <div
               data-testid="recent-repairs-list"
               className="pt-2 border-t border-[hsl(var(--border))] mt-2"
             >
               <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1.5">
-                Auto-resolved on last startup
+                {t('system_health.auto_resolved_header')}
               </p>
               <ul className="space-y-1">
                 {latest_check.repairs.map((r, i) => (
@@ -268,15 +275,15 @@ function SystemStatusBanner({ health }) {
             </div>
           )}
 
-          {/* Subtle tagline (marketing / trust signal) */}
-          <p className="text-[11px] text-muted-foreground/70 italic pt-1">— {tagline}</p>
+          {/* Tagline */}
+          <p className="text-[11px] text-muted-foreground/70 italic pt-1">— {t('system_health.tagline')}</p>
         </div>
       </div>
     </div>
   );
 }
 
-function StatusBadge({ status }) {
+function StatusBadge({ status, t }) {
   const isConnected = status === 'connected';
   return (
     <Badge
@@ -289,11 +296,11 @@ function StatusBadge({ status }) {
     >
       {isConnected ? (
         <>
-          <CheckCircle2 size={12} className="mr-1" /> Connected
+          <CheckCircle2 size={12} className="mr-1" /> {t('integrations.status.connected')}
         </>
       ) : (
         <>
-          <XCircle size={12} className="mr-1" /> Not Connected
+          <XCircle size={12} className="mr-1" /> {t('integrations.status.not_connected')}
         </>
       )}
     </Badge>
@@ -327,6 +334,7 @@ function SecretInput({ value, onChange, placeholder, testId }) {
 }
 
 function CopyableEndpoint({ url, testId }) {
+  const { t } = useLanguage();
   const [copied, setCopied] = useState(false);
   const handleCopy = async () => {
     const copyViaFallback = () => {
@@ -353,10 +361,10 @@ function CopyableEndpoint({ url, testId }) {
         throw new Error('clipboard unavailable');
       }
       setCopied(true);
-      toast.success('Endpoint copied to clipboard');
+      toast.success(t('integrations.toasts.endpoint_copied'));
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error('Copy unavailable in this browser — please select and copy manually');
+      toast.error(t('integrations.toasts.copy_failed'));
     }
   };
   return (
@@ -379,7 +387,7 @@ function CopyableEndpoint({ url, testId }) {
   );
 }
 
-function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTest, testingProvider }) {
+function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTest, testingProvider, t }) {
   const Icon = manifest.icon;
   const status = backendState?.status || 'disconnected';
   const isConnected = status === 'connected';
@@ -414,6 +422,18 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
 
   const endpoint = manifest.showEndpoint ? `${backendUrl}/api/webhooks/${manifest.id}` : null;
 
+  // Localized name/description/helper from translation keys (falls back to manifest defaults)
+  const localName = manifest.i18nKey ? t(`${manifest.i18nKey}.name`) : manifest.name;
+  const localDescription = manifest.i18nKey
+    ? t(`${manifest.i18nKey}.description`)
+    : manifest.description;
+  const localHelper = manifest.i18nKey && manifest.helper
+    ? t(`${manifest.i18nKey}.helper`)
+    : manifest.helper;
+  const localConnectLabel = manifest.connectLabelKey
+    ? t(manifest.connectLabelKey)
+    : manifest.connectLabel;
+
   return (
     <Card
       data-testid={`${manifest.id}-integration-card`}
@@ -429,49 +449,50 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
         <div className="flex-1 min-w-0 space-y-4">
           <div className="flex items-start justify-between gap-3 flex-wrap">
             <div className="min-w-0">
-              <h3 className="text-base font-semibold text-foreground">{manifest.name}</h3>
-              <p className="text-xs text-muted-foreground mt-0.5">{manifest.description}</p>
+              <h3 className="text-base font-semibold text-foreground">{localName}</h3>
+              <p className="text-xs text-muted-foreground mt-0.5">{localDescription}</p>
             </div>
             <div className="flex items-center gap-2 shrink-0">
-              <StatusBadge status={status} />
+              <StatusBadge status={status} t={t} />
               {backendState?.last_sync_at && (
                 <span className="text-[11px] text-muted-foreground">
-                  Last sync: {new Date(backendState.last_sync_at).toLocaleString()}
+                  {t('integrations.status.last_sync', { time: new Date(backendState.last_sync_at).toLocaleString() })}
                 </span>
               )}
             </div>
           </div>
 
-          {manifest.helper && (
+          {localHelper && (
             <div className="flex gap-2 items-start rounded-md border border-[hsl(var(--primary)/0.2)] bg-[hsl(var(--primary)/0.05)] px-3 py-2">
               <AlertCircle size={14} className="text-[hsl(var(--primary))] mt-0.5 shrink-0" />
-              <p className="text-xs text-muted-foreground leading-relaxed">{manifest.helper}</p>
+              <p className="text-xs text-muted-foreground leading-relaxed">{localHelper}</p>
             </div>
           )}
 
           {endpoint && (
             <div className="space-y-2">
               <Label className="text-xs text-muted-foreground uppercase tracking-wide">
-                Your Inbound Endpoint
+                {t('integrations.webhook.endpoint_label')}
               </Label>
               <CopyableEndpoint url={endpoint} testId={`${manifest.id}-endpoint`} />
             </div>
           )}
 
-          {/* Config form — always render for editability */}
+          {/* Config form */}
           {manifest.fields && manifest.fields.length > 0 && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {manifest.fields.map((f) => {
                 const inputId = `${manifest.id}-${f.key}`;
                 const testId = `${manifest.id}-${f.key}-input`;
                 const value = formValues[f.key] ?? '';
+                const localFieldLabel = f.labelKey ? t(f.labelKey) : f.label;
                 const commonLabel = (
                   <Label
                     htmlFor={inputId}
                     className="text-xs flex items-center gap-1.5"
                   >
                     {f.secret && <Lock size={11} className="text-muted-foreground" />}
-                    {f.label}
+                    {localFieldLabel}
                     {f.required && <span className="text-[hsl(var(--critical))]">*</span>}
                   </Label>
                 );
@@ -541,7 +562,7 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
                   ) : (
                     <RefreshCw size={14} />
                   )}
-                  <span className="ml-2">Test Connection</span>
+                  <span className="ml-2">{t('integrations.actions.test_connection')}</span>
                 </Button>
                 <Button
                   variant="outline"
@@ -549,7 +570,7 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
                   onClick={handleSubmit}
                   data-testid={`update-${manifest.id}-button`}
                 >
-                  Update Config
+                  {t('integrations.actions.update_config')}
                 </Button>
                 <Button
                   variant="ghost"
@@ -558,7 +579,7 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
                   className="text-[hsl(var(--critical))] hover:text-[hsl(var(--critical))] hover:bg-[hsl(var(--critical)/0.1)]"
                   data-testid={`disconnect-${manifest.id}-button`}
                 >
-                  Disconnect
+                  {t('integrations.actions.disconnect')}
                 </Button>
               </>
             ) : (
@@ -573,7 +594,7 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
                 ) : (
                   <Plug size={14} className="mr-2" />
                 )}
-                {manifest.connectLabel || 'Connect'}
+                {localConnectLabel}
               </Button>
             )}
           </div>
@@ -584,6 +605,7 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
 }
 
 export default function IntegrationsPanel() {
+  const { t } = useLanguage();
   const [integrations, setIntegrations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [testingProvider, setTestingProvider] = useState(null);
@@ -601,12 +623,12 @@ export default function IntegrationsPanel() {
       }
     } catch (err) {
       console.error('Failed to load integrations:', err);
-      toast.error('Failed to load integrations');
+      toast.error(t('integrations.toasts.load_failed'));
       setIntegrations([]);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   const fetchSystemHealth = useCallback(async (retry = 0) => {
     try {
@@ -615,15 +637,14 @@ export default function IntegrationsPanel() {
         const data = await res.json();
         setSystemHealth(data);
 
-        // Session-gated repair toast (shown once per browser session per event_id)
         if (data?.status === 'repaired' && data?.latest_check?.event_id) {
           const seenKey = `qos_repair_seen_${data.latest_check.event_id}`;
           if (!sessionStorage.getItem(seenKey)) {
             const count = data.latest_check.repair_count || 0;
             toast.success(
               count > 1
-                ? `System repaired ${count} missing integrations automatically`
-                : 'System repaired missing integrations automatically',
+                ? t('system_health.repair_toast_multi', { count })
+                : t('system_health.repair_toast_single'),
               { duration: 5000 }
             );
             sessionStorage.setItem(seenKey, '1');
@@ -636,7 +657,7 @@ export default function IntegrationsPanel() {
       console.warn('system health check unavailable:', err);
       if (retry < 2) setTimeout(() => fetchSystemHealth(retry + 1), 500);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     fetchIntegrations();
@@ -654,13 +675,13 @@ export default function IntegrationsPanel() {
         body: JSON.stringify({ status: 'connected', config }),
       });
       if (res.ok) {
-        toast.success(`${provider} connected successfully`);
+        toast.success(t('integrations.toasts.connected', { provider }));
         fetchIntegrations();
       } else {
-        toast.error(`Failed to connect ${provider}`);
+        toast.error(t('integrations.toasts.connect_failed', { provider }));
       }
     } catch {
-      toast.error('Network error while saving integration');
+      toast.error(t('integrations.toasts.load_failed'));
     }
   };
 
@@ -672,13 +693,13 @@ export default function IntegrationsPanel() {
         body: JSON.stringify({ status: 'disconnected', config: {} }),
       });
       if (res.ok) {
-        toast.success(`${provider} disconnected`);
+        toast.success(t('integrations.toasts.disconnected', { provider }));
         fetchIntegrations();
       } else {
-        toast.error(`Failed to disconnect ${provider}`);
+        toast.error(t('integrations.toasts.connect_failed', { provider }));
       }
     } catch {
-      toast.error('Network error');
+      toast.error(t('integrations.toasts.load_failed'));
     }
   };
 
@@ -689,10 +710,10 @@ export default function IntegrationsPanel() {
         method: 'POST',
       });
       const data = await res.json();
-      if (data.success) toast.success(data.message);
-      else toast.error(data.message || 'Connection test failed');
+      if (data.success) toast.success(t('integrations.toasts.test_ok', { provider }));
+      else toast.error(t('integrations.toasts.test_fail', { provider }));
     } catch {
-      toast.error('Connection test failed');
+      toast.error(t('integrations.toasts.test_fail', { provider }));
     } finally {
       setTestingProvider(null);
     }
@@ -711,7 +732,7 @@ export default function IntegrationsPanel() {
 
   return (
     <div className="space-y-6" data-testid="integrations-panel">
-      <SystemStatusBanner health={systemHealth} />
+      <SystemStatusBanner health={systemHealth} t={t} />
 
       {GROUPS.map((group) => {
         const items = INTEGRATION_MANIFEST.filter((m) => m.group === group.key);
@@ -726,7 +747,7 @@ export default function IntegrationsPanel() {
             <div className="flex items-center gap-2 px-1">
               <GroupIcon size={14} className="text-muted-foreground" />
               <h3 className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">
-                {group.label}
+                {t(group.i18nKey)}
               </h3>
               <Separator className="flex-1 bg-[hsl(var(--border))]" />
             </div>
@@ -740,6 +761,7 @@ export default function IntegrationsPanel() {
                   onDisconnect={handleDisconnect}
                   onTest={handleTest}
                   testingProvider={testingProvider}
+                  t={t}
                 />
               ))}
             </div>

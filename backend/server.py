@@ -59,6 +59,14 @@ def now_iso():
     return datetime.utcnow()
 
 # ─── AI Prompts ────────────────────────────────────────────────────────
+LANGUAGE_NAMES = {"es": "Spanish", "en": "English"}
+
+def _lang_directive(language_code):
+    """Return a single-line language directive to inject into LLM prompts.
+    Spec: 'Respond in ${lang === "es" ? "Spanish" : "English"}'."""
+    name = LANGUAGE_NAMES.get((language_code or "en").lower(), "English")
+    return f"Respond in {name}. All textual fields (summary, description, generated copy) must be written in {name}."
+
 async def build_intent_prompt(business_profile=None):
     """Build intent detection prompt with business profile context."""
     if not business_profile:
@@ -67,6 +75,7 @@ async def build_intent_prompt(business_profile=None):
     
     industry = business_profile.get("industry", "other")
     labels = business_profile.get("entity_labels", {})
+    language = business_profile.get("language", "es")
     
     industry_context = {
         "real_estate": "real estate operations",
@@ -80,6 +89,7 @@ async def build_intent_prompt(business_profile=None):
     
     return f"""You are an AI assistant for Quantro One, a Business Operating System.
 The business operates in: {industry_context}.
+{_lang_directive(language)}
 
 Analyze incoming messages and detect intent.
 
@@ -108,6 +118,7 @@ async def build_content_prompt(business_profile=None):
         business_profile = profile if profile else {"industry": "other"}
     
     industry = business_profile.get("industry", "other")
+    language = business_profile.get("language", "es")
     
     industry_context = {
         "real_estate": "a real estate team",
@@ -119,6 +130,7 @@ async def build_content_prompt(business_profile=None):
     
     return f"""You are a premium content writer for {industry_context}.
 Generate professional, engaging content.
+{_lang_directive(language)}
 
 Respond with ONLY valid JSON (no markdown fences):
 {{
@@ -465,6 +477,7 @@ async def seed_database():
             "services": "Services"
         },
         "simulation_mode": False,
+        "language": "es",
         "created_at": now,
         "updated_at": now
     }
@@ -1721,6 +1734,7 @@ async def build_template_prompt(business_profile=None):
         business_profile = profile if profile else {"industry": "other"}
     
     industry = business_profile.get("industry", "other")
+    language = business_profile.get("language", "es")
     
     industry_context = {
         "real_estate": "a premium real estate firm",
@@ -1734,6 +1748,7 @@ async def build_template_prompt(business_profile=None):
 You will be given a template with variables marked as {{{{variable_name}}}} and context values.
 Generate polished, professional content by filling in the template with the given context.
 Also enhance the language to be engaging and natural while keeping the template structure.
+{_lang_directive(language)}
 
 Respond with ONLY valid JSON (no markdown fences):
 {{
@@ -1828,6 +1843,7 @@ class BusinessProfileUpdate(BaseModel):
     use_case: str = ""
     entity_labels: dict
     simulation_mode: bool = False
+    language: Optional[str] = None  # ISO 639-1 code: 'es' | 'en' (extensible)
 
 @app.get("/api/business-profile")
 async def get_business_profile():
@@ -1845,7 +1861,8 @@ async def get_business_profile():
                 "meetings": "Meetings",
                 "events": "Events",
                 "services": "Services"
-            }
+            },
+            "language": "es",
         }
     return serialize_doc(profile)
 
@@ -1864,6 +1881,9 @@ async def update_business_profile(req: BusinessProfileUpdate):
         "simulation_mode": req.simulation_mode,
         "updated_at": now_iso()
     }
+    # Only persist `language` when explicitly provided — allows partial updates
+    if req.language and req.language in ("es", "en"):
+        update_data["language"] = req.language
     
     result = await business_profile_col.update_one(
         {"profile_id": "default"},

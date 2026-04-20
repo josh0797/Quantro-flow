@@ -3,17 +3,18 @@ import { NavLink, useLocation } from 'react-router-dom';
 import { LayoutDashboard, Inbox, Calendar, Users, UserPlus, PenTool, ChevronLeft, ChevronRight, Zap, Bot, Settings } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { getSystemStatus } from '../lib/api';
-import { useBusinessProfile } from '../contexts/BusinessProfileContext';
+import { useLanguage } from '../context/LanguageContext';
+import LanguageSwitcher from './LanguageSwitcher';
 
 const navItems = [
-  { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard', testId: 'nav-dashboard' },
-  { to: '/inbox', icon: Inbox, label: 'Smart Inbox', testId: 'nav-smart-inbox' },
-  { to: '/schedule', icon: Calendar, label: 'Schedule', testId: 'nav-schedule' },
-  { to: '/crm', icon: Users, label: 'CRM', testId: 'nav-crm' },
-  { to: '/onboarding', icon: UserPlus, label: 'Onboarding', testId: 'nav-onboarding' },
-  { to: '/content', icon: PenTool, label: 'Content Engine', testId: 'nav-content-engine' },
-  { to: '/automation', icon: Bot, label: 'Automation', testId: 'nav-automation' },
-  { to: '/settings', icon: Settings, label: 'Settings', testId: 'nav-settings' },
+  { to: '/dashboard', icon: LayoutDashboard, labelKey: 'sidebar.dashboard', testId: 'nav-dashboard' },
+  { to: '/inbox', icon: Inbox, labelKey: 'sidebar.smart_inbox', testId: 'nav-smart-inbox' },
+  { to: '/schedule', icon: Calendar, labelKey: 'sidebar.schedule', testId: 'nav-schedule' },
+  { to: '/crm', icon: Users, labelKey: 'sidebar.crm', testId: 'nav-crm' },
+  { to: '/onboarding', icon: UserPlus, labelKey: 'sidebar.onboarding', testId: 'nav-onboarding' },
+  { to: '/content', icon: PenTool, labelKey: 'sidebar.content_engine', testId: 'nav-content-engine' },
+  { to: '/automation', icon: Bot, labelKey: 'sidebar.automation', testId: 'nav-automation' },
+  { to: '/settings', icon: Settings, labelKey: 'sidebar.settings', testId: 'nav-settings' },
 ];
 
 export default function Sidebar() {
@@ -21,7 +22,7 @@ export default function Sidebar() {
   const [systemStatus, setSystemStatus] = useState(null);
   const [integrationStatus, setIntegrationStatus] = useState({});
   const location = useLocation();
-  const { profile } = useBusinessProfile();
+  const { t } = useLanguage();
 
   useEffect(() => {
     const fetchStatus = async () => {
@@ -68,8 +69,8 @@ export default function Sidebar() {
         </div>
         {!collapsed && (
           <div className="flex flex-col">
-            <span className="font-display text-sm font-semibold text-foreground tracking-tight">Quantro One</span>
-            <span className="text-[10px] text-muted-foreground tracking-wide uppercase">Business OS</span>
+            <span className="font-display text-sm font-semibold text-foreground tracking-tight">{t('sidebar.brand')}</span>
+            <span className="text-[10px] text-muted-foreground tracking-wide uppercase">{t('sidebar.brand_subtitle')}</span>
           </div>
         )}
       </div>
@@ -91,7 +92,7 @@ export default function Sidebar() {
               }`}
             >
               <Icon size={18} className={isActive ? 'text-[hsl(var(--primary))]' : ''} />
-              {!collapsed && <span>{item.label}</span>}
+              {!collapsed && <span>{t(item.labelKey)}</span>}
               {isActive && !collapsed && (
                 <div className="ml-auto w-1.5 h-1.5 rounded-full bg-[hsl(var(--primary))]" />
               )}
@@ -100,24 +101,30 @@ export default function Sidebar() {
         })}
       </nav>
 
-      {/* System Status */}
+      {/* Language Switcher + System Status */}
       <div className="px-3 pb-4 space-y-2">
+        {!collapsed && (
+          <div data-testid="sidebar-language-footer" className="px-1">
+            <LanguageSwitcher variant="compact" />
+          </div>
+        )}
+
         <div data-testid="system-status" className="flex items-center gap-2 px-3 py-2.5 rounded-lg bg-[hsl(var(--surface-1))] border border-[hsl(var(--border))]">
           <span className={`status-dot ${systemStatus?.overall || 'running'} animate-pulse-dot`} />
           {!collapsed && (
             <div className="flex flex-col flex-1 min-w-0">
-              <span className="text-xs font-medium text-foreground">System {systemStatus?.overall === 'running' ? 'Running' : 'Status'}</span>
+              <span className="text-xs font-medium text-foreground">{t('sidebar.system_running')}</span>
               <span data-testid="system-status-last-sync" className="text-[10px] font-mono text-muted-foreground truncate">
-                {systemStatus ? `Synced ${new Date(systemStatus.timestamp).toLocaleTimeString()}` : 'Connecting...'}
+                {systemStatus ? t('sidebar.synced', { time: new Date(systemStatus.timestamp).toLocaleTimeString() }) : t('common.loading')}
               </span>
             </div>
           )}
         </div>
-        
+
         {/* Integration Status */}
         {!collapsed && (integrationStatus.gmail || integrationStatus.google_calendar || integrationStatus.crm) && (
           <div className="px-3 py-2 rounded-lg bg-[hsl(var(--surface-1)/0.5)] border border-[hsl(var(--border))]">
-            <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1.5">Integrations</div>
+            <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1.5">{t('sidebar.integrations_label')}</div>
             <div className="space-y-1">
               {integrationStatus.gmail && (
                 <div className="flex items-center gap-1.5 text-[10px]">

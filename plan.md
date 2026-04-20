@@ -16,6 +16,12 @@
   - “System Status: Healthy / Auto‑Repaired / Degraded”
   - “Quantro OS detects and fixes issues before you notice them.”
   - Surface integrity checks + repair explanations.
+- **Ship a robust multilingual system (i18n) as an OS-level capability**, not a simple UI translation layer:
+  - UI text + dashboard labels
+  - Settings and integrations control center
+  - Self-healing surface copy
+  - Decision system (Quantro Revenue / Action Center) via **keys**, not stored translated strings
+  - AI-generated content language enforced via prompt injection
 - Prepare for future SaaS scaling (multi-tenant, auth, RBAC, audit export) **without shipping auth yet**.
 
 **Current status (as of this update):**
@@ -26,6 +32,7 @@
 - ✅ Backend integrations config is **self-healing** (auto-seeded on startup; idempotent).
 - ✅ **Session 3C — Testing & Polish completed successfully** (backend self-healing QA + frontend cross-module regression).
 - ✅ **System Health surface layer shipped** (Settings banner + Dashboard card + repair toast + backend health endpoint/events).
+- ✅ **Multilingual i18n system shipped (ES + EN)** with global Language Context, translation keys, persistence, and AI language enforcement.
 - 🟢 **Phase 6 complete and production-ready**.
 - ⏭️ Phase 7 is next **but OAuth/auth should not start until user approval**.
 
@@ -104,6 +111,7 @@
 **Primary goal (Phase 6)**
 Transform the product from:
 - “Quantro One | Realty OS” (real-estate specific)
+
 into:
 - **“Quantro One | Business OS”** (horizontal, configurable, multi-industry)
 
@@ -141,6 +149,7 @@ Configurable **Business Profile** layer (single-tenant for now; workspace-scoped
 - Use case (free text)
 - Entity naming overrides: Contacts, Team Members, Meetings, Events, Services
 - `simulation_mode` toggle (Simulation Layer)
+- `language` (NEW): `"es" | "en"`
 
 **Behavior requirements (delivered)**
 - UI labels adapt dynamically based on selected industry + naming overrides.
@@ -148,6 +157,7 @@ Configurable **Business Profile** layer (single-tenant for now; workspace-scoped
   - intent classification
   - entity extraction
   - content generation
+- AI outputs enforce language based on Business Profile `language`.
 
 **Implementation notes (delivered)**
 - MongoDB `business_profile` document.
@@ -188,6 +198,7 @@ Provide a SaaS-grade Settings section that functions as the **operational core**
 
 4) 👥 Workspace
 - Placeholder with workspace name; Phase 7 will add multi-tenant + team management.
+- Includes **Language selector** (NEW)
 
 **Critical bug fixed (P0)**
 - Root cause: `seed_database()` gated on `inbox_col` emptiness → integrations not created on some instances → Integrations UI returned null for every card → blank panel.
@@ -233,15 +244,17 @@ Turn “micro-feedback invisible → visible” and convert self-healing into br
   - Healthy / Auto‑Repaired / Degraded visuals
   - 3 check cards + optional repair breakdown
   - Tagline displayed
+  - **Localized via i18n** (NEW)
 
 3) **Dashboard integration**
 - New `SystemHealthCard` (compact view):
   - Shows 3 checks and state
   - Clickable + “Details →” to Settings
+  - **Localized via i18n** (NEW)
 
 4) **Optional toast (session-gated)**
 - When a startup repair occurred:
-  - Toast: “System repaired missing integrations automatically”
+  - Toast (localized): “System repaired missing integrations automatically”
   - Fires once per browser session per `event_id` (sessionStorage-gated)
 
 **Exit criteria**
@@ -249,7 +262,81 @@ Turn “micro-feedback invisible → visible” and convert self-healing into br
 - ✅ Auto-repair state visible with repair detail.
 - ✅ Toast fires only once per event.
 
-#### 6.5 Data model: “Workspace-ready” scoping (single-tenant)
+#### 6.5 Multilingual System (i18n) — OS-level capability
+**Status: ✅ Completed (ES + EN shipped, production-ready)**
+
+**Goal (delivered)**
+Implement a scalable, lightweight i18n system that covers:
+- UI copy across core surfaces
+- Dashboard labels
+- Self-healing system messaging
+- Decision system (keys, no stored translated strings)
+- AI output language enforcement
+
+**Deliverables (delivered)**
+1) **Single source of truth**
+- `/app/frontend/src/i18n/translations.js`
+  - `translations = { es: {...}, en: {...} }`
+  - Hierarchical keys (e.g., `settings.tabs.integrations`, `system_health.tagline`)
+  - Supports `{{variable}}` interpolation
+  - Includes scaffolding for `login`, `decisions`, `agents`
+
+2) **Global language context**
+- `/app/frontend/src/context/LanguageContext.js`
+  - `lang`, `setLang(lang)`, `t(key, vars?)`
+  - Key resolution: active lang → EN fallback → return key
+  - Persistence:
+    - localStorage: `quantro_lang`
+    - backend Business Profile: `business_profile.language`
+  - Hydration order:
+    1. backend business profile
+    2. localStorage
+    3. default `es`
+
+3) **Language switcher component**
+- `/app/frontend/src/components/LanguageSwitcher.js`
+  - Shadcn Select
+  - Compact + full variants
+
+4) **App integration**
+- `App.js` wrapped with `<LanguageProvider>` (provider wraps Sidebar + all pages).
+
+5) **UI migration (partial; core surfaces complete)**
+Migrated to `t()`:
+- Sidebar (nav + brand + system status)
+- Dashboard header + Live/Simulation label
+- Settings title/subtitle, tabs, Automation copy, Workspace copy + embedded switcher
+- SystemHealthCard
+- IntegrationsPanel SystemStatusBanner
+- IntegrationsPanel toasts + field labels + connect CTAs
+
+6) **Agents + Decisions (pattern)**
+- `translations.js` includes:
+  - `decisions.revenue.raise_prices.{title,summary,impact,action_label}`
+  - `agents.{pricing,retention,triage}.{label,description}`
+- Requirement met: decisions store `titleKey/summaryKey`, rendered via `t(key, variables)`.
+
+7) **AI language enforcement**
+- Backend AI prompts now inject `_lang_directive()`:
+  - “Respond in Spanish/English...”
+- Applied to:
+  - intent prompt
+  - content prompt
+  - template prompt
+
+**Verification (delivered)**
+- Default language: ES on first load.
+- Switching to EN via Settings → Workspace switcher:
+  - shows toast
+  - persists to backend (`business_profile.language = "en"`)
+  - reload retains choice
+
+**Next steps (post-ship; incremental migration)**
+- Continue migrating deep copy in:
+  - Smart Inbox, CRM, Schedule, Content Engine, Onboarding, AutomationPolicies
+- Expand translations for empty states, CTA buttons, error copy.
+
+#### 6.6 Data model: “Workspace-ready” scoping (single-tenant)
 **Status: 🟡 Partially complete (deferred to Phase 7 hardening)**
 
 **Goal**
@@ -257,6 +344,8 @@ While still single-tenant, ensure stored config is future workspace-scoped.
 
 **What exists now**
 - Integrations stored in MongoDB with provider/status/config + metadata.
+- Business profile stores industry, naming, simulation, and language.
+- System health events stored without workspace scoping.
 
 **Next steps**
 - Add `workspace_id` consistently to:
@@ -270,15 +359,15 @@ While still single-tenant, ensure stored config is future workspace-scoped.
 - No hard-coded global integration settings.
 - All config stored in DB in a workspace-compatible structure.
 
-#### 6.6 UX Guidelines (apply throughout Phase 6)
+#### 6.7 UX Guidelines (apply throughout Phase 6)
 **Status: ✅ Completed (validated)**
 - Dark mode, premium UI.
 - Minimal layout, subtle motion.
 - Clear status indicators.
 - Settings communicates trust, safety, and control.
 
-#### 6.7 Testing & verification (Phase 6)
-**Status: ✅ Completed (Session 3C + System Health verification)**
+#### 6.8 Testing & verification (Phase 6)
+**Status: ✅ Completed (Session 3C + System Health verification + i18n verification)**
 
 **Backend Self-Healing QA (7/7 PASS)**
 - Idempotency across 3 restarts (no duplicates; stable IDs)
@@ -300,6 +389,9 @@ While still single-tenant, ensure stored config is future workspace-scoped.
 **System Health Surface Verification**
 - Verified healthy + repaired UI states on Settings banner + Dashboard card.
 
+**i18n Verification**
+- Verified ES default and EN switching + persistence (localStorage + backend).
+
 ---
 
 ### Phase 7 — SaaS Foundation (Auth + Multi-tenant + RBAC + Audit Logs)
@@ -320,9 +412,16 @@ Phase 7 begins only after explicit user approval.
 ## 3. Next Actions
 
 **Immediate (pre-Phase 7 hardening — P1):**
-1. Confirm the System Health layer copy/branding (final microcopy) for production.
-2. Ensure `system_health_events` is workspace-ready in the upcoming tenant model.
-3. (Optional) Add UI entrypoint: “View system health details” linking to Settings.
+1. Complete i18n migration for deep-content strings across remaining pages:
+   - Smart Inbox (empty states, buttons, badges, actions)
+   - CRM
+   - Schedule
+   - Content Engine
+   - Onboarding
+   - AutomationPolicies
+2. Standardize decision objects to use `titleKey/summaryKey` everywhere as the decision system ships.
+3. Ensure `system_health_events` and i18n `language` are workspace-ready in the upcoming tenant model.
+4. Confirm final microcopy for System Health and Integrations in both ES and EN.
 
 **Phase 7 kickoff (P1 — only after approval):**
 1. Confirm tenancy model + workspace scoping strategy (`workspace_id` everywhere).
@@ -351,12 +450,20 @@ Phase 7 begins only after explicit user approval.
 - ✅ Business Profile drives:
   - dynamic UI labels
   - AI context for classification + generation
+  - i18n language enforcement
 - ✅ Settings provides a SaaS-grade control surface:
   - Integrations control center with real inputs (LLM keys, CRM keys, OAuth-ready connectors, webhooks)
   - Automation controls
   - Business Profile config
+  - Language selector (ES/EN)
 - ✅ Integrations seeding is idempotent and self-healing; Integrations UI never blanks.
 - ✅ Self-healing is now **user-visible** as a trust signal (Settings banner + Dashboard card + repair toast).
+- ✅ i18n shipped with:
+  - single source translations
+  - global LanguageContext
+  - persistence to backend + localStorage
+  - EN fallback + key fallback
+  - AI prompt language injection
 - ✅ Session 3C QA complete with **GO** results.
 
 **Phase 7 Success Criteria (SaaS Foundation):**

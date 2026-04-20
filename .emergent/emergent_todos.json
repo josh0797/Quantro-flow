@@ -1,18 +1,34 @@
 [
   {
-    "content": "Backend: record repair events in system_health_events + /api/system/health endpoint",
+    "content": "Create translations.js (es + en) with hierarchical keys covering all live views + scaffolding for decisions/agents/login",
     "status": "completed"
   },
   {
-    "content": "IntegrationsPanel: add System Status banner + post-repair toast (session-gated)",
+    "content": "Create LanguageContext.js with t() fn, dot-notation resolver, EN fallback, localStorage + profile persistence",
     "status": "completed"
   },
   {
-    "content": "Dashboard: add SystemHealth card (Integrations stable / Data consistency / No issues)",
+    "content": "Create LanguageSwitcher component (used in Sidebar + Settings)",
     "status": "completed"
   },
   {
-    "content": "Verify end-to-end: trigger a repair, confirm banner + toast + dashboard card reflect it",
+    "content": "Backend: add language field to business_profile (GET/PUT accept + store)",
+    "status": "completed"
+  },
+  {
+    "content": "Wrap App.js with LanguageProvider",
+    "status": "completed"
+  },
+  {
+    "content": "Migrate Sidebar, Dashboard header, Settings tabs, System Health banner, Integrations microcopy to t()",
+    "status": "completed"
+  },
+  {
+    "content": "Wire AI prompt to inject 'Respond in Spanish/English' per current language (backend /api/analyze, etc)",
+    "status": "completed"
+  },
+  {
+    "content": "Show decision translation pattern with an example + verify switching ES⇄EN end-to-end",
     "status": "completed"
   }
 ]

@@ -12,9 +12,12 @@ import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 import { INDUSTRIES } from '../config/industryConfig';
 import { toast } from 'sonner';
 import IntegrationsPanel from '../components/IntegrationsPanel';
+import LanguageSwitcher from '../components/LanguageSwitcher';
+import { useLanguage } from '../context/LanguageContext';
 
 export default function Settings() {
   const { profile, updateProfile, refetch } = useBusinessProfile();
+  const { t } = useLanguage();
   const [activeTab, setActiveTab] = useState('integrations');
 
   // Business Profile state
@@ -53,10 +56,10 @@ export default function Settings() {
     try {
       setSavingProfile(true);
       await updateProfile(profileForm);
-      toast.success('Business Profile updated successfully');
+      toast.success(t('settings.profile.saved_toast'));
       refetch();
     } catch (error) {
-      toast.error('Failed to update Business Profile');
+      toast.error(t('settings.profile.save_failed_toast'));
     } finally {
       setSavingProfile(false);
     }
@@ -71,8 +74,8 @@ export default function Settings() {
             <SettingsIcon size={24} className="text-[hsl(var(--primary))]" />
           </div>
           <div>
-            <h1 className="text-2xl font-semibold text-foreground">Settings</h1>
-            <p className="text-sm text-muted-foreground">Configure your Business OS</p>
+            <h1 className="text-2xl font-semibold text-foreground">{t('settings.title')}</h1>
+            <p className="text-sm text-muted-foreground">{t('settings.subtitle')}</p>
           </div>
         </div>
 
@@ -81,19 +84,19 @@ export default function Settings() {
           <TabsList className="grid w-full grid-cols-4 bg-[hsl(var(--muted)/0.3)]">
             <TabsTrigger value="integrations" className="flex items-center gap-2">
               <Plug size={14} />
-              <span>Integrations</span>
+              <span>{t('settings.tabs.integrations')}</span>
             </TabsTrigger>
             <TabsTrigger value="automation" className="flex items-center gap-2">
               <Bot size={14} />
-              <span>Automation</span>
+              <span>{t('settings.tabs.automation')}</span>
             </TabsTrigger>
             <TabsTrigger value="profile" className="flex items-center gap-2">
               <Building2 size={14} />
-              <span>Business Profile</span>
+              <span>{t('settings.tabs.business_profile')}</span>
             </TabsTrigger>
             <TabsTrigger value="workspace" className="flex items-center gap-2">
               <Users size={14} />
-              <span>Workspace</span>
+              <span>{t('settings.tabs.workspace')}</span>
             </TabsTrigger>
           </TabsList>
 
@@ -105,33 +108,33 @@ export default function Settings() {
           {/* Automation Tab */}
           <TabsContent value="automation" className="space-y-4 mt-6">
             <Card className="p-6 bg-[hsl(var(--card))] border-[hsl(var(--border))]">
-              <h3 className="text-lg font-semibold text-foreground mb-4">Automation Settings</h3>
+              <h3 className="text-lg font-semibold text-foreground mb-4">{t('settings.automation.heading')}</h3>
               <p className="text-sm text-muted-foreground mb-6">
-                Configure your automation policies, confidence thresholds, and escalation rules.
+                {t('settings.automation.description')}
               </p>
               <Button 
                 onClick={() => window.location.href = '/automation-policies'}
                 data-testid="goto-automation-button"
               >
                 <Bot size={16} className="mr-2" />
-                Manage Automation Policies
+                {t('settings.automation.manage_button')}
               </Button>
             </Card>
 
             <Card className="p-6 bg-[hsl(var(--card))] border-[hsl(var(--border))]">
-              <h3 className="text-base font-semibold text-foreground mb-2">Quick Overview</h3>
+              <h3 className="text-base font-semibold text-foreground mb-2">{t('settings.automation.overview_title')}</h3>
               <div className="space-y-2 text-sm">
                 <div className="flex items-center gap-2">
                   <div className="w-2 h-2 rounded-full bg-[hsl(var(--success))]"></div>
-                  <span className="text-muted-foreground">Auto-run enabled for high-confidence items</span>
+                  <span className="text-muted-foreground">{t('settings.automation.overview_auto')}</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <div className="w-2 h-2 rounded-full bg-[hsl(var(--warning))]"></div>
-                  <span className="text-muted-foreground">Manual approval required for medium confidence</span>
+                  <span className="text-muted-foreground">{t('settings.automation.overview_manual')}</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <div className="w-2 h-2 rounded-full bg-[hsl(var(--critical))]"></div>
-                  <span className="text-muted-foreground">Escalation triggered for low confidence or conflicts</span>
+                  <span className="text-muted-foreground">{t('settings.automation.overview_escalation')}</span>
                 </div>
               </div>
             </Card>
@@ -303,10 +306,10 @@ export default function Settings() {
                     {savingProfile ? (
                       <>
                         <Loader2 className="animate-spin mr-2" size={14} />
-                        Saving...
+                        {t('settings.profile.saving')}
                       </>
                     ) : (
-                      'Save Business Profile'
+                      t('settings.profile.save_button')
                     )}
                   </Button>
                 </div>
@@ -317,26 +320,30 @@ export default function Settings() {
           {/* Workspace Tab */}
           <TabsContent value="workspace" className="space-y-4 mt-6">
             <Card className="p-6 bg-[hsl(var(--card))] border-[hsl(var(--border))]">
-              <h3 className="text-lg font-semibold text-foreground mb-1">Workspace</h3>
+              <h3 className="text-lg font-semibold text-foreground mb-1">{t('settings.workspace.heading')}</h3>
               <p className="text-sm text-muted-foreground mb-6">
-                Workspace settings and team management
+                {t('settings.workspace.description')}
               </p>
 
               <div className="space-y-4">
                 <div>
-                  <Label htmlFor="workspace-name">Workspace Name</Label>
+                  <Label htmlFor="workspace-name">{t('settings.workspace.name_label')}</Label>
                   <Input
                     id="workspace-name"
                     data-testid="workspace-name-input"
-                    placeholder="My Business"
+                    placeholder={t('settings.workspace.name_placeholder')}
                     defaultValue="Default Workspace"
                     className="mt-1 bg-[hsl(var(--background))]"
                   />
                 </div>
 
+                <div className="pt-2">
+                  <LanguageSwitcher />
+                </div>
+
                 <div className="border-t border-[hsl(var(--border))] pt-4">
                   <p className="text-xs text-muted-foreground">
-                    Authentication and multi-tenant workspace features will be available in Phase 6.
+                    {t('settings.workspace.phase_note')}
                   </p>
                 </div>
               </div>
