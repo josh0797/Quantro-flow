@@ -214,13 +214,34 @@ function SecretInput({ value, onChange, placeholder, testId }) {
 function CopyableEndpoint({ url, testId }) {
   const [copied, setCopied] = useState(false);
   const handleCopy = async () => {
+    const copyViaFallback = () => {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = url;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+      } catch {
+        return false;
+      }
+    };
+
     try {
-      await navigator.clipboard.writeText(url);
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(url);
+      } else if (!copyViaFallback()) {
+        throw new Error('clipboard unavailable');
+      }
       setCopied(true);
       toast.success('Endpoint copied to clipboard');
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error('Failed to copy');
+      toast.error('Copy unavailable in this browser — please select and copy manually');
     }
   };
   return (
