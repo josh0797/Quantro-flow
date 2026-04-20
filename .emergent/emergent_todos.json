@@ -1,34 +1,34 @@
 [
   {
-    "content": "Session 3B: Add simulation_mode to business_profile schema",
+    "content": "CRITICAL: Fix undefined variable 'resolved_action' in server.py",
     "status": "in_progress"
   },
   {
-    "content": "Session 3B: Create industry-specific data generators (backend)",
+    "content": "CRITICAL: Remove hardcoded secret in Settings.js line 406",
     "status": "pending"
   },
   {
-    "content": "Session 3B: Create simulation API endpoints (generate/clear/status)",
+    "content": "CRITICAL: Fix stale closure bugs - add missing hook dependencies",
     "status": "pending"
   },
   {
-    "content": "Session 3B: Add Simulation Mode toggle in Settings",
+    "content": "IMPORTANT: Fix incorrect comparison operators (is vs ==) in server.py",
     "status": "pending"
   },
   {
-    "content": "Session 3B: Add simulation indicator badge in Dashboard",
+    "content": "IMPORTANT: Fix unstable component keys (index to unique IDs)",
     "status": "pending"
   },
   {
-    "content": "Session 3B: Test simulation with one industry",
+    "content": "IMPORTANT: Add error logging to empty catch blocks",
     "status": "pending"
   },
   {
-    "content": "Session 3C: Run comprehensive testing all industries",
+    "content": "IMPORTANT: Remove production console.error statements",
     "status": "pending"
   },
   {
-    "content": "Session 3C: Fix issues and polish",
+    "content": "Session 3C: Run comprehensive testing",
     "status": "pending"
   },
   {

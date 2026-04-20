@@ -21,6 +21,8 @@ export default function Settings() {
   const [integrations, setIntegrations] = useState([]);
   const [loadingIntegrations, setLoadingIntegrations] = useState(true);
   const [testingConnection, setTestingConnection] = useState(null);
+  const [crmApiKey, setCrmApiKey] = useState('');
+  const [crmBaseUrl, setCrmBaseUrl] = useState('');
   
   // Business Profile state
   const [profileForm, setProfileForm] = useState({
@@ -363,6 +365,8 @@ export default function Settings() {
                                 <Input 
                                   placeholder="Enter your CRM API key" 
                                   type="password"
+                                  value={crmApiKey}
+                                  onChange={(e) => setCrmApiKey(e.target.value)}
                                   className="bg-[hsl(var(--background))] mt-1"
                                   data-testid="crm-api-key-input"
                                 />
@@ -371,6 +375,8 @@ export default function Settings() {
                                 <Label className="text-xs">Base URL (optional)</Label>
                                 <Input 
                                   placeholder="https://api.yourcrm.com" 
+                                  value={crmBaseUrl}
+                                  onChange={(e) => setCrmBaseUrl(e.target.value)}
                                   className="bg-[hsl(var(--background))] mt-1"
                                   data-testid="crm-url-input"
                                 />
@@ -403,7 +409,11 @@ export default function Settings() {
                             ) : (
                               <Button 
                                 size="sm"
-                                onClick={() => updateIntegration('crm', 'connected', { api_key: 'demo_key' })}
+                                onClick={() => updateIntegration('crm', 'connected', { 
+                                  api_key: crmApiKey || 'simulation_key',
+                                  base_url: crmBaseUrl || ''
+                                })}
+                                disabled={!crmApiKey && !crmBaseUrl}
                                 data-testid="connect-crm-button"
                               >
                                 <Plug size={14} className="mr-2" />

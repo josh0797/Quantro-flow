@@ -1426,6 +1426,9 @@ async def evaluate_policy_for_item(inbox_id: str):
     if not policy:
         return {"action": "manual_review", "reason": f"No policy defined for '{intent}'", "escalation": None}
     
+    # Initialize resolved_action
+    resolved_action = "manual_review"
+    
     # Determine action based on confidence thresholds
     if confidence >= policy.get("confidence_threshold_high", 0.85):
         resolved_action = policy.get("high_action", "auto_run")
