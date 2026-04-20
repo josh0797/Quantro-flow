@@ -41,6 +41,7 @@ export default function Dashboard() {
   const [suggestions, setSuggestions] = useState([]);
   const [events, setEvents] = useState([]);
   const [integrations, setIntegrations] = useState([]);
+  const [simulationStatus, setSimulationStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
   const { profile, loading: profileLoading } = useBusinessProfile();
@@ -53,14 +54,16 @@ export default function Dashboard() {
   const fetchData = useCallback(async () => {
     try {
       const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
-      const [m, a, s, e, i] = await Promise.all([
+      const [m, a, s, e, i, sim] = await Promise.all([
         getDashboardMetrics(),
         getActivity(15),
         getAISuggestions(),
         getCalendarEvents(),
         fetch(`${backendUrl}/api/integrations`).then(r => r.json()).catch(() => []),
+        fetch(`${backendUrl}/api/simulation/status`).then(r => r.json()).catch(() => null),
       ]);
       setMetrics(m);
+      setSimulationStatus(sim);
       
       // Use industry-specific activities if available, otherwise use fetched activities
       const industryActivities = industryConfig.activities.map((act, idx) => ({
@@ -126,9 +129,20 @@ export default function Dashboard() {
             {industryConfig.name} operations • Real-time overview
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="status-dot running animate-pulse-dot" />
-          <span className="text-xs text-muted-foreground">System Running</span>
+        <div className="flex items-center gap-3">
+          {simulationStatus?.simulation_mode ? (
+            <>
+              <Badge className="bg-[hsl(var(--warning)/0.15)] text-[hsl(var(--warning))] border-[hsl(var(--warning)/0.3)]">
+                <Zap size={12} className="mr-1" />
+                Simulation Mode Active
+              </Badge>
+            </>
+          ) : (
+            <>
+              <span className="status-dot running animate-pulse-dot" />
+              <span className="text-xs text-muted-foreground">Live Data Mode</span>
+            </>
+          )}
         </div>
       </div>
 

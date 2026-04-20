@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Settings as SettingsIcon, Plug, Bot, Building2, Users, CheckCircle2, XCircle, Loader2, RefreshCw } from 'lucide-react';
+import { Settings as SettingsIcon, Plug, Bot, Building2, Users, CheckCircle2, XCircle, Loader2, RefreshCw, Zap } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -8,6 +8,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
+import { Switch } from '@/components/ui/switch';
 import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 import { INDUSTRIES } from '../config/industryConfig';
 import { toast } from 'sonner';
@@ -31,7 +32,8 @@ export default function Settings() {
       meetings: 'Meetings',
       events: 'Events',
       services: 'Services'
-    }
+    },
+    simulation_mode: false
   });
   const [savingProfile, setSavingProfile] = useState(false);
 
@@ -40,7 +42,8 @@ export default function Settings() {
       setProfileForm({
         industry: profile.industry || 'other',
         use_case: profile.use_case || '',
-        entity_labels: profile.entity_labels || profileForm.entity_labels
+        entity_labels: profile.entity_labels || profileForm.entity_labels,
+        simulation_mode: profile.simulation_mode || false
       });
     }
   }, [profile]);
@@ -578,6 +581,33 @@ export default function Settings() {
                         className="mt-1 bg-[hsl(var(--background))]"
                       />
                     </div>
+                  </div>
+                </div>
+
+                {/* Simulation Mode */}
+                <div className="border-t border-[hsl(var(--border))] pt-6 mt-6">
+                  <div className="flex items-start justify-between gap-4 p-4 rounded-lg bg-[hsl(var(--warning)/0.05)] border border-[hsl(var(--warning)/0.2)]">
+                    <div className="flex items-start gap-3 flex-1">
+                      <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-[hsl(var(--warning)/0.15)] shrink-0">
+                        <Zap size={18} className="text-[hsl(var(--warning))]" />
+                      </div>
+                      <div className="flex-1">
+                        <h4 className="text-sm font-semibold text-foreground mb-1">Simulation Mode</h4>
+                        <p className="text-xs text-muted-foreground">
+                          Load realistic sample operational data for your selected industry. Perfect for testing workflows, validating automations, and demoing the system before connecting live integrations.
+                        </p>
+                        {profileForm.simulation_mode && (
+                          <p className="text-xs text-[hsl(var(--warning))] mt-2">
+                            ⚡ Active: The system is populated with simulated data
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                    <Switch
+                      checked={profileForm.simulation_mode}
+                      onCheckedChange={checked => setProfileForm({...profileForm, simulation_mode: checked})}
+                      data-testid="simulation-mode-toggle"
+                    />
                   </div>
                 </div>
 
