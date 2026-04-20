@@ -1,23 +1,17 @@
 # plan.md (Updated)
 
 ## 1. Objectives
-- Deliver a premium **dark-first**, OS-like internal platform for real estate teams: **Quantro One | Realty OS**.
-- Ship a connected, production-feeling workflow with automation **and** a critical control layer:
-  **Smart Inbox item → GPT triage (single + batch) → policy evaluation → (auto-run OR manual override) → (simulated) Calendar/CRM updates → Activity feed / Audit trail**.
-- Provide a multi-page, production-quality UI (Dashboard, Inbox, Schedule, CRM, Onboarding, Content Engine, Automation) with **connected seeded mock data** showing realistic operations.
-- Evolve from a single-tenant MVP into a **production-ready B2B SaaS foundation** by adding:
-  - **Authentication via Google OAuth (Emergent Integration)**
-  - **Role-based access control (RBAC)** with 5 tiers: **Owner / Admin / Manager / Operator / Agent**
-  - **Multi-workspace (multi-tenant) scoping** across all data collections
-  - **Compliance-ready audit logs** with filters and export (CSV + JSON)
+- Deliver a premium **dark-first**, OS-like internal platform: **Quantro One | Business OS**.
+- Ship a connected, production-feeling workflow engine:
+  **Smart Inbox → AI triage (single + batch) → automation policy evaluation → (auto-run OR review & control) → (simulated) Calendar/CRM updates → activity + execution trail**.
+- Evolve the product from a vertical-specific real estate tool into a **multi-industry Business Operating System** that can adapt to different industries through configuration (not rewrites).
+- Keep integrations **mocked/simulated** (Gmail, Google Calendar, CRM) but make them feel safe, enterprise, and workspace-ready.
+- Prepare for future SaaS scaling (multi-tenant, auth, RBAC, audit export) **without shipping auth yet**.
 
 **Current status (as of this update):**
-- ✅ **Phase 1, Phase 2, Phase 3, Phase 4 complete**.
-- ✅ **Phase 5 complete** (Auto-execution pipeline + Advanced escalations + UI updates + verification).
-- ✅ AI POC achieved **10/10** structured output tests.
-- ✅ Full app functional with seeded workflows.
-- ✅ Phase 5 testing (Iteration 4): Backend **100%**, Frontend **~95%**.
-- 🟡 **Phase 6 starting** (Auth + RBAC + Multi-workspace + Audit logs).
+- ✅ **Phase 1–5 complete** (Core app + workflow engine + policies/escalations + templates + auto-execution).
+- ✅ Phase 5 testing (Iteration 4): **Backend 100%**, **Frontend ~95%**.
+- 🟡 New strategic pivot: **Business OS Transformation first** (rebrand + configurability + settings) → **then** Phase 6 (Auth + multi-tenant + audit).
 
 ---
 
@@ -37,291 +31,253 @@
 - OpenAI GPT-4o integration using **Emergent LLM Key**.
 - Robust prompts enforcing **JSON-only** outputs for:
   - Inbox intent detection + suggested action
-  - Content generation (social post + email draft)
-- POC test script created and executed:
-  - `/app/tests/test_core_ai.py`
-  - Result: **10/10 tests passed**
-
-**Exit criteria met**
-- Script passes samples with 0 schema failures and acceptable intent quality.
+  - Content generation
+- POC test script:
+  - `/app/tests/test_core_ai.py` (10/10 passed)
 
 ---
 
 ### Phase 2 — V1 App Development (build around proven core; no auth)
 **Status: ✅ Completed**
 
-**User stories (delivered)**
-1. Dashboard shows key metrics, today’s schedule, and live system activity.
-2. Smart Inbox provides message review + intent + recommended action.
-3. Approving system suggestions triggers simulated automation (calendar/contact updates) and logs activity.
-4. CRM contact profiles show linked inbox threads, meetings, and sync status.
-5. Agent onboarding creates lifecycle steps and tracks progress.
-6. Content Engine generates and stores social posts + email drafts.
-
-**Backend (FastAPI + MongoDB) — delivered**
-- MongoDB collections:
-  - `inbox_items`, `calendar_events`, `contacts`, `agents`, `onboarding_tasks`, `content_items`, `activity_events`
-- Seeded connected mock data demonstrating workflows across modules.
-- Key endpoints delivered:
-  - Dashboard: `/api/dashboard/metrics`, `/api/dashboard/suggestions`
-  - Inbox: list/detail, `/analyze`, `/approve`, `/decline`
-  - Calendar: list/create/delete (**create returns 201**)
-  - CRM: list/detail + create contact
-  - Agents + onboarding task update
-  - Content: list + GPT-4o generation + delete
-  - Activity feed: list recent system events
-  - System status: `/api/system/status`
-- Automation behavior:
-  - Approving inbox action creates events/contacts/onboarding items and emits activity events.
-
-**Frontend (React + shadcn/ui) — delivered**
-- Dark-only, premium, minimal OS aesthetic.
-- Left sidebar navigation with system status capsule.
-- Real-time feel:
-  - Polling for activity feed and dashboard updates
-  - Subtle motion via **framer-motion**
-- Pages delivered:
-  - **Dashboard**: KPIs, Today schedule, suggestions queue, Live Activity feed
-  - **Smart Inbox**: filtering, message detail, analysis, approve/decline
-  - **Schedule**: grouped agenda + create event dialog
-  - **CRM**: lifecycle filters, contacts table, profile panel with timeline
-  - **Onboarding**: add agent, progress tracking, expandable checklist with task toggles
-  - **Content Engine**: prompt → generate drafts, library filters, preview + copy
-
-**Close Phase 2 with testing**
-- Testing agent run produced **~96% overall pass rate**.
+**Delivered**
+- Premium dark UI and full module set:
+  - Dashboard, Smart Inbox, Schedule, CRM, Onboarding, Content Engine
+- Backend seed data and endpoints for end-to-end demo workflows.
 
 ---
 
 ### Phase 3 — Workflow Engine Upgrade (Batch Triage + Manual Control Layer)
 **Status: ✅ Completed**
 
-**Primary goal (achieved)**
-- Upgrade Smart Inbox from a single-item demo into a **scalable, controllable workflow engine**:
-  - **Batch message processing** with real-time system activity signals
-  - **Manual Override UI** enabling trust, governance, and precise execution
-
-#### 3.1 Batch AI Triage (Inbox Intelligence at Scale)
-**Status: ✅ Implemented**
-
 **Delivered**
-- `POST /api/inbox/batch-analyze` and `POST /api/inbox/batch-approve`
-- Smart Inbox triage view with multi-select, batch buttons, statuses, and per-item classify.
-
-#### 3.2 Manual Override UI (Critical Control Layer — “Review & Control”)
-**Status: ✅ Implemented**
-
-**Delivered**
-- Review 6 control layout and override workflows
-- Backend endpoints:
-  - `PUT /api/inbox/{inbox_id}/details`
-  - `POST /api/inbox/{inbox_id}/approve-with-overrides`
+- Batch triage endpoints + UI multi-select.
+- Review & Control manual override UI and endpoints.
 
 ---
 
 ### Phase 4 — Workflow Governance + Communication Layer (Automation Policies + Templates)
 **Status: ✅ Completed**
 
-**Primary goal (achieved)**
-- Governance for “when to run” + “who owns edge cases” + consistent communications.
-
 **Delivered**
-- Automation Policies (CRUD + evaluation)
-- Escalation routing rules (CRUD + enable/disable)
-- Content templates + AI generation from templates
+- Automation Policies (confidence tiers → actions).
+- Escalation Rules CRUD.
+- Content Templates CRUD + AI generation.
 
 ---
 
 ### Phase 5 — Automation Engine Upgrade (Auto-Execution + Advanced Escalations)
 **Status: ✅ Completed**
 
-**Primary goal (achieved)**
-- Unattended automation where safe (auto-run) and guarded escalation when risk/uncertainty exists.
-
 **Delivered**
 - Auto-execution pipeline:
-  - `execute_action_for_item()` auto-creates mocked Calendar/CRM/Onboarding actions
-  - Marks inbox items `status=auto_actioned` with `execution_results`
+  - `execute_action_for_item()` executes mocked actions.
+  - Inbox items marked `status=auto_actioned` with `execution_results`.
 - Advanced escalation evaluation:
-  - `calendar_conflict`, `incomplete_entities`, `urgency`, `contact_type` (+ existing `intent`, `keyword`)
+  - `calendar_conflict`, `incomplete_entities`, `urgency`, `contact_type` (+ `intent`, `keyword`).
 - UI updates:
-  - Smart Inbox shows auto-execution badge + execution trail
-  - Escalation reasons shown when present
-  - Automation rule editor supports advanced condition types
+  - Smart Inbox shows auto-executed badge + execution trail.
+  - Escalation reasons rendered.
+  - Automation rule editor supports advanced condition types.
 
 ---
 
-### Phase 6 — SaaS Foundation (Authentication + RBAC + Multi-Workspace + Audit Logs)
+### Phase 6 — Business OS Transformation (Rebrand + Configurability + Settings)
 **Status: 🟡 In Progress (starting now)**
 
-**Phase 6 Configuration (confirmed)**
-- **Auth provider**: **Google OAuth via Emergent Integration**
-- **Roles**: **Owner / Admin / Manager / Operator / Agent**
-- **Workspace scoping**: **multiple workspaces per user** (workspace switching)
-- **Onboarding flows**: create new workspace (first user becomes Owner) **and** join via invitation
-- **Audit logs**: Standard (user actions + system actions)
-- **Audit export**: **CSV + JSON**
+**Primary goal (Phase 6)**
+Transform the product from:
+- “Quantro One | Realty OS” (real-estate specific)
+into:
+- **“Quantro One | Business OS”** (horizontal, configurable, multi-industry)
 
-#### 6.1 Data model additions (MongoDB)
-**Goal**: Introduce multi-tenant primitives and stable identity.
+This phase is **single-tenant** (no auth yet) but **designed for future multi-tenant support**.
 
-**New collections**
-- `users`
-  - `{ user_id, email, name, avatar_url, google_sub, created_at, last_login_at }`
-- `workspaces`
-  - `{ workspace_id, name, slug, created_at, created_by_user_id, plan_tier, settings }`
-- `workspace_members`
-  - `{ workspace_id, user_id, role, status(active/invited), joined_at }`
-- `workspace_invitations`
-  - `{ invitation_id, workspace_id, email, role, token, expires_at, created_by_user_id, accepted_at }`
-- `audit_events`
-  - `{ audit_id, workspace_id, actor_type(user/system), actor_user_id?, action_type, module, entity_type?, entity_id?, metadata, ip?, user_agent?, created_at }`
+#### 6.1 Global Rebranding (Quantro One | Business OS)
+**Status: ⏳ Planned**
 
-**Schema changes (existing collections)**
-- Add `workspace_id` to:
-  - `inbox_items`, `calendar_events`, `contacts`, `agents`, `onboarding_tasks`, `content_items`, `activity_events`, `automation_policies`, `escalation_rules`, `content_templates`
+**Scope**
+- Replace all instances of **“Realty OS” → “Business OS”**.
+- Keep **“Quantro One”** as product name.
+- Update:
+  - Sidebar/header labels
+  - Dashboard headings
+  - Page titles
+  - Metadata/title tags
+  - Any seeded copy that is real-estate specific
 
-**Exit criteria**
-- All reads/writes are workspace-scoped; no cross-workspace leakage.
-
-#### 6.2 Authentication (Google OAuth via Emergent)
-**Backend**
-- Implement OAuth endpoints:
-  - `GET /api/auth/google/start`
-  - `GET /api/auth/google/callback`
-  - `POST /api/auth/logout`
-  - `GET /api/auth/me`
-- Session/token strategy:
-  - Server issues a signed session (JWT or secure cookie) containing `user_id`.
-
-**Frontend**
-- Login screen with “Continue with Google”
-- Route protection and authenticated app shell
+**Terminology normalization (industry-agnostic)**
+- “Agents” → **Team Members**
+- “Clients” → **Contacts**
+- “Property viewing” → **Meeting / Appointment**
+- “Open house” → **Event**
 
 **Exit criteria**
-- User can sign in/out and session persists across refresh.
+- No real-estate-only language remains in UI defaults.
 
-#### 6.3 Workspace selection + switching
-**Backend**
-- Workspace context strategy (required for most endpoints):
-  - `X-Workspace-Id` header OR `?workspace_id=`
-- Endpoints:
-  - `POST /api/workspaces` (create; creator becomes Owner)
-  - `GET /api/workspaces` (list workspaces for user)
-  - `GET /api/workspaces/{workspace_id}`
+#### 6.2 Business Profile (Core System Layer)
+**Status: ⏳ Planned**
 
-**Frontend**
-- Workspace switcher visible in top navigation (premium B2B SaaS style)
-- Workspace creation modal + join-by-invite flow
+**Goal**
+Introduce a configurable **Business Profile** layer (initially global/single-tenant) that will later become **per workspace**.
 
-**Exit criteria**
-- User can switch between multiple workspaces; UI updates data accordingly.
+**Business Profile fields**
+- Industry (dropdown):
+  - Real Estate
+  - Healthcare
+  - Consulting
+  - E-commerce
+  - Other
+- Use case (free text or presets)
+- Entity naming (customizable labels):
+  - Contacts (default)
+  - Team Members (default)
+  - Services / Products / Assets (optional)
 
-#### 6.4 Role-based access control (RBAC)
-**Role definitions (confirmed)**
-- **Owner**: full workspace control, billing, policies, integrations, users
-- **Admin**: full operational access, users, CRM, inbox, automations, content
-- **Manager**: manage inbox, CRM, scheduling, onboarding, content, view reports
-- **Operator**: inbox triage, manual override, approvals, scheduling, CRM updates
-- **Agent**: view-only access to assigned records, meetings, activity
+**Behavior requirements**
+- UI labels adapt dynamically based on selected industry + naming overrides.
+- AI prompts incorporate Business Profile context for:
+  - intent classification
+  - entity extraction
+  - content generation
+- CRM and Inbox terminology adjusts automatically.
 
-**Backend**
-- Permission middleware / dependency:
-  - Resolve user + workspace + role
-  - Guard endpoints by module/action
-
-**Frontend**
-- UI gating:
-  - Hide/disable restricted actions (e.g., policy edits, user invites)
-  - Show role label in user menu
-
-**Exit criteria**
-- Unauthorized actions return 403; UI reflects permissions.
-
-#### 6.5 Invitations + user management
-**Backend**
-- Endpoints:
-  - `POST /api/workspaces/{workspace_id}/invites` (Owner/Admin)
-  - `GET /api/workspaces/{workspace_id}/members`
-  - `PUT /api/workspaces/{workspace_id}/members/{user_id}` (change role)
-  - `DELETE /api/workspaces/{workspace_id}/members/{user_id}` (remove)
-  - `POST /api/invites/accept` (token)
-
-**Frontend**
-- Workspace settings → Members table
-- Invite user dialog (email + role)
-- Accept invite screen
+**Implementation notes**
+- Add a `business_profile` document in MongoDB (single-tenant now), structured as:
+  - `{ profile_id, industry, use_case, entity_labels, created_at, updated_at }`
+- Create backend endpoints:
+  - `GET /api/business-profile`
+  - `PUT /api/business-profile`
 
 **Exit criteria**
-- Users can be invited, accept, and join the workspace with the right role.
+- Changing Business Profile updates UI terminology and influences AI outputs.
 
-#### 6.6 Audit logs (filterable + exportable)
-**Scope (confirmed: Standard)**
-Include events for:
-- login/logout
-- approvals/rejections
-- manual overrides
-- automation executions
-- policy-triggered actions
-- CRM/contact updates
-- scheduling actions
+#### 6.3 Settings Section (Critical for SaaS)
+**Status: ⏳ Planned**
 
-**Backend**
-- Write audit events alongside existing `activity_events` (or unify later)
-- Endpoints:
-  - `GET /api/audit` with filters: `user_id`, `action_type`, `module`, `from`, `to`
-  - `GET /api/audit/export?format=csv|json` (same filters)
+**Goal**
+Add **Settings** to sidebar with a premium B2B SaaS experience.
 
-**Frontend**
-- New page: **Audit Log**
-  - Filters: user, action type, module, date range
-  - Table with clear “User vs System” attribution
-  - Export button: CSV / JSON
+**Settings tabs**
+1) 🔌 Integrations
+- Gmail
+  - Connect via Google OAuth (simulated for now)
+  - Status: Connected / Not connected
+  - Last sync
+- Google Calendar
+  - Select calendar
+  - Set timezone
+  - Define availability rules
+- CRM (GoHighLevel or custom)
+  - API Key input
+  - Base URL input
+  - “Test Connection” button
+  - Status indicator
+
+2) ⚙️ Automation
+- Expose system behavior controls:
+  - Auto-run vs approval per intent
+  - Confidence thresholds (High / Medium / Low)
+  - Escalation rules
+
+3) 🧠 Business Profile
+- Industry selector
+- Use case configuration
+- Custom entity naming
+
+4) 👥 Workspace (placeholder for now)
+- Workspace name
+- Team members (static placeholder until Phase 7)
+- Roles and permissions (read-only placeholder until Phase 7)
+
+**Implementation notes**
+- Store integration settings in MongoDB under a structure that will become workspace-scoped later, e.g.:
+  - `{ integration_id, provider, status, last_sync_at, config, created_at, updated_at }`
 
 **Exit criteria**
-- Admin/Owner can filter and export audit events reliably.
+- Settings appears in sidebar and all tabs function (CRUD for config, simulated connection/testing states).
 
-#### 6.7 Testing & verification (Phase 6)
-- Backend:
-  - Auth flow happy path + failure path
-  - Workspace scoping correctness
-  - RBAC enforcement (matrix by role/module)
-  - Audit events written for required actions
-  - Export endpoints produce valid CSV + JSON
-- Frontend:
-  - Login/logout
-  - Workspace switcher
-  - Invite acceptance
-  - Permission-based UI gating
-  - Audit filters + export
+#### 6.4 Data model: “Workspace-ready” scoping (single-tenant)
+**Status: ⏳ Planned**
+
+**Goal**
+Even though the app remains single-tenant, structure stored settings/data as if they belong to a workspace.
+
+**Approach**
+- Add `workspace_id` fields in schemas *optionally* (default to `"default"` for now) OR encapsulate under a single “default workspace” record.
+- Ensure integrations/config are not global constants.
+
+**Exit criteria**
+- No hard-coded global integration settings.
+- All config is stored in DB and can later be separated per workspace without breaking changes.
+
+#### 6.5 UX Guidelines (apply throughout Phase 6)
+**Status: ✅ Ongoing**
+- Keep dark mode, premium UI (Apple / Stripe / Linear style)
+- Minimal layout, subtle motion
+- System status indicators for integrations:
+  - connected, syncing, active, degraded
+- Integrations must feel easy and safe to connect
+
+#### 6.6 Testing & verification (Phase 6)
+**Status: ⏳ Planned**
+- Verify rebranding consistency across UI.
+- Verify Business Profile updates:
+  - changes labels immediately
+  - updates AI prompt context
+- Verify Settings:
+  - Integration status changes persist
+  - “Test Connection” UX works (mock)
+  - Automation controls still work (regression)
+
+---
+
+### Phase 7 — SaaS Foundation (Auth + Multi-tenant + RBAC + Audit Logs)
+**Status: ⏭️ Deferred (next phase after Business OS Transformation)**
+
+**Phase 7 configuration (already confirmed earlier)**
+- Auth provider: Google OAuth via Emergent Integration
+- Roles: Owner / Admin / Manager / Operator / Agent
+- Multi-workspace per user + invitation flow
+- Audit logs: standard (user + system)
+- Export: CSV + JSON
+
+**Note**
+Phase 7 will be implemented after Phase 6 is validated.
 
 ---
 
 ## 3. Next Actions
-**Immediate (Phase 6 P1):**
-1. Implement Google OAuth via Emergent Integration and session handling.
-2. Add workspace primitives + membership + invitation flows.
-3. Add `workspace_id` to all documents and scope all API endpoints.
-4. Implement RBAC enforcement across backend routes and frontend UI.
-5. Add audit log storage, filtering, and export endpoints + UI.
+**Immediate (Business OS Transformation P0/P1):**
+1. Global rebrand to **Quantro One | Business OS** + industry-agnostic terminology.
+2. Implement **Business Profile** backend + UI and wire into AI prompts.
+3. Add **Settings** section with Integrations + Automation + Business Profile tabs.
+4. Make integration/config storage **workspace-ready** (single-tenant default).
+5. Run testing agent and ship a demo-ready multi-industry Business OS.
 
 ---
 
 ## 4. Success Criteria
 
-**Achieved (V1 + Phase 3 + Phase 4 + Phase 5):**
-- Core workflow reliable:
-  - **Inbox → intent (single + batch) → policy evaluation → auto-run or manual control → calendar/CRM/onboarding updates → activity feed**.
-- Premium OS-like UI:
-  - Dark-first, calm, minimal, system-driven.
-- Connected seeded data demonstrates end-to-end workflows.
-- AI failures degrade safely to `needs_review`.
-- Auto-run executes with transparent execution trail.
-- Advanced escalation conditions prevent unsafe automation and provide explicit reasons.
+**Achieved (Phases 1–5):**
+- Workflow engine: Inbox → AI triage → policies → auto-run or manual control → mocked downstream actions → transparent execution trail.
+- Premium dark UI across modules.
+- Advanced escalation safety net.
 
-**Phase 6 Success Criteria (to be achieved):**
+**Phase 6 Success Criteria (Business OS Transformation):**
+- App is fully rebranded to **Quantro One | Business OS**.
+- All core terminology is industry-agnostic and configurable.
+- **Business Profile** drives:
+  - dynamic UI labels
+  - AI context for classification + generation
+- **Settings** provides a SaaS-grade control surface:
+  - Integrations (mock connect/status/test)
+  - Automation controls
+  - Business Profile config
+- Single-tenant now, but no hard-coded global settings; data is stored in a future workspace-compatible structure.
+
+**Phase 7 Success Criteria (SaaS Foundation):**
 - Google OAuth login working end-to-end.
-- Multi-workspace support with smooth switching in top navigation.
-- 5-tier RBAC enforced consistently (API + UI) per permission model.
-- Standard audit log covers user and system actions, filterable and exportable (CSV + JSON).
-- No cross-workspace data access is possible; all queries are scoped.
+- Multi-workspace support with smooth switching.
+- RBAC enforced across API + UI.
+- Audit logs filterable + exportable (CSV + JSON) with user/system attribution.

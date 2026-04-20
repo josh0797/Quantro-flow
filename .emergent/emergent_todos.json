@@ -1,78 +1,38 @@
 [
   {
-    "content": "Get Google OAuth integration playbook from integration_playbook_expert_v2",
+    "content": "Backend: Create business_profile collection with schema, API endpoints, and seed default profile",
     "status": "completed"
   },
   {
-    "content": "Backend: Create users, workspaces, workspace_members, workspace_invitations, audit_events collections with schema and seed data",
+    "content": "Backend: Create integrations_config collection for storing integration settings",
+    "status": "completed"
+  },
+  {
+    "content": "Backend: Update AI prompts to include Business Profile context (industry + entity naming)",
+    "status": "completed"
+  },
+  {
+    "content": "Frontend: Global rebrand - Replace 'Realty OS' with 'Business OS' and update all terminology",
     "status": "in_progress"
   },
   {
-    "content": "Backend: Add workspace_id to all existing collections (inbox_items, contacts, calendar_events, etc.)",
+    "content": "Frontend: Create BusinessProfileContext provider for dynamic labels",
     "status": "pending"
   },
   {
-    "content": "Backend: Implement Google OAuth endpoints (start, callback, logout, me)",
+    "content": "Frontend: Create Settings page with tab navigation (Integrations, Automation, Business Profile, Workspace)",
     "status": "pending"
   },
   {
-    "content": "Backend: Implement workspace CRUD endpoints (create, list, get)",
+    "content": "Frontend: Update all pages to use dynamic labels from BusinessProfileContext",
     "status": "pending"
   },
   {
-    "content": "Backend: Implement invitation endpoints (create, accept, list members, update role, remove member)",
+    "content": "Frontend: Update navigation sidebar to use dynamic labels and add Settings link",
     "status": "pending"
   },
   {
-    "content": "Backend: Add workspace context middleware and RBAC permission decorators",
-    "status": "pending"
-  },
-  {
-    "content": "Backend: Update all existing endpoints to require workspace_id and enforce RBAC",
-    "status": "pending"
-  },
-  {
-    "content": "Backend: Implement audit log endpoints (list with filters, export CSV/JSON)",
-    "status": "pending"
-  },
-  {
-    "content": "Backend: Add audit event tracking for user actions and system automation events",
-    "status": "pending"
-  },
-  {
-    "content": "Frontend: Create login/signup page with Google OAuth button",
-    "status": "pending"
-  },
-  {
-    "content": "Frontend: Add workspace switcher to top navigation",
-    "status": "pending"
-  },
-  {
-    "content": "Frontend: Create workspace creation and join-by-invite flows",
-    "status": "pending"
-  },
-  {
-    "content": "Frontend: Add user menu with profile and logout",
-    "status": "pending"
-  },
-  {
-    "content": "Frontend: Implement route protection and session management",
-    "status": "pending"
-  },
-  {
-    "content": "Frontend: Add RBAC UI gating (hide/disable restricted actions)",
-    "status": "pending"
-  },
-  {
-    "content": "Frontend: Create Audit Log page with filters and export functionality",
-    "status": "pending"
-  },
-  {
-    "content": "Frontend: Create workspace settings page with members management",
-    "status": "pending"
-  },
-  {
-    "content": "Run comprehensive testing via testing_agent for Phase 6",
+    "content": "Run comprehensive testing for Business OS transformation",
     "status": "pending"
   },
   {
@@ -80,7 +40,7 @@
     "status": "pending"
   },
   {
-    "content": "Update plan.md to mark Phase 6 as COMPLETED",
+    "content": "Update plan.md to mark Phase 6 (Business OS) as COMPLETED",
     "status": "pending"
   }
 ]

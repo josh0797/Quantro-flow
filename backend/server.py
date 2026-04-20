@@ -33,6 +33,8 @@ activity_col = db["activity_events"]
 policies_col = db["automation_policies"]
 escalation_col = db["escalation_rules"]
 templates_col = db["content_templates"]
+business_profile_col = db["business_profile"]
+integrations_config_col = db["integrations_config"]
 
 # ─── Helpers ───────────────────────────────────────────────────────────
 def serialize_doc(doc):
@@ -56,43 +58,80 @@ def now_iso():
     return datetime.utcnow()
 
 # ─── AI Prompts ────────────────────────────────────────────────────────
-INTENT_SYSTEM_PROMPT = """You are an AI assistant for Quantro One, a real estate operating system.
+async def build_intent_prompt(business_profile=None):
+    """Build intent detection prompt with business profile context."""
+    if not business_profile:
+        profile = await business_profile_col.find_one({"profile_id": "default"}, {"_id": 0})
+        business_profile = profile if profile else {"industry": "other", "entity_labels": {}}
+    
+    industry = business_profile.get("industry", "other")
+    labels = business_profile.get("entity_labels", {})
+    
+    industry_context = {
+        "real_estate": "real estate operations",
+        "healthcare": "healthcare and patient management",
+        "consulting": "consulting and client services",
+        "ecommerce": "e-commerce and customer operations",
+        "other": "business operations"
+    }.get(industry, "business operations")
+    
+    entity_name = labels.get("services", "property")
+    
+    return f"""You are an AI assistant for Quantro One, a Business Operating System.
+The business operates in: {industry_context}.
+
 Analyze incoming messages and detect intent.
 
 Respond with ONLY valid JSON (no markdown fences):
-{
+{{
   "intent": "<booking|onboarding|follow_up|inquiry|escalation|spam|needs_review>",
   "confidence": <float 0.0-1.0>,
   "summary": "<1-sentence summary>",
-  "entities": {
+  "entities": {{
     "person_name": "<name or null>",
     "email": "<email or null>",
     "phone": "<phone or null>",
     "date_time": "<date/time or null>",
-    "property": "<property or null>"
-  },
-  "suggested_action": {
+    "asset": "<{entity_name} or null>"
+  }},
+  "suggested_action": {{
     "type": "<schedule_meeting|create_contact|send_follow_up|start_onboarding|flag_review|ignore|none>",
     "description": "<what to do>"
-  }
-}"""
+  }}
+}}"""
 
-CONTENT_SYSTEM_PROMPT = """You are a premium content writer for a real estate team.
+async def build_content_prompt(business_profile=None):
+    """Build content generation prompt with business profile context."""
+    if not business_profile:
+        profile = await business_profile_col.find_one({"profile_id": "default"}, {"_id": 0})
+        business_profile = profile if profile else {"industry": "other"}
+    
+    industry = business_profile.get("industry", "other")
+    
+    industry_context = {
+        "real_estate": "a real estate team",
+        "healthcare": "a healthcare organization",
+        "consulting": "a consulting firm",
+        "ecommerce": "an e-commerce business",
+        "other": "a professional business"
+    }.get(industry, "a professional business")
+    
+    return f"""You are a premium content writer for {industry_context}.
 Generate professional, engaging content.
 
 Respond with ONLY valid JSON (no markdown fences):
-{
-  "social_post": {
+{{
+  "social_post": {{
     "text": "<social media post, 1-3 sentences>",
     "hashtags": ["<hashtags>"],
     "platform": "instagram"
-  },
-  "email_draft": {
+  }},
+  "email_draft": {{
     "subject": "<subject line>",
     "body": "<2-4 paragraphs>",
     "call_to_action": "<CTA>"
-  }
-}
+  }}
+}}
 
 Style: Professional, warm, trustworthy."""
 
@@ -412,6 +451,31 @@ async def seed_database():
     ]
     await templates_col.insert_many(templates)
 
+    # Business Profile (default - industry agnostic)
+    business_profile = {
+        "profile_id": "default",
+        "industry": "other",
+        "use_case": "General business operations and workflow management",
+        "entity_labels": {
+            "contacts": "Contacts",
+            "team_members": "Team Members",
+            "meetings": "Meetings",
+            "events": "Events",
+            "services": "Services"
+        },
+        "created_at": now,
+        "updated_at": now
+    }
+    await business_profile_col.insert_one(business_profile)
+
+    # Integrations Config (default - all disconnected)
+    integrations = [
+        {"integration_id": str(uuid.uuid4()), "provider": "gmail", "status": "disconnected", "last_sync_at": None, "config": {}, "created_at": now, "updated_at": now},
+        {"integration_id": str(uuid.uuid4()), "provider": "google_calendar", "status": "disconnected", "last_sync_at": None, "config": {}, "created_at": now, "updated_at": now},
+        {"integration_id": str(uuid.uuid4()), "provider": "crm", "status": "disconnected", "last_sync_at": None, "config": {}, "created_at": now, "updated_at": now},
+    ]
+    await integrations_config_col.insert_many(integrations)
+
     print(f"Seeded database with connected mock data")
 
 # ─── Pydantic Models ───────────────────────────────────────────────────
@@ -588,10 +652,13 @@ async def analyze_inbox_item(inbox_id: str):
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
     
+    # Get business profile for context-aware prompts
+    intent_prompt = await build_intent_prompt()
+    
     chat = LlmChat(
         api_key=EMERGENT_LLM_KEY,
         session_id=f"intent-{inbox_id}-{uuid.uuid4().hex[:6]}",
-        system_message=INTENT_SYSTEM_PROMPT,
+        system_message=intent_prompt,
     ).with_model("openai", "gpt-4o")
     
     message_text = f"From: {item['from_name']} ({item['from_email']})\nSubject: {item['subject']}\n\n{item['body']}"
@@ -774,6 +841,9 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest):
     """Process multiple inbox items with AI classification in sequence."""
     results = []
     
+    # Get business profile once for all items
+    intent_prompt = await build_intent_prompt()
+    
     for inbox_id in req.inbox_ids:
         item = await inbox_col.find_one({"inbox_id": inbox_id})
         if not item:
@@ -790,7 +860,7 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest):
             chat = LlmChat(
                 api_key=EMERGENT_LLM_KEY,
                 session_id=f"batch-{inbox_id}-{uuid.uuid4().hex[:6]}",
-                system_message=INTENT_SYSTEM_PROMPT,
+                system_message=intent_prompt,
             ).with_model("openai", "gpt-4o")
             
             message_text = f"From: {item['from_name']} ({item['from_email']})\nSubject: {item['subject']}\n\n{item['body']}"
@@ -1252,10 +1322,13 @@ async def get_content(content_type: Optional[str] = None):
 
 @app.post("/api/content/generate")
 async def generate_content(req: ContentGenerateRequest):
+    # Get business profile for context-aware content generation
+    content_prompt = await build_content_prompt()
+    
     chat = LlmChat(
         api_key=EMERGENT_LLM_KEY,
         session_id=f"content-{uuid.uuid4().hex[:8]}",
-        system_message=CONTENT_SYSTEM_PROMPT,
+        system_message=content_prompt,
     ).with_model("openai", "gpt-4o")
     
     response = await chat.send_message(UserMessage(text=req.prompt))
@@ -1489,19 +1562,35 @@ async def delete_template(template_id: str):
         raise HTTPException(status_code=404, detail="Template not found")
     return {"success": True}
 
-TEMPLATE_AI_PROMPT = """You are a premium content writer for a real estate team.
-You will be given a template with variables marked as {{variable_name}} and context values.
+async def build_template_prompt(business_profile=None):
+    """Build template enhancement prompt with business profile context."""
+    if not business_profile:
+        profile = await business_profile_col.find_one({"profile_id": "default"}, {"_id": 0})
+        business_profile = profile if profile else {"industry": "other"}
+    
+    industry = business_profile.get("industry", "other")
+    
+    industry_context = {
+        "real_estate": "a premium real estate firm",
+        "healthcare": "a professional healthcare organization",
+        "consulting": "a trusted consulting firm",
+        "ecommerce": "a modern e-commerce brand",
+        "other": "a professional business"
+    }.get(industry, "a professional business")
+    
+    return f"""You are a premium content writer for {industry_context}.
+You will be given a template with variables marked as {{{{variable_name}}}} and context values.
 Generate polished, professional content by filling in the template with the given context.
 Also enhance the language to be engaging and natural while keeping the template structure.
 
 Respond with ONLY valid JSON (no markdown fences):
-{
+{{
   "subject": "<filled subject if email, or null>",
   "body": "<filled and polished body text>",
   "enhanced": true
-}
+}}
 
-Style: Professional, warm, trustworthy. On-brand for a premium real estate firm."""
+Style: Professional, warm, trustworthy. On-brand for {industry_context}."""
 
 @app.post("/api/templates/{template_id}/generate")
 async def generate_from_template(template_id: str, req: GenerateFromTemplateRequest):
@@ -1517,11 +1606,13 @@ async def generate_from_template(template_id: str, req: GenerateFromTemplateRequ
         body = body.replace(f"{{{{{key}}}}}", str(value))
         subject = subject.replace(f"{{{{{key}}}}}", str(value))
     
-    # Use AI to enhance
+    # Use AI to enhance with business profile context
+    template_prompt = await build_template_prompt()
+    
     chat = LlmChat(
         api_key=EMERGENT_LLM_KEY,
         session_id=f"template-{template_id}-{uuid.uuid4().hex[:6]}",
-        system_message=TEMPLATE_AI_PROMPT,
+        system_message=template_prompt,
     ).with_model("openai", "gpt-4o")
     
     prompt = f"Template category: {template['category']}\nTemplate name: {template['name']}\n\nSubject (if email): {subject}\n\nBody:\n{body}\n\nContext: {json.dumps(req.context)}\n\nPlease enhance this content while keeping the overall structure and intent."
@@ -1576,4 +1667,110 @@ async def get_system_status():
             "ai_engine": {"status": "running", "model": "gpt-4o", "requests_today": 12},
         },
         "timestamp": datetime.utcnow().isoformat(),
+
+
+# ─── Business Profile ──────────────────────────────────────────────────
+class BusinessProfileUpdate(BaseModel):
+    industry: str
+    use_case: str = ""
+    entity_labels: dict
+
+@app.get("/api/business-profile")
+async def get_business_profile():
+    """Get the current business profile configuration."""
+    profile = await business_profile_col.find_one({"profile_id": "default"}, {"_id": 0})
+    if not profile:
+        # Return default if not found
+        return {
+            "profile_id": "default",
+            "industry": "other",
+            "use_case": "",
+            "entity_labels": {
+                "contacts": "Contacts",
+                "team_members": "Team Members",
+                "meetings": "Meetings",
+                "events": "Events",
+                "services": "Services"
+            }
+        }
+    return serialize_doc(profile)
+
+@app.put("/api/business-profile")
+async def update_business_profile(req: BusinessProfileUpdate):
+    """Update the business profile configuration."""
+    update_data = {
+        "industry": req.industry,
+        "use_case": req.use_case,
+        "entity_labels": req.entity_labels,
+        "updated_at": now_iso()
+    }
+    
+    result = await business_profile_col.update_one(
+        {"profile_id": "default"},
+        {"$set": update_data},
+        upsert=True
+    )
+    
+    await log_activity("system", "Business Profile updated", f"Industry changed to {req.industry}", "default", "profile")
+    
+    updated = await business_profile_col.find_one({"profile_id": "default"}, {"_id": 0})
+    return serialize_doc(updated)
+
+# ─── Integrations Config ───────────────────────────────────────────────
+class IntegrationUpdate(BaseModel):
+    status: str
+    config: dict = {}
+
+@app.get("/api/integrations")
+async def get_integrations():
+    """Get all integration configurations."""
+    integrations = await integrations_config_col.find({}, {"_id": 0}).to_list(100)
+    return [serialize_doc(i) for i in integrations]
+
+@app.get("/api/integrations/{provider}")
+async def get_integration(provider: str):
+    """Get a specific integration configuration."""
+    integration = await integrations_config_col.find_one({"provider": provider}, {"_id": 0})
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    return serialize_doc(integration)
+
+@app.put("/api/integrations/{provider}")
+async def update_integration(provider: str, req: IntegrationUpdate):
+    """Update an integration configuration."""
+    update_data = {
+        "status": req.status,
+        "config": req.config,
+        "updated_at": now_iso()
+    }
+    
+    if req.status == "connected":
+        update_data["last_sync_at"] = now_iso()
+    
+    result = await integrations_config_col.update_one(
+        {"provider": provider},
+        {"$set": update_data}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    
+    await log_activity("system", f"{provider.title()} integration updated", f"Status: {req.status}", provider, "integration")
+    
+    updated = await integrations_config_col.find_one({"provider": provider}, {"_id": 0})
+    return serialize_doc(updated)
+
+@app.post("/api/integrations/{provider}/test")
+async def test_integration(provider: str):
+    """Test an integration connection (simulated)."""
+    integration = await integrations_config_col.find_one({"provider": provider}, {"_id": 0})
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    
+    # Simulate connection test
+    if integration.get("status") == "connected":
+        return {"success": True, "message": f"{provider.title()} connection is healthy"}
+    else:
+        return {"success": False, "message": f"{provider.title()} is not connected"}
+
     }
