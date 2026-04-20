@@ -24,6 +24,8 @@ import {
 } from '../lib/api';
 import { toast } from 'sonner';
 import { format, parseISO } from 'date-fns';
+import { useBusinessProfile } from '../contexts/BusinessProfileContext';
+import { getEntityLabel } from '../config/industryConfig';
 
 // Human-friendly intent labels (no AI jargon)
 const intentConfig = {
@@ -70,6 +72,10 @@ function getConfidenceLabel(confidence) {
 }
 
 export default function SmartInbox() {
+  const { profile } = useBusinessProfile();
+  const industry = profile?.industry || 'other';
+  const customLabels = profile?.entity_labels || {};
+  
   const [items, setItems] = useState([]);
   const [selectedItem, setSelectedItem] = useState(null);
   const [loading, setLoading] = useState(true);

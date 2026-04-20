@@ -1,30 +1,50 @@
 [
   {
-    "content": "Update all remaining pages (CRM, Schedule, SmartInbox, Onboarding, ContentEngine, Automation) with dynamic labels",
+    "content": "Session 3A: Update SmartInbox with dynamic labels and industry-aware terminology",
     "status": "in_progress"
   },
   {
-    "content": "Create industry-specific simulation data generator (backend)",
+    "content": "Session 3A: Update CRM with dynamic labels for contacts and entity naming",
     "status": "pending"
   },
   {
-    "content": "Add Simulation Mode toggle in Settings",
+    "content": "Session 3A: Update Schedule with industry-specific event types",
     "status": "pending"
   },
   {
-    "content": "Update pages to show simulation indicator when active",
+    "content": "Session 3A: Update Onboarding with dynamic team member terminology",
     "status": "pending"
   },
   {
-    "content": "Run comprehensive testing for Business OS transformation",
+    "content": "Session 3A: Update ContentEngine with industry-aware templates",
     "status": "pending"
   },
   {
-    "content": "Fix any issues found during testing",
+    "content": "Session 3A: Update AutomationPolicies to be fully generic",
     "status": "pending"
   },
   {
-    "content": "Update plan.md to mark Business OS Phase as COMPLETED",
+    "content": "Session 3B: Implement simulation layer backend (industry data generator)",
+    "status": "pending"
+  },
+  {
+    "content": "Session 3B: Add Simulation Mode toggle in Settings",
+    "status": "pending"
+  },
+  {
+    "content": "Session 3B: Update pages to show simulation indicator",
+    "status": "pending"
+  },
+  {
+    "content": "Session 3C: Run comprehensive testing across all industries",
+    "status": "pending"
+  },
+  {
+    "content": "Session 3C: Fix issues and polish",
+    "status": "pending"
+  },
+  {
+    "content": "Session 3C: Update plan.md to mark Business OS transformation COMPLETED",
     "status": "pending"
   }
 ]
