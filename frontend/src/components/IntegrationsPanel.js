@@ -29,6 +29,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Separator } from '@/components/ui/separator';
 import { toast } from 'sonner';
 import { useLanguage } from '../context/LanguageContext';
+import { authFetch } from '../lib/authFetch';
 
 /**
  * Static manifest of supported integrations. This is the source of truth
@@ -614,7 +615,7 @@ export default function IntegrationsPanel() {
   const fetchIntegrations = useCallback(async () => {
     try {
       setLoading(true);
-      const res = await fetch(`${backendUrl}/api/integrations`);
+      const res = await authFetch(`${backendUrl}/api/integrations`, { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
         setIntegrations(Array.isArray(data) ? data : []);
@@ -632,7 +633,7 @@ export default function IntegrationsPanel() {
 
   const fetchSystemHealth = useCallback(async (retry = 0) => {
     try {
-      const res = await fetch(`${backendUrl}/api/system/health`);
+      const res = await authFetch(`${backendUrl}/api/system/health`, { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
         setSystemHealth(data);
@@ -669,7 +670,7 @@ export default function IntegrationsPanel() {
 
   const handleConnect = async (provider, config) => {
     try {
-      const res = await fetch(`${backendUrl}/api/integrations/${provider}`, {
+      const res = await authFetch(`${backendUrl}/api/integrations/${provider}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'connected', config }),
@@ -687,7 +688,7 @@ export default function IntegrationsPanel() {
 
   const handleDisconnect = async (provider) => {
     try {
-      const res = await fetch(`${backendUrl}/api/integrations/${provider}`, {
+      const res = await authFetch(`${backendUrl}/api/integrations/${provider}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'disconnected', config: {} }),
@@ -706,7 +707,7 @@ export default function IntegrationsPanel() {
   const handleTest = async (provider) => {
     try {
       setTestingProvider(provider);
-      const res = await fetch(`${backendUrl}/api/integrations/${provider}/test`, {
+      const res = await authFetch(`${backendUrl}/api/integrations/${provider}/test`, { credentials: 'include',
         method: 'POST',
       });
       const data = await res.json();

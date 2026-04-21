@@ -4,6 +4,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useNavigate } from 'react-router-dom';
 import { useLanguage } from '../context/LanguageContext';
+import { authFetch } from '../lib/authFetch';
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
 
@@ -21,7 +22,7 @@ export default function SystemHealthCard() {
 
   const fetchHealth = useCallback(async () => {
     try {
-      const res = await fetch(`${backendUrl}/api/system/health`);
+      const res = await authFetch(`${backendUrl}/api/system/health`, { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
         setHealth(data);

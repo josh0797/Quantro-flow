@@ -1,11 +1,22 @@
 import React from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Inbox, Calendar, Users, UserPlus, PenTool, ChevronLeft, ChevronRight, Zap, Bot, Settings } from 'lucide-react';
+import { LayoutDashboard, Inbox, Calendar, Users, UserPlus, PenTool, ChevronLeft, ChevronRight, Zap, Bot, Settings, LogOut } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { getSystemStatus } from '../lib/api';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../contexts/AuthContext';
 import LanguageSwitcher from './LanguageSwitcher';
 import SimulationModeToggle from './SimulationModeToggle';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { toast } from 'sonner';
+import { authFetch } from '../lib/authFetch';
 
 const navItems = [
   { to: '/dashboard', icon: LayoutDashboard, labelKey: 'sidebar.dashboard', testId: 'nav-dashboard' },
@@ -24,6 +35,18 @@ export default function Sidebar() {
   const [integrationStatus, setIntegrationStatus] = useState({});
   const location = useLocation();
   const { t } = useLanguage();
+  const { user, workspaces, logout } = useAuth();
+
+  const handleLogout = async () => {
+    try {
+      await logout();
+      toast.success(t('auth.signed_out_title'));
+      // Route to login
+      window.location.href = '/login';
+    } catch (e) {
+      toast.error('Logout failed');
+    }
+  };
 
   useEffect(() => {
     const fetchStatus = async () => {
@@ -41,7 +64,7 @@ export default function Sidebar() {
     const fetchIntegrations = async () => {
       try {
         const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
-        const response = await fetch(`${backendUrl}/api/integrations`);
+        const response = await authFetch(`${backendUrl}/api/integrations`, { credentials: 'include' });
         if (response.ok) {
           const data = await response.json();
           const status = {};
@@ -154,9 +177,47 @@ export default function Sidebar() {
             </div>
           </div>
         )}
+        {/* User profile block */}
+        {user && !collapsed && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                data-testid="sidebar-user-menu-trigger"
+                className="w-full flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-[hsl(var(--surface-1))] border border-transparent hover:border-[hsl(var(--border))] transition-colors"
+              >
+                <div className="w-8 h-8 rounded-full bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))] flex items-center justify-center text-xs font-semibold shrink-0 overflow-hidden">
+                  {user.picture ? (
+                    <img src={user.picture} alt={user.name} className="w-full h-full object-cover" />
+                  ) : (
+                    (user.name || user.email || '?').slice(0, 1).toUpperCase()
+                  )}
+                </div>
+                <div className="flex-1 min-w-0 text-left">
+                  <div data-testid="sidebar-user-name" className="text-xs font-medium text-foreground truncate">
+                    {user.name || user.email}
+                  </div>
+                  <div data-testid="sidebar-user-workspace" className="text-[10px] text-muted-foreground truncate">
+                    {(workspaces?.find(w => w.is_current)?.name) || t('auth.my_workspace')}
+                  </div>
+                </div>
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent side="top" align="start" className="w-56" data-testid="sidebar-user-menu">
+              <DropdownMenuLabel>
+                <div className="flex flex-col">
+                  <span className="text-xs font-medium truncate">{user.name}</span>
+                  <span className="text-[10px] text-muted-foreground truncate">{user.email}</span>
+                </div>
+              </DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={handleLogout} data-testid="sidebar-logout-btn" className="text-[hsl(var(--destructive))]">
+                <LogOut size={14} className="mr-2" />
+                {t('auth.logout')}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
       </div>
-
-      {/* Collapse toggle */}
       <button
         onClick={() => setCollapsed(!collapsed)}
         className="absolute -right-3 top-20 w-6 h-6 rounded-full bg-[hsl(var(--surface-2))] border border-[hsl(var(--border))] flex items-center justify-center text-muted-foreground hover:text-foreground transition-colors"

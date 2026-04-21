@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { authFetch } from '../lib/authFetch';
 
 const BusinessProfileContext = createContext();
 
@@ -17,7 +18,7 @@ export function BusinessProfileProvider({ children }) {
   const fetchProfile = useCallback(async () => {
     try {
       const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
-      const response = await fetch(`${backendUrl}/api/business-profile`);
+      const response = await authFetch(`${backendUrl}/api/business-profile`, { credentials: 'include' });
       if (response.ok) {
         const data = await response.json();
         setProfile(data);
@@ -49,7 +50,7 @@ export function BusinessProfileProvider({ children }) {
   const updateProfile = async (newProfile) => {
     try {
       const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
-      const response = await fetch(`${backendUrl}/api/business-profile`, {
+      const response = await authFetch(`${backendUrl}/api/business-profile`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newProfile)

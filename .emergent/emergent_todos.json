@@ -1,38 +1,42 @@
 [
   {
-    "content": "Add startup backfill: mark all legacy seeded records missing is_simulation as is_simulation=True",
+    "content": "Design data model + backend auth infrastructure",
     "status": "completed"
   },
   {
-    "content": "Add get_mode_filter() helper reading business_profile.simulation_mode",
+    "content": "Backend: auth module + endpoints",
     "status": "completed"
   },
   {
-    "content": "Apply mode filter to all GET endpoints",
+    "content": "Backend: dependencies + migration backfill",
     "status": "completed"
   },
   {
-    "content": "Tag writes with current is_simulation value",
+    "content": "Backend: scope ALL endpoints by workspace_id",
     "status": "completed"
   },
   {
-    "content": "Auto-seed simulation dataset when user toggles Simulation ON if none exists (preserve on OFF)",
+    "content": "Frontend: AuthContext + ProtectedRoute + LoginPage + AuthCallback",
     "status": "completed"
   },
   {
-    "content": "Frontend: ensure mode toggle triggers page re-fetch (Dashboard, Inbox, CRM, Schedule, Content)",
+    "content": "Frontend: user profile + logout in sidebar",
     "status": "completed"
   },
   {
-    "content": "Add i18n empty-state copy (EN+ES) for Live mode + LiveEmptyState component wired into Inbox/CRM/Schedule",
+    "content": "Frontend: Bearer token flow (ingress CORS workaround) via authFetch",
     "status": "completed"
   },
   {
-    "content": "Run backend e2e tests (testing agent) for mode isolation - 100% passed",
+    "content": "i18n: login/auth/workspace keys (EN + ES)",
     "status": "completed"
   },
   {
-    "content": "Run frontend e2e tests (testing agent) for mode toggle + empty states - 9/9 passed (false positive on CRM was test residue; verified fixed)",
-    "status": "completed"
+    "content": "Test backend auth + workspace scoping (testing agent)",
+    "status": "in_progress"
+  },
+  {
+    "content": "Test frontend login + all pages authenticated (testing agent)",
+    "status": "pending"
   }
 ]

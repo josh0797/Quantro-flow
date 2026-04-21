@@ -1,11 +1,54 @@
 import axios from 'axios';
 
 const API_BASE = process.env.REACT_APP_BACKEND_URL || '';
+const TOKEN_STORAGE_KEY = 'quantro_session_token';
+
+export const getStoredToken = () => {
+  try { return localStorage.getItem(TOKEN_STORAGE_KEY) || null; } catch (_) { return null; }
+};
+export const setStoredToken = (token) => {
+  try {
+    if (token) localStorage.setItem(TOKEN_STORAGE_KEY, token);
+    else localStorage.removeItem(TOKEN_STORAGE_KEY);
+  } catch (_) { /* ignore */ }
+};
 
 const api = axios.create({
   baseURL: `${API_BASE}/api`,
   headers: { 'Content-Type': 'application/json' },
 });
+
+// Attach Bearer token on every request (the Kubernetes ingress forces
+// `Access-Control-Allow-Origin: *`, which browsers refuse in combination
+// with credentialed cookies. Bearer tokens avoid that limitation while
+// providing the same security properties over HTTPS.)
+api.interceptors.request.use((config) => {
+  const t = getStoredToken();
+  if (t) {
+    config.headers = config.headers || {};
+    config.headers.Authorization = `Bearer ${t}`;
+  }
+  return config;
+});
+
+// Global 401 handler — let the UI redirect to /login.
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      setStoredToken(null);
+      window.dispatchEvent(new CustomEvent('auth:unauthorized'));
+    }
+    return Promise.reject(error);
+  },
+);
+
+// Auth
+export const authMe = () => api.get('/auth/me').then(r => r.data);
+export const authExchangeSession = (session_id) => api.post('/auth/session', { session_id }).then(r => r.data);
+export const authLogout = () => api.post('/auth/logout').then(r => r.data);
+export const authSwitchWorkspace = (workspace_id) => api.post('/auth/workspaces/switch', { workspace_id }).then(r => r.data);
+export const authCreateWorkspace = (name) => api.post('/auth/workspaces', { name }).then(r => r.data);
 
 // Dashboard
 export const getDashboardMetrics = () => api.get('/dashboard/metrics').then(r => r.data);

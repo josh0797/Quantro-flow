@@ -14,6 +14,7 @@ import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 import { getIndustryConfig, getEntityLabel } from '../config/industryConfig';
 import { useLanguage } from '../context/LanguageContext';
 import SystemHealthCard from '../components/SystemHealthCard';
+import { authFetch } from '../lib/authFetch';
 
 const eventTypeIcons = {
   system: Zap,
@@ -62,8 +63,8 @@ export default function Dashboard() {
         getActivity(15),
         getAISuggestions(),
         getCalendarEvents(),
-        fetch(`${backendUrl}/api/integrations`).then(r => r.json()).catch(() => []),
-        fetch(`${backendUrl}/api/simulation/status`).then(r => r.json()).catch(() => null),
+        authFetch(`${backendUrl}/api/integrations`, { credentials: 'include' }).then(r => r.json()).catch(() => []),
+        authFetch(`${backendUrl}/api/simulation/status`, { credentials: 'include' }).then(r => r.json()).catch(() => null),
       ]);
       setMetrics(m);
       setSimulationStatus(sim);

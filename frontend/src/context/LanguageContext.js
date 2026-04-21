@@ -6,6 +6,7 @@ import React, {
   useMemo,
   useState,
 } from 'react';
+import { authFetch } from '../lib/authFetch';
 import {
   translations,
   SUPPORTED_LANGUAGES,
@@ -86,7 +87,7 @@ export function LanguageProvider({ children }) {
     const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
     (async () => {
       try {
-        const res = await fetch(`${backendUrl}/api/business-profile`);
+        const res = await authFetch(`${backendUrl}/api/business-profile`, { credentials: 'include' });
         if (!res.ok) return;
         const profile = await res.json();
         const remote = profile?.language;
@@ -115,14 +116,14 @@ export function LanguageProvider({ children }) {
     const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
     try {
       // Fetch current profile and merge language (avoid wiping other fields)
-      const getRes = await fetch(`${backendUrl}/api/business-profile`);
+      const getRes = await authFetch(`${backendUrl}/api/business-profile`, { credentials: 'include' });
       if (!getRes.ok) return;
       const current = await getRes.json();
       const payload = { ...current, language: nextLang };
       delete payload.profile_id;
       delete payload.created_at;
       delete payload.updated_at;
-      await fetch(`${backendUrl}/api/business-profile`, {
+      await authFetch(`${backendUrl}/api/business-profile`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),

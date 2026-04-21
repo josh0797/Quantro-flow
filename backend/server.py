@@ -1,12 +1,13 @@
 import os
 import uuid
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, Query
+import httpx
+from fastapi import FastAPI, HTTPException, Query, Request, Response, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
@@ -17,6 +18,9 @@ from emergentintegrations.llm.chat import LlmChat, UserMessage
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
 DB_NAME = os.environ.get("DB_NAME", "quantro_os")
 EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
+EMERGENT_AUTH_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
+SESSION_COOKIE_NAME = "session_token"
+SESSION_TTL_DAYS = 7
 
 # ─── MongoDB ───────────────────────────────────────────────────────────
 client = AsyncIOMotorClient(MONGO_URL)
@@ -36,6 +40,17 @@ templates_col = db["content_templates"]
 business_profile_col = db["business_profile"]
 integrations_config_col = db["integrations_config"]
 system_health_col = db["system_health_events"]
+# Phase 7a — Auth + multi-tenant
+users_col = db["users"]
+user_sessions_col = db["user_sessions"]
+workspaces_col = db["workspaces"]
+workspace_members_col = db["workspace_members"]
+audit_log_col = db["audit_log"]
+
+# The workspace_id used by pre-auth seed + backfill. The first user to
+# log in claims this workspace (rename + become Owner). Subsequent users
+# get fresh personal workspaces.
+DEFAULT_WORKSPACE_ID = "default"
 
 # ─── Helpers ───────────────────────────────────────────────────────────
 def serialize_doc(doc):
@@ -58,32 +73,141 @@ def serialize_doc(doc):
 def now_iso():
     return datetime.utcnow()
 
+
+# ─── Auth & Workspace (Phase 7a) ──────────────────────────────────────
+class User(BaseModel):
+    user_id: str
+    email: str
+    name: str
+    picture: Optional[str] = None
+    current_workspace_id: Optional[str] = None
+
+
+def _coerce_expiry(expires_at):
+    """Return a timezone-aware UTC datetime from either str or datetime."""
+    if isinstance(expires_at, str):
+        expires_at = datetime.fromisoformat(expires_at)
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at
+
+
+async def _extract_session_token(request: Request) -> Optional[str]:
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    if token:
+        return token
+    auth = request.headers.get("authorization") or request.headers.get("Authorization")
+    if auth and auth.lower().startswith("bearer "):
+        return auth.split(" ", 1)[1].strip()
+    return None
+
+
+async def get_current_user(request: Request) -> User:
+    """FastAPI dependency: resolve the authenticated user from a session cookie.
+
+    Raises 401 if session is missing/expired/invalid. Every workspace-scoped
+    endpoint depends on this (directly or via get_current_workspace_id)."""
+    token = await _extract_session_token(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    session_doc = await user_sessions_col.find_one({"session_token": token}, {"_id": 0})
+    if not session_doc:
+        raise HTTPException(status_code=401, detail="Invalid session")
+
+    expires_at = _coerce_expiry(session_doc.get("expires_at"))
+    if expires_at and expires_at < datetime.now(timezone.utc):
+        raise HTTPException(status_code=401, detail="Session expired")
+
+    user_doc = await users_col.find_one({"user_id": session_doc["user_id"]}, {"_id": 0})
+    if not user_doc:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    return User(**{k: user_doc.get(k) for k in ["user_id", "email", "name", "picture", "current_workspace_id"]})
+
+
+async def _active_workspace_id(request: Request, user: User) -> str:
+    """Resolve the active workspace id for this request.
+
+    Priority:
+      1. `X-Workspace-Id` header (explicit switcher intent)
+      2. user.current_workspace_id (last-used)
+      3. first membership (deterministic fallback)
+    The chosen id is validated against membership to prevent cross-workspace access."""
+    header_ws = request.headers.get("x-workspace-id") or request.headers.get("X-Workspace-Id")
+    candidate_ids = []
+    if header_ws:
+        candidate_ids.append(header_ws)
+    if user.current_workspace_id:
+        candidate_ids.append(user.current_workspace_id)
+
+    memberships = await workspace_members_col.find({"user_id": user.user_id}, {"_id": 0}).to_list(50)
+    member_ids = {m["workspace_id"] for m in memberships}
+    if not member_ids:
+        raise HTTPException(status_code=403, detail="No workspace access")
+
+    for cid in candidate_ids:
+        if cid in member_ids:
+            return cid
+    return sorted(member_ids)[0]
+
+
+async def get_current_workspace_id(request: Request, user: User = Depends(get_current_user)) -> str:
+    return await _active_workspace_id(request, user)
+
+
+async def log_audit(event_type: str, description: str, user_id: Optional[str] = None, workspace_id: Optional[str] = None, metadata: Optional[dict] = None):
+    """Append an audit log event. Non-fatal on error."""
+    try:
+        await audit_log_col.insert_one({
+            "event_id": str(uuid.uuid4()),
+            "event_type": event_type,
+            "description": description,
+            "user_id": user_id,
+            "workspace_id": workspace_id,
+            "metadata": metadata or {},
+            "timestamp": datetime.now(timezone.utc),
+        })
+    except Exception:
+        pass
+
+
 # ─── Simulation Mode Helpers (Strict Data Isolation) ──────────────────
 # These helpers are the single source of truth for deciding whether a
 # request should operate in the simulation sandbox or against the real
 # workspace. All list / detail / metrics endpoints MUST use
 # `get_mode_filter()` when querying operational collections to guarantee
 # zero data leakage between modes. All write endpoints MUST tag new
-# records with `is_simulation = await is_simulation_mode()` so they stay
-# in the correct dataset.
-async def is_simulation_mode() -> bool:
-    """Return True if the system is currently in Simulation Mode."""
+# records with `is_simulation = await is_simulation_mode(workspace_id)` so
+# they stay in the correct dataset.
+async def is_simulation_mode(workspace_id: str = DEFAULT_WORKSPACE_ID) -> bool:
+    """Return True if the given workspace is currently in Simulation Mode."""
     profile = await business_profile_col.find_one(
-        {"profile_id": "default"},
+        {"workspace_id": workspace_id},
         {"_id": 0, "simulation_mode": 1},
     )
+    if not profile:
+        # Legacy fallback for pre-migration instances
+        profile = await business_profile_col.find_one(
+            {"profile_id": "default"},
+            {"_id": 0, "simulation_mode": 1},
+        )
     return bool((profile or {}).get("simulation_mode", False))
 
 
-async def get_mode_filter() -> dict:
-    """Return the Mongo filter that isolates the current mode.
+async def get_mode_filter(workspace_id: str = DEFAULT_WORKSPACE_ID) -> dict:
+    """Return the Mongo filter that isolates the current mode + workspace.
 
-    - Simulation ON  → {"is_simulation": True}
-    - Simulation OFF → {"is_simulation": {"$ne": True}}
+    Combines:
+      - workspace_id (strict tenant isolation)
+      - is_simulation (strict sandbox/live isolation)
     """
-    if await is_simulation_mode():
-        return {"is_simulation": True}
-    return {"is_simulation": {"$ne": True}}
+    base = {"workspace_id": workspace_id}
+    if await is_simulation_mode(workspace_id):
+        base["is_simulation"] = True
+    else:
+        base["is_simulation"] = {"$ne": True}
+    return base
 
 
 def merge_query(base: dict, mode: dict) -> dict:
@@ -107,7 +231,7 @@ def _lang_directive(language_code):
 async def build_intent_prompt(business_profile=None):
     """Build intent detection prompt with business profile context."""
     if not business_profile:
-        profile = await business_profile_col.find_one({"profile_id": "default"}, {"_id": 0})
+        profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
         business_profile = profile if profile else {"industry": "other", "entity_labels": {}}
     
     industry = business_profile.get("industry", "other")
@@ -151,7 +275,7 @@ Respond with ONLY valid JSON (no markdown fences):
 async def build_content_prompt(business_profile=None):
     """Build content generation prompt with business profile context."""
     if not business_profile:
-        profile = await business_profile_col.find_one({"profile_id": "default"}, {"_id": 0})
+        profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
         business_profile = profile if profile else {"industry": "other"}
     
     industry = business_profile.get("industry", "other")
@@ -197,7 +321,7 @@ async def parse_ai_json(response_text):
     except json.JSONDecodeError:
         return None
 
-async def log_activity(event_type, title, description, related_id=None, related_type=None):
+async def log_activity(event_type, title, description, related_id=None, related_type=None, workspace_id: Optional[str] = None):
     event = {
         "event_id": str(uuid.uuid4()),
         "event_type": event_type,
@@ -206,7 +330,8 @@ async def log_activity(event_type, title, description, related_id=None, related_
         "related_id": related_id,
         "related_type": related_type,
         "timestamp": now_iso(),
-        "is_simulation": await is_simulation_mode(),
+        "is_simulation": await is_simulation_mode(workspace_id or DEFAULT_WORKSPACE_ID),
+        "workspace_id": workspace_id or DEFAULT_WORKSPACE_ID,
     }
     await activity_col.insert_one(event)
     return event
@@ -226,6 +351,7 @@ async def execute_action_for_item(item, source="auto"):
     # Downstream artifacts inherit the mode of the triggering inbox item
     # so everything remains in the correct sandbox/workspace.
     sim_flag = bool(item.get("is_simulation", False))
+    ws_id = item.get("workspace_id", DEFAULT_WORKSPACE_ID)
     
     if action_type == "schedule_meeting":
         event = {
@@ -241,6 +367,7 @@ async def execute_action_for_item(item, source="auto"):
             "created_at": now_iso(),
             "contact_id": item.get("contact_id"),
             "is_simulation": sim_flag,
+            "workspace_id": ws_id,
         }
         await calendar_col.insert_one(event)
         await log_activity("calendar", f"Meeting auto-scheduled ({source})", f"Meeting with {item['from_name']} created automatically", event["event_id"], "calendar")
@@ -261,6 +388,7 @@ async def execute_action_for_item(item, source="auto"):
             "updated_at": now_iso(),
             "notes": item.get("ai_intent", {}).get("summary", ""),
             "is_simulation": sim_flag,
+            "workspace_id": ws_id,
         }
         await contacts_col.insert_one(contact)
         await inbox_col.update_one({"inbox_id": item["inbox_id"]}, {"$set": {"contact_id": contact["contact_id"]}})
@@ -279,10 +407,11 @@ async def execute_action_for_item(item, source="auto"):
             "photo_url": None,
             "created_at": now_iso(),
             "is_simulation": sim_flag,
+            "workspace_id": ws_id,
         }
         await agents_col.insert_one(agent)
         for idx, title in enumerate(["Complete compliance training", "Set up CRM profile", "Configure email signature", "Schedule orientation with team lead", "Access granted to listing portal"]):
-            await onboarding_col.insert_one({"task_id": str(uuid.uuid4()), "agent_id": agent["agent_id"], "title": title, "description": f"Auto-generated step {idx+1}", "status": "pending", "order": idx + 1, "completed_at": None, "auto_generated": True, "is_simulation": sim_flag})
+            await onboarding_col.insert_one({"workspace_id": ws_id, "task_id": str(uuid.uuid4()), "agent_id": agent["agent_id"], "title": title, "description": f"Auto-generated step {idx+1}", "status": "pending", "order": idx + 1, "completed_at": None, "auto_generated": True, "is_simulation": sim_flag})
         await log_activity("onboarding", f"Onboarding auto-started ({source})", f"Agent {agent['name']} onboarding initiated automatically", agent["agent_id"], "agent")
         results.append({"type": "agent_created", "agent_id": agent["agent_id"]})
     
@@ -311,8 +440,9 @@ async def evaluate_advanced_escalation(item, intent, confidence, policy_action):
     """Evaluate advanced escalation conditions beyond simple intent/keyword matching."""
     escalation_info = None
     escalation_reasons = []
+    workspace_id = item.get("workspace_id", DEFAULT_WORKSPACE_ID)
     
-    rules = await escalation_col.find({"enabled": True}).to_list(100)
+    rules = await escalation_col.find({"workspace_id": workspace_id, "enabled": True}).to_list(100)
     entities = item.get("ai_intent", {}).get("entities", {})
     text = f"{item.get('subject', '')} {item.get('body', '')}".lower()
     
@@ -333,7 +463,7 @@ async def evaluate_advanced_escalation(item, intent, confidence, policy_action):
                 proposed_dt = entities.get("date_time")
                 if proposed_dt:
                     # Check for any events on the same day (simplified conflict check)
-                    existing_events = await calendar_col.find({}).to_list(100)
+                    existing_events = await calendar_col.find({"workspace_id": workspace_id}).to_list(100)
                     for ev in existing_events:
                         try:
                             ev_start = ev.get("start_time", "")
@@ -347,7 +477,7 @@ async def evaluate_advanced_escalation(item, intent, confidence, policy_action):
                 if not matched:
                     from datetime import date
                     today_str = date.today().isoformat()
-                    today_events = [e for e in await calendar_col.find({}).to_list(100) if today_str in e.get("start_time", "")]
+                    today_events = [e for e in await calendar_col.find({"workspace_id": workspace_id}).to_list(100) if today_str in e.get("start_time", "")]
                     if len(today_events) >= 4:
                         matched = True
                         escalation_reasons.append(f"Calendar is busy ({len(today_events)} events today)")
@@ -478,39 +608,40 @@ async def seed_database():
 
     # Automation Policies (per-intent rules)
     policies = [
-        {"policy_id": str(uuid.uuid4()), "intent": "booking", "action": "auto_run", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "auto_run", "medium_action": "require_approval", "low_action": "escalate", "enabled": True, "created_at": now},
-        {"policy_id": str(uuid.uuid4()), "intent": "follow_up", "action": "require_approval", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "require_approval", "medium_action": "require_approval", "low_action": "escalate", "enabled": True, "created_at": now},
-        {"policy_id": str(uuid.uuid4()), "intent": "onboarding", "action": "require_approval", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "require_approval", "medium_action": "require_approval", "low_action": "escalate", "enabled": True, "created_at": now},
-        {"policy_id": str(uuid.uuid4()), "intent": "inquiry", "action": "manual_review", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "manual_review", "medium_action": "manual_review", "low_action": "escalate", "enabled": True, "created_at": now},
-        {"policy_id": str(uuid.uuid4()), "intent": "escalation", "action": "escalate", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "escalate", "medium_action": "escalate", "low_action": "escalate", "enabled": True, "created_at": now},
-        {"policy_id": str(uuid.uuid4()), "intent": "spam", "action": "auto_run", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "auto_run", "medium_action": "manual_review", "low_action": "manual_review", "enabled": True, "created_at": now},
-        {"policy_id": str(uuid.uuid4()), "intent": "needs_review", "action": "manual_review", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "manual_review", "medium_action": "manual_review", "low_action": "escalate", "enabled": True, "created_at": now},
+        {"workspace_id": DEFAULT_WORKSPACE_ID, "policy_id": str(uuid.uuid4()), "intent": "booking", "action": "auto_run", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "auto_run", "medium_action": "require_approval", "low_action": "escalate", "enabled": True, "created_at": now},
+        {"workspace_id": DEFAULT_WORKSPACE_ID, "policy_id": str(uuid.uuid4()), "intent": "follow_up", "action": "require_approval", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "require_approval", "medium_action": "require_approval", "low_action": "escalate", "enabled": True, "created_at": now},
+        {"workspace_id": DEFAULT_WORKSPACE_ID, "policy_id": str(uuid.uuid4()), "intent": "onboarding", "action": "require_approval", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "require_approval", "medium_action": "require_approval", "low_action": "escalate", "enabled": True, "created_at": now},
+        {"workspace_id": DEFAULT_WORKSPACE_ID, "policy_id": str(uuid.uuid4()), "intent": "inquiry", "action": "manual_review", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "manual_review", "medium_action": "manual_review", "low_action": "escalate", "enabled": True, "created_at": now},
+        {"workspace_id": DEFAULT_WORKSPACE_ID, "policy_id": str(uuid.uuid4()), "intent": "escalation", "action": "escalate", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "escalate", "medium_action": "escalate", "low_action": "escalate", "enabled": True, "created_at": now},
+        {"workspace_id": DEFAULT_WORKSPACE_ID, "policy_id": str(uuid.uuid4()), "intent": "spam", "action": "auto_run", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "auto_run", "medium_action": "manual_review", "low_action": "manual_review", "enabled": True, "created_at": now},
+        {"workspace_id": DEFAULT_WORKSPACE_ID, "policy_id": str(uuid.uuid4()), "intent": "needs_review", "action": "manual_review", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "manual_review", "medium_action": "manual_review", "low_action": "escalate", "enabled": True, "created_at": now},
     ]
     await policies_col.insert_many(policies)
 
     # Escalation Rules
     escalation_rules = [
-        {"rule_id": str(uuid.uuid4()), "name": "Urgent recruiting leads", "condition_type": "intent", "condition_value": "onboarding", "route_to": "Larry", "priority": "high", "enabled": True, "created_at": now},
-        {"rule_id": str(uuid.uuid4()), "name": "Incomplete onboarding data", "condition_type": "keyword", "condition_value": "incomplete,missing,setup", "route_to": "Ops/Admin", "priority": "normal", "enabled": True, "created_at": now},
-        {"rule_id": str(uuid.uuid4()), "name": "Calendar conflicts", "condition_type": "keyword", "condition_value": "conflict,reschedule,cancel", "route_to": "Manual Review", "priority": "normal", "enabled": True, "created_at": now},
-        {"rule_id": str(uuid.uuid4()), "name": "Escalation requests", "condition_type": "intent", "condition_value": "escalation", "route_to": "Sophia Turner", "priority": "critical", "enabled": True, "created_at": now},
-        {"rule_id": str(uuid.uuid4()), "name": "High-value investor inquiries", "condition_type": "keyword", "condition_value": "investor,investment,portfolio", "route_to": "Sophia Turner", "priority": "high", "enabled": True, "created_at": now},
+        {"workspace_id": DEFAULT_WORKSPACE_ID, "rule_id": str(uuid.uuid4()), "name": "Urgent recruiting leads", "condition_type": "intent", "condition_value": "onboarding", "route_to": "Larry", "priority": "high", "enabled": True, "created_at": now},
+        {"workspace_id": DEFAULT_WORKSPACE_ID, "rule_id": str(uuid.uuid4()), "name": "Incomplete onboarding data", "condition_type": "keyword", "condition_value": "incomplete,missing,setup", "route_to": "Ops/Admin", "priority": "normal", "enabled": True, "created_at": now},
+        {"workspace_id": DEFAULT_WORKSPACE_ID, "rule_id": str(uuid.uuid4()), "name": "Calendar conflicts", "condition_type": "keyword", "condition_value": "conflict,reschedule,cancel", "route_to": "Manual Review", "priority": "normal", "enabled": True, "created_at": now},
+        {"workspace_id": DEFAULT_WORKSPACE_ID, "rule_id": str(uuid.uuid4()), "name": "Escalation requests", "condition_type": "intent", "condition_value": "escalation", "route_to": "Sophia Turner", "priority": "critical", "enabled": True, "created_at": now},
+        {"workspace_id": DEFAULT_WORKSPACE_ID, "rule_id": str(uuid.uuid4()), "name": "High-value investor inquiries", "condition_type": "keyword", "condition_value": "investor,investment,portfolio", "route_to": "Sophia Turner", "priority": "high", "enabled": True, "created_at": now},
     ]
     await escalation_col.insert_many(escalation_rules)
 
     # Content Templates
     templates = [
-        {"template_id": str(uuid.uuid4()), "name": "Welcome Email", "category": "welcome", "template_type": "email", "subject_template": "Welcome to our team, {{contact_name}}!", "body_template": "Dear {{contact_name}},\n\nWelcome to the team! We're thrilled to have you on board.\n\n{{situation}}\n\nPlease don't hesitate to reach out if you need anything during your transition. We're here to help you succeed.\n\nBest regards,\nThe Quantro Team", "variables": ["contact_name", "situation"], "tags": ["onboarding", "welcome"], "status": "active", "created_at": now, "created_by": "system"},
-        {"template_id": str(uuid.uuid4()), "name": "Follow-up Message", "category": "follow_up", "template_type": "email", "subject_template": "Following up: {{subject}}", "body_template": "Hi {{contact_name}},\n\nI wanted to follow up on {{subject}}. {{situation}}\n\nPlease let me know if you have any questions or if there's anything else I can help with.\n\nBest,\nThe Quantro Team", "variables": ["contact_name", "subject", "situation"], "tags": ["follow-up", "client"], "status": "active", "created_at": now, "created_by": "system"},
-        {"template_id": str(uuid.uuid4()), "name": "Recruiting Message", "category": "recruiting", "template_type": "email", "subject_template": "Exciting opportunity at our firm", "body_template": "Hi {{contact_name}},\n\nWe're expanding our team and your profile caught our attention. {{situation}}\n\nWe'd love to discuss how you could be a great fit for our growing real estate team. Would you be available for a brief call this week?\n\nLooking forward to connecting,\nThe Quantro Team", "variables": ["contact_name", "situation"], "tags": ["recruiting", "agent"], "status": "active", "created_at": now, "created_by": "system"},
-        {"template_id": str(uuid.uuid4()), "name": "New Listing Social Post", "category": "social", "template_type": "social_post", "subject_template": None, "body_template": "Just listed! {{property_details}}. {{highlight}}. Contact us today for a private showing. #NewListing #RealEstate #{{location}}", "variables": ["property_details", "highlight", "location"], "tags": ["listing", "social"], "status": "active", "created_at": now, "created_by": "system"},
-        {"template_id": str(uuid.uuid4()), "name": "Market Update Post", "category": "market_update", "template_type": "social_post", "subject_template": None, "body_template": "Market Update: {{market_data}}. {{insight}}. Whether you're buying or selling, now is the time to strategize. #MarketUpdate #RealEstate", "variables": ["market_data", "insight"], "tags": ["market", "social", "update"], "status": "active", "created_at": now, "created_by": "system"},
+        {"workspace_id": DEFAULT_WORKSPACE_ID, "template_id": str(uuid.uuid4()), "name": "Welcome Email", "category": "welcome", "template_type": "email", "subject_template": "Welcome to our team, {{contact_name}}!", "body_template": "Dear {{contact_name}},\n\nWelcome to the team! We're thrilled to have you on board.\n\n{{situation}}\n\nPlease don't hesitate to reach out if you need anything during your transition. We're here to help you succeed.\n\nBest regards,\nThe Quantro Team", "variables": ["contact_name", "situation"], "tags": ["onboarding", "welcome"], "status": "active", "created_at": now, "created_by": "system"},
+        {"workspace_id": DEFAULT_WORKSPACE_ID, "template_id": str(uuid.uuid4()), "name": "Follow-up Message", "category": "follow_up", "template_type": "email", "subject_template": "Following up: {{subject}}", "body_template": "Hi {{contact_name}},\n\nI wanted to follow up on {{subject}}. {{situation}}\n\nPlease let me know if you have any questions or if there's anything else I can help with.\n\nBest,\nThe Quantro Team", "variables": ["contact_name", "subject", "situation"], "tags": ["follow-up", "client"], "status": "active", "created_at": now, "created_by": "system"},
+        {"workspace_id": DEFAULT_WORKSPACE_ID, "template_id": str(uuid.uuid4()), "name": "Recruiting Message", "category": "recruiting", "template_type": "email", "subject_template": "Exciting opportunity at our firm", "body_template": "Hi {{contact_name}},\n\nWe're expanding our team and your profile caught our attention. {{situation}}\n\nWe'd love to discuss how you could be a great fit for our growing real estate team. Would you be available for a brief call this week?\n\nLooking forward to connecting,\nThe Quantro Team", "variables": ["contact_name", "situation"], "tags": ["recruiting", "agent"], "status": "active", "created_at": now, "created_by": "system"},
+        {"workspace_id": DEFAULT_WORKSPACE_ID, "template_id": str(uuid.uuid4()), "name": "New Listing Social Post", "category": "social", "template_type": "social_post", "subject_template": None, "body_template": "Just listed! {{property_details}}. {{highlight}}. Contact us today for a private showing. #NewListing #RealEstate #{{location}}", "variables": ["property_details", "highlight", "location"], "tags": ["listing", "social"], "status": "active", "created_at": now, "created_by": "system"},
+        {"workspace_id": DEFAULT_WORKSPACE_ID, "template_id": str(uuid.uuid4()), "name": "Market Update Post", "category": "market_update", "template_type": "social_post", "subject_template": None, "body_template": "Market Update: {{market_data}}. {{insight}}. Whether you're buying or selling, now is the time to strategize. #MarketUpdate #RealEstate", "variables": ["market_data", "insight"], "tags": ["market", "social", "update"], "status": "active", "created_at": now, "created_by": "system"},
     ]
     await templates_col.insert_many(templates)
 
     # Business Profile (default - industry agnostic)
     business_profile = {
         "profile_id": "default",
+        "workspace_id": DEFAULT_WORKSPACE_ID,
         "industry": "other",
         "use_case": "General business operations and workflow management",
         "entity_labels": {
@@ -527,11 +658,10 @@ async def seed_database():
     }
     await business_profile_col.insert_one(business_profile)
 
-    # Integrations Config (default - all disconnected)
+    # Integrations Config (default - all disconnected, workspace-scoped)
     integrations = [
-        {"integration_id": str(uuid.uuid4()), "provider": "gmail", "status": "disconnected", "last_sync_at": None, "config": {}, "created_at": now, "updated_at": now},
-        {"integration_id": str(uuid.uuid4()), "provider": "google_calendar", "status": "disconnected", "last_sync_at": None, "config": {}, "created_at": now, "updated_at": now},
-        {"integration_id": str(uuid.uuid4()), "provider": "crm", "status": "disconnected", "last_sync_at": None, "config": {}, "created_at": now, "updated_at": now},
+        {"integration_id": str(uuid.uuid4()), "workspace_id": DEFAULT_WORKSPACE_ID, "provider": "gmail", "status": "disconnected", "last_sync_at": None, "config": {}, "created_at": now, "updated_at": now},
+        {"integration_id": str(uuid.uuid4()), "workspace_id": DEFAULT_WORKSPACE_ID, "provider": "crm", "status": "disconnected", "last_sync_at": None, "config": {}, "created_at": now, "updated_at": now},
     ]
     await integrations_config_col.insert_many(integrations)
 
@@ -640,10 +770,11 @@ async def ensure_integrations_seeded():
     repairs = []  # Events: [{type, provider, detail}]
 
     for item in DEFAULT_INTEGRATIONS_CATALOG:
-        existing = await integrations_config_col.find_one({"provider": item["provider"]})
+        existing = await integrations_config_col.find_one({"workspace_id": DEFAULT_WORKSPACE_ID, "provider": item["provider"]})
         if not existing:
             await integrations_config_col.insert_one({
                 "integration_id": str(uuid.uuid4()),
+                "workspace_id": DEFAULT_WORKSPACE_ID,
                 "provider": item["provider"],
                 "category": item["category"],
                 "display_name": item["display_name"],
@@ -664,9 +795,11 @@ async def ensure_integrations_seeded():
                 patch["category"] = item["category"]
             if not existing.get("display_name"):
                 patch["display_name"] = item["display_name"]
+            if not existing.get("workspace_id"):
+                patch["workspace_id"] = DEFAULT_WORKSPACE_ID
             if patch:
                 await integrations_config_col.update_one(
-                    {"provider": item["provider"]}, {"$set": patch}
+                    {"_id": existing["_id"]}, {"$set": patch}
                 )
                 repairs.append({
                     "type": "metadata_backfilled",
@@ -735,9 +868,159 @@ async def backfill_simulation_flag():
                 "checked_at": datetime.utcnow(),
             })
         except Exception:
-            # Non-critical; ignore logging errors on startup
             pass
     return repaired
+
+
+# ─── Phase 7a: Workspace Scoping Backfill ─────────────────────────────
+# All operational + config records must carry `workspace_id`. Legacy
+# pre-Phase-7 data is tagged as belonging to DEFAULT_WORKSPACE_ID so the
+# first authenticated user can claim it seamlessly.
+WORKSPACE_SCOPED_COLLECTIONS = [
+    "contacts", "inbox_items", "calendar_events", "agents",
+    "activity_events", "content_items", "onboarding_tasks",
+    "automation_policies", "escalation_rules", "content_templates",
+    "integrations_config", "business_profile", "system_health_events",
+]
+
+
+async def backfill_workspace_scoping():
+    """Idempotently tag legacy records with workspace_id=DEFAULT_WORKSPACE_ID."""
+    for name in WORKSPACE_SCOPED_COLLECTIONS:
+        col = db[name]
+        await col.update_many(
+            {"workspace_id": {"$exists": False}},
+            {"$set": {"workspace_id": DEFAULT_WORKSPACE_ID}},
+        )
+    # Ensure the default business profile document exists with workspace_id.
+    existing = await business_profile_col.find_one({"workspace_id": DEFAULT_WORKSPACE_ID})
+    if not existing:
+        # Promote the legacy {profile_id: "default"} doc (if any) to the default workspace.
+        legacy = await business_profile_col.find_one({"profile_id": "default"})
+        if legacy:
+            await business_profile_col.update_one(
+                {"_id": legacy["_id"]}, {"$set": {"workspace_id": DEFAULT_WORKSPACE_ID}}
+            )
+    # Ensure a pre-claim workspace shell exists so the first user can claim it.
+    ws = await workspaces_col.find_one({"workspace_id": DEFAULT_WORKSPACE_ID})
+    if not ws:
+        await workspaces_col.insert_one({
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "name": "Personal Workspace",
+            "owner_user_id": None,   # unclaimed
+            "created_at": datetime.now(timezone.utc),
+            "claimed": False,
+        })
+
+
+async def seed_workspace_config(workspace_id: str, *, industry: str = "other", language: str = "es"):
+    """Create the baseline business_profile + integrations_config + policies
+    for a brand-new workspace. Idempotent: never overwrites existing configs."""
+    now = datetime.now(timezone.utc)
+
+    # Business profile
+    bp = await business_profile_col.find_one({"workspace_id": workspace_id})
+    if not bp:
+        await business_profile_col.insert_one({
+            "workspace_id": workspace_id,
+            "profile_id": workspace_id,  # kept for backward compat
+            "industry": industry,
+            "use_case": "",
+            "entity_labels": {
+                "contacts": "Contacts",
+                "team_members": "Team Members",
+                "meetings": "Meetings",
+                "events": "Events",
+                "services": "Services",
+            },
+            "simulation_mode": False,
+            "language": language,
+            "created_at": now,
+            "updated_at": now,
+        })
+
+    # Integrations catalog (one row per provider for this workspace)
+    for item in DEFAULT_INTEGRATIONS_CATALOG:
+        existing = await integrations_config_col.find_one({
+            "workspace_id": workspace_id, "provider": item["provider"]
+        })
+        if not existing:
+            await integrations_config_col.insert_one({
+                "integration_id": str(uuid.uuid4()),
+                "workspace_id": workspace_id,
+                "provider": item["provider"],
+                "category": item["category"],
+                "display_name": item["display_name"],
+                "status": "disconnected",
+                "last_sync_at": None,
+                "config": {},
+                "created_at": now,
+                "updated_at": now,
+            })
+
+
+async def claim_or_create_workspace_for_user(user_doc: dict) -> str:
+    """On first login, give the user a workspace.
+
+    - If the DEFAULT_WORKSPACE_ID is still unclaimed → user becomes its Owner
+      (inherits all existing seeded data cleanly).
+    - Otherwise → create a fresh personal workspace + seed its config.
+
+    Always ensures a membership row exists. Returns the workspace_id the user
+    should land in by default."""
+    user_id = user_doc["user_id"]
+    existing_member = await workspace_members_col.find_one({"user_id": user_id})
+    if existing_member:
+        return existing_member["workspace_id"]
+
+    default_ws = await workspaces_col.find_one({"workspace_id": DEFAULT_WORKSPACE_ID})
+    if default_ws and not default_ws.get("claimed"):
+        # Claim the default workspace.
+        await workspaces_col.update_one(
+            {"workspace_id": DEFAULT_WORKSPACE_ID},
+            {"$set": {
+                "name": f"{user_doc.get('name') or 'My'} Workspace",
+                "owner_user_id": user_id,
+                "claimed": True,
+                "claimed_at": datetime.now(timezone.utc),
+            }},
+        )
+        await workspace_members_col.insert_one({
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "user_id": user_id,
+            "role": "owner",
+            "joined_at": datetime.now(timezone.utc),
+        })
+        await log_audit(
+            "workspace.claimed",
+            f"{user_doc.get('email')} claimed the default workspace",
+            user_id=user_id, workspace_id=DEFAULT_WORKSPACE_ID,
+        )
+        return DEFAULT_WORKSPACE_ID
+
+    # Otherwise create a fresh personal workspace for this user.
+    new_ws_id = f"ws_{uuid.uuid4().hex[:12]}"
+    await workspaces_col.insert_one({
+        "workspace_id": new_ws_id,
+        "name": f"{user_doc.get('name') or 'My'} Workspace",
+        "owner_user_id": user_id,
+        "created_at": datetime.now(timezone.utc),
+        "claimed": True,
+        "claimed_at": datetime.now(timezone.utc),
+    })
+    await workspace_members_col.insert_one({
+        "workspace_id": new_ws_id,
+        "user_id": user_id,
+        "role": "owner",
+        "joined_at": datetime.now(timezone.utc),
+    })
+    await seed_workspace_config(new_ws_id)
+    await log_audit(
+        "workspace.created",
+        f"{user_doc.get('email')} created a new personal workspace",
+        user_id=user_id, workspace_id=new_ws_id,
+    )
+    return new_ws_id
 
 
 # ─── Lifespan ──────────────────────────────────────────────────────────
@@ -746,6 +1029,7 @@ async def lifespan(app: FastAPI):
     await seed_database()
     await ensure_integrations_seeded()
     await backfill_simulation_flag()
+    await backfill_workspace_scoping()
     yield
     client.close()
 
@@ -753,11 +1037,212 @@ app = FastAPI(title="Quantro Flow | Business OS", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    # When allow_credentials=True, browsers refuse wildcard origins.
+    # We echo back the caller's origin instead, which is safe because
+    # auth is enforced by the session cookie, not by origin allowlisting.
+    allow_origin_regex=".*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ─── Auth Endpoints (Phase 7a) ────────────────────────────────────────
+class SessionExchangeRequest(BaseModel):
+    session_id: str
+
+
+def _set_session_cookie(response: Response, token: str):
+    """Set the session cookie with production-grade attributes."""
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        max_age=SESSION_TTL_DAYS * 24 * 3600,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        path="/",
+    )
+
+
+@app.post("/api/auth/session")
+async def auth_session_exchange(req: SessionExchangeRequest, response: Response):
+    """Exchange an Emergent Auth session_id (one-time) for a persistent session cookie.
+
+    Flow:
+      1. Frontend redirects to auth.emergentagent.com which returns with #session_id=<id>.
+      2. Frontend posts that session_id here.
+      3. Backend calls Emergent's /session-data to fetch the user profile + session_token.
+      4. Backend upserts the user, creates/claims a workspace, stores the session, and
+         sets an httpOnly cookie. Frontend then navigates to the dashboard.
+    """
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        r = await http.get(EMERGENT_AUTH_URL, headers={"X-Session-ID": req.session_id})
+    if r.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid session_id")
+    data = r.json()
+    email = data.get("email")
+    name = data.get("name") or (email or "User").split("@")[0]
+    picture = data.get("picture")
+    session_token = data.get("session_token")
+    if not email or not session_token:
+        raise HTTPException(status_code=502, detail="Malformed auth response")
+
+    # Upsert user by email
+    user_doc = await users_col.find_one({"email": email}, {"_id": 0})
+    is_new_user = user_doc is None
+    if is_new_user:
+        user_id = f"user_{uuid.uuid4().hex[:12]}"
+        user_doc = {
+            "user_id": user_id,
+            "email": email,
+            "name": name,
+            "picture": picture,
+            "created_at": datetime.now(timezone.utc),
+            "last_login_at": datetime.now(timezone.utc),
+        }
+        await users_col.insert_one(user_doc)
+    else:
+        await users_col.update_one(
+            {"email": email},
+            {"$set": {
+                "name": name,
+                "picture": picture,
+                "last_login_at": datetime.now(timezone.utc),
+            }},
+        )
+
+    # Ensure workspace membership
+    workspace_id = await claim_or_create_workspace_for_user(user_doc)
+    await users_col.update_one(
+        {"user_id": user_doc["user_id"]},
+        {"$set": {"current_workspace_id": workspace_id}},
+    )
+
+    # Persist session
+    expires_at = datetime.now(timezone.utc) + timedelta(days=SESSION_TTL_DAYS)
+    await user_sessions_col.update_one(
+        {"session_token": session_token},
+        {"$set": {
+            "session_token": session_token,
+            "user_id": user_doc["user_id"],
+            "expires_at": expires_at,
+            "created_at": datetime.now(timezone.utc),
+        }},
+        upsert=True,
+    )
+
+    _set_session_cookie(response, session_token)
+
+    await log_audit(
+        "auth.login",
+        f"{email} logged in",
+        user_id=user_doc["user_id"],
+        workspace_id=workspace_id,
+        metadata={"new_user": is_new_user},
+    )
+
+    return {
+        "user": {
+            "user_id": user_doc["user_id"],
+            "email": email,
+            "name": name,
+            "picture": picture,
+            "current_workspace_id": workspace_id,
+        },
+        "workspace_id": workspace_id,
+        # Bearer token for clients that cannot persist cookies
+        # (e.g., Kubernetes ingress forces ACAO: * which blocks cookie CORS).
+        "session_token": session_token,
+        "expires_at": expires_at.isoformat(),
+    }
+
+
+@app.get("/api/auth/me")
+async def auth_me(user: User = Depends(get_current_user)):
+    memberships = await workspace_members_col.find({"user_id": user.user_id}, {"_id": 0}).to_list(50)
+    workspace_ids = [m["workspace_id"] for m in memberships]
+    workspaces = []
+    if workspace_ids:
+        rows = await workspaces_col.find({"workspace_id": {"$in": workspace_ids}}, {"_id": 0}).to_list(50)
+        role_map = {m["workspace_id"]: m.get("role", "member") for m in memberships}
+        for w in rows:
+            workspaces.append({
+                "workspace_id": w["workspace_id"],
+                "name": w.get("name", "Workspace"),
+                "role": role_map.get(w["workspace_id"], "member"),
+                "is_current": w["workspace_id"] == user.current_workspace_id,
+            })
+    return {
+        "user_id": user.user_id,
+        "email": user.email,
+        "name": user.name,
+        "picture": user.picture,
+        "current_workspace_id": user.current_workspace_id,
+        "workspaces": workspaces,
+    }
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: Request, response: Response):
+    token = await _extract_session_token(request)
+    if token:
+        session = await user_sessions_col.find_one({"session_token": token}, {"_id": 0})
+        if session:
+            await log_audit(
+                "auth.logout",
+                "user logged out",
+                user_id=session.get("user_id"),
+                workspace_id=None,
+            )
+        await user_sessions_col.delete_one({"session_token": token})
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/", samesite="none", secure=True)
+    return {"success": True}
+
+
+class CreateWorkspaceRequest(BaseModel):
+    name: str
+
+
+@app.post("/api/auth/workspaces")
+async def create_workspace(req: CreateWorkspaceRequest, user: User = Depends(get_current_user)):
+    """Create a new workspace (user becomes its Owner)."""
+    new_ws_id = f"ws_{uuid.uuid4().hex[:12]}"
+    await workspaces_col.insert_one({
+        "workspace_id": new_ws_id,
+        "name": req.name or f"{user.name} Workspace",
+        "owner_user_id": user.user_id,
+        "created_at": datetime.now(timezone.utc),
+        "claimed": True,
+        "claimed_at": datetime.now(timezone.utc),
+    })
+    await workspace_members_col.insert_one({
+        "workspace_id": new_ws_id,
+        "user_id": user.user_id,
+        "role": "owner",
+        "joined_at": datetime.now(timezone.utc),
+    })
+    await seed_workspace_config(new_ws_id)
+    await log_audit("workspace.created", f"Created workspace '{req.name}'", user_id=user.user_id, workspace_id=new_ws_id)
+    return {"workspace_id": new_ws_id, "name": req.name}
+
+
+class SwitchWorkspaceRequest(BaseModel):
+    workspace_id: str
+
+
+@app.post("/api/auth/workspaces/switch")
+async def switch_workspace(req: SwitchWorkspaceRequest, user: User = Depends(get_current_user)):
+    """Set the user's current active workspace."""
+    member = await workspace_members_col.find_one({"user_id": user.user_id, "workspace_id": req.workspace_id})
+    if not member:
+        raise HTTPException(status_code=403, detail="Not a member of this workspace")
+    await users_col.update_one(
+        {"user_id": user.user_id},
+        {"$set": {"current_workspace_id": req.workspace_id}},
+    )
+    await log_audit("workspace.switched", f"Switched to workspace {req.workspace_id}", user_id=user.user_id, workspace_id=req.workspace_id)
+    return {"success": True, "workspace_id": req.workspace_id}
+
 
 # ─── Health ────────────────────────────────────────────────────────────
 @app.get("/api/health")
@@ -766,37 +1251,37 @@ async def health():
 
 # ─── System Health / Self-Healing Surface ─────────────────────────────
 @app.get("/api/system/health")
-async def system_health():
+async def system_health(workspace_id: str = Depends(get_current_workspace_id)):
     """Surface the self-healing layer to the UI.
 
     Returns the current state of the Quantro OS integrity layer, including
     the most recent startup check, any repairs that were applied, and a
     rolling summary. Powers the "System Status: Healthy" trust banner and
     the Dashboard "System Health" card."""
-    # Latest check
+    # Latest check (workspace-scoped)
     latest = await system_health_col.find_one(
-        {"scope": "integrations"},
+        {"scope": "integrations", "workspace_id": {"$in": [workspace_id, DEFAULT_WORKSPACE_ID]}},
         sort=[("checked_at", -1)],
         projection={"_id": 0},
     )
 
     # Basic integrity count
-    integrations_total = await integrations_config_col.count_documents({})
+    integrations_total = await integrations_config_col.count_documents({"workspace_id": workspace_id})
     integrations_expected = len(DEFAULT_INTEGRATIONS_CATALOG)
     integrations_ok = integrations_total >= integrations_expected
 
     # Business profile existence
-    profile_exists = await business_profile_col.count_documents({}) > 0
+    profile_exists = await business_profile_col.count_documents({"workspace_id": workspace_id}) > 0
 
     # Recent repairs (last 10)
     recent_repairs = await system_health_col.find(
-        {"repair_count": {"$gt": 0}},
+        {"repair_count": {"$gt": 0}, "workspace_id": {"$in": [workspace_id, DEFAULT_WORKSPACE_ID]}},
         sort=[("checked_at", -1)],
         projection={"_id": 0},
     ).to_list(10)
 
     # Total repair events lifetime
-    total_repair_events = await system_health_col.count_documents({"repair_count": {"$gt": 0}})
+    total_repair_events = await system_health_col.count_documents({"repair_count": {"$gt": 0}, "workspace_id": {"$in": [workspace_id, DEFAULT_WORKSPACE_ID]}})
 
     # Overall status
     if not integrations_ok or not profile_exists:
@@ -845,8 +1330,8 @@ async def system_health():
 
 # ─── Dashboard ─────────────────────────────────────────────────────────
 @app.get("/api/dashboard/metrics")
-async def get_dashboard_metrics():
-    mode_filter = await get_mode_filter()
+async def get_dashboard_metrics(workspace_id: str = Depends(get_current_workspace_id)):
+    mode_filter = await get_mode_filter(workspace_id)
     total_agents = await agents_col.count_documents(mode_filter)
     active_agents = await agents_col.count_documents(merge_query({"status": "active"}, mode_filter))
     total_contacts = await contacts_col.count_documents(mode_filter)
@@ -864,12 +1349,12 @@ async def get_dashboard_metrics():
         "content": {"total": total_content},
         "system_status": "running",
         "last_sync": datetime.utcnow().isoformat(),
-        "simulation_mode": await is_simulation_mode(),
+        "simulation_mode": await is_simulation_mode(workspace_id),
     }
 
 @app.get("/api/dashboard/suggestions")
-async def get_ai_suggestions():
-    mode_filter = await get_mode_filter()
+async def get_ai_suggestions(workspace_id: str = Depends(get_current_workspace_id)):
+    mode_filter = await get_mode_filter(workspace_id)
     unprocessed = await inbox_col.find(merge_query({"status": "new", "ai_intent": None}, mode_filter)).to_list(5)
     processed_pending = await inbox_col.find(merge_query({"status": "processed", "ai_intent": {"$ne": None}}, mode_filter)).to_list(5)
     suggestions = []
@@ -894,25 +1379,25 @@ async def get_ai_suggestions():
 
 # ─── Inbox ─────────────────────────────────────────────────────────────
 @app.get("/api/inbox")
-async def get_inbox(status: Optional[str] = None):
+async def get_inbox(status: Optional[str] = None, workspace_id: str = Depends(get_current_workspace_id)):
     query = {}
     if status:
         query["status"] = status
-    mode_filter = await get_mode_filter()
+    mode_filter = await get_mode_filter(workspace_id)
     items = await inbox_col.find(merge_query(query, mode_filter)).sort("received_at", -1).to_list(100)
     return [serialize_doc(item) for item in items]
 
 @app.get("/api/inbox/{inbox_id}")
-async def get_inbox_item(inbox_id: str):
-    mode_filter = await get_mode_filter()
+async def get_inbox_item(inbox_id: str, workspace_id: str = Depends(get_current_workspace_id)):
+    mode_filter = await get_mode_filter(workspace_id)
     item = await inbox_col.find_one(merge_query({"inbox_id": inbox_id}, mode_filter))
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
     return serialize_doc(item)
 
 @app.post("/api/inbox/{inbox_id}/analyze")
-async def analyze_inbox_item(inbox_id: str):
-    item = await inbox_col.find_one({"inbox_id": inbox_id})
+async def analyze_inbox_item(inbox_id: str, workspace_id: str = Depends(get_current_workspace_id)):
+    item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
     
@@ -947,7 +1432,7 @@ async def analyze_inbox_item(inbox_id: str):
     # Evaluate policy
     intent = ai_result["intent"]
     confidence = ai_result["confidence"]
-    policy = await policies_col.find_one({"intent": intent, "enabled": True})
+    policy = await policies_col.find_one({"workspace_id": workspace_id, "intent": intent, "enabled": True})
     policy_action = "manual_review"
     escalation_info = None
     
@@ -960,7 +1445,7 @@ async def analyze_inbox_item(inbox_id: str):
             policy_action = policy.get("low_action", "escalate")
     
     # Evaluate advanced escalation conditions (applies to all policy actions)
-    updated_item = await inbox_col.find_one({"inbox_id": inbox_id})
+    updated_item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
     escalation_info = await evaluate_advanced_escalation(updated_item, intent, confidence, policy_action)
     
     # If escalation triggered, override policy action
@@ -984,8 +1469,8 @@ async def analyze_inbox_item(inbox_id: str):
     return serialize_doc(updated)
 
 @app.post("/api/inbox/{inbox_id}/approve")
-async def approve_inbox_action(inbox_id: str):
-    item = await inbox_col.find_one({"inbox_id": inbox_id})
+async def approve_inbox_action(inbox_id: str, workspace_id: str = Depends(get_current_workspace_id)):
+    item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
     if not item.get("ai_suggested_action"):
@@ -995,6 +1480,7 @@ async def approve_inbox_action(inbox_id: str):
     action_type = action["type"]
     results = []
     sim_flag = bool(item.get("is_simulation", False))
+    ws_id = item.get("workspace_id", DEFAULT_WORKSPACE_ID)
     
     # Execute action based on type
     if action_type == "schedule_meeting":
@@ -1012,6 +1498,7 @@ async def approve_inbox_action(inbox_id: str):
             "created_at": now_iso(),
             "contact_id": item.get("contact_id"),
             "is_simulation": sim_flag,
+            "workspace_id": ws_id,
         }
         await calendar_col.insert_one(event)
         await log_activity("calendar", "Meeting scheduled", f"Meeting with {item['from_name']} created from AI action", event["event_id"], "calendar")
@@ -1033,6 +1520,7 @@ async def approve_inbox_action(inbox_id: str):
             "updated_at": now_iso(),
             "notes": item.get("ai_intent", {}).get("summary", ""),
             "is_simulation": sim_flag,
+            "workspace_id": ws_id,
         }
         await contacts_col.insert_one(contact)
         await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"contact_id": contact["contact_id"]}})
@@ -1052,6 +1540,7 @@ async def approve_inbox_action(inbox_id: str):
             "photo_url": None,
             "created_at": now_iso(),
             "is_simulation": sim_flag,
+            "workspace_id": ws_id,
         }
         await agents_col.insert_one(agent)
         
@@ -1073,6 +1562,7 @@ async def approve_inbox_action(inbox_id: str):
                 "completed_at": None,
                 "auto_generated": True,
                 "is_simulation": sim_flag,
+                "workspace_id": ws_id,
             }
             await onboarding_col.insert_one(task)
         
@@ -1096,8 +1586,8 @@ async def approve_inbox_action(inbox_id: str):
     return {"success": True, "action_type": action_type, "results": results}
 
 @app.post("/api/inbox/{inbox_id}/decline")
-async def decline_inbox_action(inbox_id: str):
-    item = await inbox_col.find_one({"inbox_id": inbox_id})
+async def decline_inbox_action(inbox_id: str, workspace_id: str = Depends(get_current_workspace_id)):
+    item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
     await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"status": "declined"}})
@@ -1106,7 +1596,7 @@ async def decline_inbox_action(inbox_id: str):
 
 # ─── Batch AI Triage ───────────────────────────────────────────────────
 @app.post("/api/inbox/batch-analyze")
-async def batch_analyze_inbox(req: BatchAnalyzeRequest):
+async def batch_analyze_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depends(get_current_workspace_id)):
     """Process multiple inbox items with AI classification in sequence."""
     results = []
     
@@ -1114,7 +1604,7 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest):
     intent_prompt = await build_intent_prompt()
     
     for inbox_id in req.inbox_ids:
-        item = await inbox_col.find_one({"inbox_id": inbox_id})
+        item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
         if not item:
             results.append({"inbox_id": inbox_id, "status": "error", "error": "Not found"})
             continue
@@ -1154,7 +1644,7 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest):
             # Evaluate policy for this item
             intent = ai_result["intent"]
             confidence = ai_result["confidence"]
-            policy = await policies_col.find_one({"intent": intent, "enabled": True})
+            policy = await policies_col.find_one({"workspace_id": workspace_id, "intent": intent, "enabled": True})
             policy_action = "manual_review"
             escalation_info = None
             
@@ -1167,7 +1657,7 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest):
                     policy_action = policy.get("low_action", "escalate")
             
             # Evaluate advanced escalation conditions (applies to all policy actions)
-            updated_item = await inbox_col.find_one({"inbox_id": inbox_id})
+            updated_item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
             escalation_info = await evaluate_advanced_escalation(updated_item, intent, confidence, policy_action)
             
             # If escalation triggered, override policy action
@@ -1216,12 +1706,12 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest):
     return {"success": True, "results": results, "total": len(req.inbox_ids), "classified": sum(1 for r in results if r["status"] == "classified")}
 
 @app.post("/api/inbox/batch-approve")
-async def batch_approve_inbox(req: BatchAnalyzeRequest):
+async def batch_approve_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depends(get_current_workspace_id)):
     """Approve all AI-suggested actions for multiple inbox items."""
     results = []
     
     for inbox_id in req.inbox_ids:
-        item = await inbox_col.find_one({"inbox_id": inbox_id})
+        item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
         if not item or not item.get("ai_suggested_action"):
             results.append({"inbox_id": inbox_id, "status": "skipped", "reason": "No action available"})
             continue
@@ -1235,6 +1725,7 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest):
             action = item["ai_suggested_action"]
             action_type = action["type"]
             sim_flag = bool(item.get("is_simulation", False))
+            ws_id = item.get("workspace_id", DEFAULT_WORKSPACE_ID)
             
             if action_type == "schedule_meeting":
                 entities = item.get("ai_intent", {}).get("entities", {})
@@ -1251,6 +1742,7 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest):
                     "created_at": now_iso(),
                     "contact_id": item.get("contact_id"),
                     "is_simulation": sim_flag,
+                    "workspace_id": ws_id,
                 }
                 await calendar_col.insert_one(event)
                 await log_activity("calendar", "Meeting scheduled (batch)", f"Meeting with {item['from_name']}", event["event_id"], "calendar")
@@ -1271,6 +1763,7 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest):
                     "updated_at": now_iso(),
                     "notes": item.get("ai_intent", {}).get("summary", ""),
                     "is_simulation": sim_flag,
+                    "workspace_id": ws_id,
                 }
                 await contacts_col.insert_one(contact)
                 await log_activity("crm", "Contact created (batch)", f"New contact {contact['name']}", contact["contact_id"], "contact")
@@ -1291,10 +1784,12 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest):
                     "photo_url": None,
                     "created_at": now_iso(),
                     "is_simulation": sim_flag,
+                    "workspace_id": ws_id,
                 }
                 await agents_col.insert_one(agent)
                 for idx, title in enumerate(["Complete compliance training", "Set up CRM profile", "Configure email signature", "Schedule orientation with team lead", "Access granted to listing portal"]):
-                    await onboarding_col.insert_one({"task_id": str(uuid.uuid4()), "agent_id": agent["agent_id"], "title": title, "description": f"Auto-generated step {idx+1}", "status": "pending", "order": idx + 1, "completed_at": None, "auto_generated": True, "is_simulation": sim_flag})
+                    await onboarding_col.insert_one({
+                "workspace_id": workspace_id,"task_id": str(uuid.uuid4()), "agent_id": agent["agent_id"], "title": title, "description": f"Auto-generated step {idx+1}", "status": "pending", "order": idx + 1, "completed_at": None, "auto_generated": True, "is_simulation": sim_flag})
                 await log_activity("onboarding", "Onboarding started (batch)", f"Agent {agent['name']} onboarding initiated", agent["agent_id"], "agent")
             
             else:
@@ -1313,9 +1808,9 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest):
 
 # ─── Manual Override (Edit Details) ────────────────────────────────────
 @app.put("/api/inbox/{inbox_id}/details")
-async def update_inbox_details(inbox_id: str, req: UpdateInboxDetailsRequest):
+async def update_inbox_details(inbox_id: str, req: UpdateInboxDetailsRequest, workspace_id: str = Depends(get_current_workspace_id)):
     """Allow user to edit AI-extracted entities and suggested action before approving."""
-    item = await inbox_col.find_one({"inbox_id": inbox_id})
+    item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
     
@@ -1347,9 +1842,9 @@ async def update_inbox_details(inbox_id: str, req: UpdateInboxDetailsRequest):
     return serialize_doc(updated)
 
 @app.post("/api/inbox/{inbox_id}/approve-with-overrides")
-async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest):
+async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest, workspace_id: str = Depends(get_current_workspace_id)):
     """Approve an action with optional manual overrides for details."""
-    item = await inbox_col.find_one({"inbox_id": inbox_id})
+    item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
     if not item.get("ai_suggested_action"):
@@ -1360,6 +1855,7 @@ async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest
     entities = item.get("ai_intent", {}).get("entities", {})
     results = []
     sim_flag = bool(item.get("is_simulation", False))
+    ws_id = item.get("workspace_id", DEFAULT_WORKSPACE_ID)
     
     if action_type == "schedule_meeting":
         event = {
@@ -1375,6 +1871,7 @@ async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest
             "created_at": now_iso(),
             "contact_id": item.get("contact_id"),
             "is_simulation": sim_flag,
+            "workspace_id": ws_id,
         }
         await calendar_col.insert_one(event)
         await log_activity("calendar", "Meeting scheduled", f"Meeting with {item['from_name']} (with adjustments)", event["event_id"], "calendar")
@@ -1395,6 +1892,7 @@ async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest
             "updated_at": now_iso(),
             "notes": item.get("ai_intent", {}).get("summary", ""),
             "is_simulation": sim_flag,
+            "workspace_id": ws_id,
         }
         await contacts_col.insert_one(contact)
         await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"contact_id": contact["contact_id"]}})
@@ -1413,10 +1911,11 @@ async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest
             "photo_url": None,
             "created_at": now_iso(),
             "is_simulation": sim_flag,
+            "workspace_id": ws_id,
         }
         await agents_col.insert_one(agent)
         for idx, title in enumerate(["Complete compliance training", "Set up CRM profile", "Configure email signature", "Schedule orientation with team lead", "Access granted to listing portal"]):
-            await onboarding_col.insert_one({"task_id": str(uuid.uuid4()), "agent_id": agent["agent_id"], "title": title, "description": f"Auto-generated step {idx+1}", "status": "pending", "order": idx + 1, "completed_at": None, "auto_generated": True, "is_simulation": sim_flag})
+            await onboarding_col.insert_one({"workspace_id": ws_id, "task_id": str(uuid.uuid4()), "agent_id": agent["agent_id"], "title": title, "description": f"Auto-generated step {idx+1}", "status": "pending", "order": idx + 1, "completed_at": None, "auto_generated": True, "is_simulation": sim_flag})
         await log_activity("onboarding", "Onboarding started", f"Agent {agent['name']} onboarding initiated (with adjustments)", agent["agent_id"], "agent")
         results.append({"type": "agent_created", "agent_id": agent["agent_id"]})
     
@@ -1434,13 +1933,13 @@ async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest
 
 # ─── Calendar ──────────────────────────────────────────────────────────
 @app.get("/api/calendar")
-async def get_calendar_events():
-    mode_filter = await get_mode_filter()
+async def get_calendar_events(workspace_id: str = Depends(get_current_workspace_id)):
+    mode_filter = await get_mode_filter(workspace_id)
     events = await calendar_col.find(mode_filter).sort("start_time", 1).to_list(100)
     return [serialize_doc(e) for e in events]
 
 @app.post("/api/calendar", status_code=201)
-async def create_calendar_event(req: CreateEventRequest):
+async def create_calendar_event(req: CreateEventRequest, workspace_id: str = Depends(get_current_workspace_id)):
     event = {
         "event_id": str(uuid.uuid4()),
         "title": req.title,
@@ -1453,32 +1952,33 @@ async def create_calendar_event(req: CreateEventRequest):
         "source": "manual",
         "created_at": now_iso(),
         "contact_id": req.contact_id,
-        "is_simulation": await is_simulation_mode(),
+        "is_simulation": await is_simulation_mode(workspace_id),
+        "workspace_id": workspace_id,
     }
     await calendar_col.insert_one(event)
-    await log_activity("calendar", "Event created", f"New event: {req.title}", event["event_id"], "calendar")
+    await log_activity("calendar", "Event created", f"New event: {req.title}", event["event_id"], "calendar", workspace_id=workspace_id)
     return serialize_doc(event)
 
 @app.delete("/api/calendar/{event_id}")
-async def delete_calendar_event(event_id: str):
-    result = await calendar_col.delete_one({"event_id": event_id})
+async def delete_calendar_event(event_id: str, workspace_id: str = Depends(get_current_workspace_id)):
+    result = await calendar_col.delete_one({"event_id": event_id, "workspace_id": workspace_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Event not found")
     return {"success": True}
 
 # ─── Contacts / CRM ───────────────────────────────────────────────────
 @app.get("/api/contacts")
-async def get_contacts(lifecycle_stage: Optional[str] = None):
+async def get_contacts(lifecycle_stage: Optional[str] = None, workspace_id: str = Depends(get_current_workspace_id)):
     query = {}
     if lifecycle_stage:
         query["lifecycle_stage"] = lifecycle_stage
-    mode_filter = await get_mode_filter()
+    mode_filter = await get_mode_filter(workspace_id)
     contacts = await contacts_col.find(merge_query(query, mode_filter)).sort("updated_at", -1).to_list(100)
     return [serialize_doc(c) for c in contacts]
 
 @app.get("/api/contacts/{contact_id}")
-async def get_contact(contact_id: str):
-    mode_filter = await get_mode_filter()
+async def get_contact(contact_id: str, workspace_id: str = Depends(get_current_workspace_id)):
+    mode_filter = await get_mode_filter(workspace_id)
     contact = await contacts_col.find_one(merge_query({"contact_id": contact_id}, mode_filter))
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
@@ -1495,7 +1995,7 @@ async def get_contact(contact_id: str):
     return result
 
 @app.post("/api/contacts")
-async def create_contact(req: CreateContactRequest):
+async def create_contact(req: CreateContactRequest, workspace_id: str = Depends(get_current_workspace_id)):
     contact = {
         "contact_id": str(uuid.uuid4()),
         "name": req.name,
@@ -1509,16 +2009,17 @@ async def create_contact(req: CreateContactRequest):
         "created_at": now_iso(),
         "updated_at": now_iso(),
         "notes": req.notes,
-        "is_simulation": await is_simulation_mode(),
+        "is_simulation": await is_simulation_mode(workspace_id),
+        "workspace_id": workspace_id,
     }
     await contacts_col.insert_one(contact)
-    await log_activity("crm", "Contact created", f"New contact: {req.name}", contact["contact_id"], "contact")
+    await log_activity("crm", "Contact created", f"New contact: {req.name}", contact["contact_id"], "contact", workspace_id=workspace_id)
     return serialize_doc(contact)
 
 # ─── Agents ────────────────────────────────────────────────────────────
 @app.get("/api/agents")
-async def get_agents():
-    mode_filter = await get_mode_filter()
+async def get_agents(workspace_id: str = Depends(get_current_workspace_id)):
+    mode_filter = await get_mode_filter(workspace_id)
     agents = await agents_col.find(mode_filter).sort("created_at", -1).to_list(100)
     result = []
     for agent in agents:
@@ -1532,8 +2033,8 @@ async def get_agents():
     return result
 
 @app.post("/api/agents")
-async def create_agent(req: CreateAgentRequest):
-    sim_flag = await is_simulation_mode()
+async def create_agent(req: CreateAgentRequest, workspace_id: str = Depends(get_current_workspace_id)):
+    sim_flag = await is_simulation_mode(workspace_id)
     agent = {
         "agent_id": str(uuid.uuid4()),
         "name": req.name,
@@ -1545,6 +2046,7 @@ async def create_agent(req: CreateAgentRequest):
         "photo_url": None,
         "created_at": now_iso(),
         "is_simulation": sim_flag,
+        "workspace_id": workspace_id,
     }
     await agents_col.insert_one(agent)
     
@@ -1566,6 +2068,7 @@ async def create_agent(req: CreateAgentRequest):
             "completed_at": None,
             "auto_generated": True,
             "is_simulation": sim_flag,
+            "workspace_id": workspace_id,
         }
         await onboarding_col.insert_one(task)
     
@@ -1580,7 +2083,7 @@ async def create_agent(req: CreateAgentRequest):
 
 # ─── Onboarding Tasks ─────────────────────────────────────────────────
 @app.put("/api/onboarding/{task_id}")
-async def update_onboarding_task(task_id: str, req: UpdateOnboardingTaskRequest):
+async def update_onboarding_task(task_id: str, req: UpdateOnboardingTaskRequest, workspace_id: str = Depends(get_current_workspace_id)):
     update = {"status": req.status}
     if req.status == "completed":
         update["completed_at"] = datetime.utcnow().isoformat()
@@ -1597,16 +2100,16 @@ async def update_onboarding_task(task_id: str, req: UpdateOnboardingTaskRequest)
 
 # ─── Content Engine ────────────────────────────────────────────────────
 @app.get("/api/content")
-async def get_content(content_type: Optional[str] = None):
+async def get_content(content_type: Optional[str] = None, workspace_id: str = Depends(get_current_workspace_id)):
     query = {}
     if content_type:
         query["type"] = content_type
-    mode_filter = await get_mode_filter()
+    mode_filter = await get_mode_filter(workspace_id)
     items = await content_col.find(merge_query(query, mode_filter)).sort("created_at", -1).to_list(100)
     return [serialize_doc(i) for i in items]
 
 @app.post("/api/content/generate")
-async def generate_content(req: ContentGenerateRequest):
+async def generate_content(req: ContentGenerateRequest, workspace_id: str = Depends(get_current_workspace_id)):
     # Get business profile for context-aware content generation
     content_prompt = await build_content_prompt()
     
@@ -1623,7 +2126,7 @@ async def generate_content(req: ContentGenerateRequest):
         raise HTTPException(status_code=500, detail="AI failed to generate valid content")
     
     items_created = []
-    sim_flag = await is_simulation_mode()
+    sim_flag = await is_simulation_mode(workspace_id)
     
     if req.type in ["social_post", "both"] and "social_post" in ai_result:
         social_item = {
@@ -1635,6 +2138,7 @@ async def generate_content(req: ContentGenerateRequest):
             "created_at": now_iso(),
             "created_by": "ai",
             "is_simulation": sim_flag,
+            "workspace_id": workspace_id,
         }
         await content_col.insert_one(social_item)
         items_created.append(serialize_doc(social_item))
@@ -1649,6 +2153,7 @@ async def generate_content(req: ContentGenerateRequest):
             "created_at": now_iso(),
             "created_by": "ai",
             "is_simulation": sim_flag,
+            "workspace_id": workspace_id,
         }
         await content_col.insert_one(email_item)
         items_created.append(serialize_doc(email_item))
@@ -1658,7 +2163,7 @@ async def generate_content(req: ContentGenerateRequest):
     return {"success": True, "items": items_created}
 
 @app.delete("/api/content/{content_id}")
-async def delete_content(content_id: str):
+async def delete_content(content_id: str, workspace_id: str = Depends(get_current_workspace_id)):
     result = await content_col.delete_one({"content_id": content_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Content not found")
@@ -1666,22 +2171,22 @@ async def delete_content(content_id: str):
 
 # ─── Activity Feed ─────────────────────────────────────────────────────
 @app.get("/api/activity")
-async def get_activity(limit: int = Query(default=20, le=100), event_type: Optional[str] = None):
+async def get_activity(limit: int = Query(default=20, le=100), event_type: Optional[str] = None, workspace_id: str = Depends(get_current_workspace_id)):
     query = {}
     if event_type:
         query["event_type"] = event_type
-    mode_filter = await get_mode_filter()
+    mode_filter = await get_mode_filter(workspace_id)
     events = await activity_col.find(merge_query(query, mode_filter)).sort("timestamp", -1).to_list(limit)
     return [serialize_doc(e) for e in events]
 
 # ─── Automation Policies ───────────────────────────────────────────────
 @app.get("/api/policies")
-async def get_policies():
-    policies = await policies_col.find({}).to_list(100)
+async def get_policies(workspace_id: str = Depends(get_current_workspace_id)):
+    policies = await policies_col.find({"workspace_id": workspace_id}).to_list(100)
     return [serialize_doc(p) for p in policies]
 
 @app.put("/api/policies/{policy_id}")
-async def update_policy(policy_id: str, req: AutomationPolicyRequest):
+async def update_policy(policy_id: str, req: AutomationPolicyRequest, workspace_id: str = Depends(get_current_workspace_id)):
     update = {
         "intent": req.intent,
         "action": req.action,
@@ -1693,24 +2198,24 @@ async def update_policy(policy_id: str, req: AutomationPolicyRequest):
         "enabled": req.enabled,
         "updated_at": now_iso(),
     }
-    result = await policies_col.update_one({"policy_id": policy_id}, {"$set": update})
+    result = await policies_col.update_one({"workspace_id": workspace_id, "policy_id": policy_id}, {"$set": update})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Policy not found")
     await log_activity("system", "Policy updated", f"Automation policy for '{req.intent}' updated", policy_id, "policy")
-    updated = await policies_col.find_one({"policy_id": policy_id})
+    updated = await policies_col.find_one({"workspace_id": workspace_id, "policy_id": policy_id})
     return serialize_doc(updated)
 
 @app.get("/api/policies/evaluate/{inbox_id}")
-async def evaluate_policy_for_item(inbox_id: str):
+async def evaluate_policy_for_item(inbox_id: str, workspace_id: str = Depends(get_current_workspace_id)):
     """Evaluate what action a policy would take for a given inbox item."""
-    item = await inbox_col.find_one({"inbox_id": inbox_id})
+    item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
     if not item or not item.get("ai_intent"):
         return {"action": "manual_review", "reason": "No AI classification available", "escalation": None}
     
     intent = item["ai_intent"]["intent"]
     confidence = item["ai_intent"]["confidence"]
     
-    policy = await policies_col.find_one({"intent": intent, "enabled": True})
+    policy = await policies_col.find_one({"workspace_id": workspace_id, "intent": intent, "enabled": True})
     if not policy:
         return {"action": "manual_review", "reason": f"No policy defined for '{intent}'", "escalation": None}
     
@@ -1728,7 +2233,7 @@ async def evaluate_policy_for_item(inbox_id: str):
     # Check escalation rules
     escalation = None
     if resolved_action == "escalate":
-        rules = await escalation_col.find({"enabled": True}).to_list(100)
+        rules = await escalation_col.find({"workspace_id": workspace_id, "enabled": True}).to_list(100)
         for rule in rules:
             if rule["condition_type"] == "intent" and rule["condition_value"] == intent:
                 escalation = {"rule": rule["name"], "route_to": rule["route_to"], "priority": rule["priority"]}
@@ -1750,14 +2255,15 @@ async def evaluate_policy_for_item(inbox_id: str):
 
 # ─── Escalation Rules ─────────────────────────────────────────────────
 @app.get("/api/escalation-rules")
-async def get_escalation_rules():
-    rules = await escalation_col.find({}).to_list(100)
+async def get_escalation_rules(workspace_id: str = Depends(get_current_workspace_id)):
+    rules = await escalation_col.find({"workspace_id": workspace_id}).to_list(100)
     return [serialize_doc(r) for r in rules]
 
 @app.post("/api/escalation-rules")
-async def create_escalation_rule(req: EscalationRuleRequest):
+async def create_escalation_rule(req: EscalationRuleRequest, workspace_id: str = Depends(get_current_workspace_id)):
     rule = {
         "rule_id": str(uuid.uuid4()),
+        "workspace_id": workspace_id,
         "name": req.name,
         "condition_type": req.condition_type,
         "condition_value": req.condition_value,
@@ -1767,11 +2273,11 @@ async def create_escalation_rule(req: EscalationRuleRequest):
         "created_at": now_iso(),
     }
     await escalation_col.insert_one(rule)
-    await log_activity("system", "Escalation rule created", f"New rule: {req.name} → {req.route_to}", rule["rule_id"], "escalation")
+    await log_activity("system", "Escalation rule created", f"New rule: {req.name} → {req.route_to}", rule["rule_id"], "escalation", workspace_id=workspace_id)
     return serialize_doc(rule)
 
 @app.put("/api/escalation-rules/{rule_id}")
-async def update_escalation_rule(rule_id: str, req: EscalationRuleRequest):
+async def update_escalation_rule(rule_id: str, req: EscalationRuleRequest, workspace_id: str = Depends(get_current_workspace_id)):
     update = {
         "name": req.name,
         "condition_type": req.condition_type,
@@ -1781,39 +2287,41 @@ async def update_escalation_rule(rule_id: str, req: EscalationRuleRequest):
         "enabled": req.enabled,
         "updated_at": now_iso(),
     }
-    result = await escalation_col.update_one({"rule_id": rule_id}, {"$set": update})
+    result = await escalation_col.update_one({"workspace_id": workspace_id, "rule_id": rule_id}, {"$set": update})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Rule not found")
-    updated = await escalation_col.find_one({"rule_id": rule_id})
+    updated = await escalation_col.find_one({"workspace_id": workspace_id, "rule_id": rule_id})
     return serialize_doc(updated)
 
 @app.delete("/api/escalation-rules/{rule_id}")
-async def delete_escalation_rule(rule_id: str):
-    result = await escalation_col.delete_one({"rule_id": rule_id})
+async def delete_escalation_rule(rule_id: str, workspace_id: str = Depends(get_current_workspace_id)):
+    result = await escalation_col.delete_one({"workspace_id": workspace_id, "rule_id": rule_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Rule not found")
     return {"success": True}
 
 # ─── Content Templates ─────────────────────────────────────────────────
 @app.get("/api/templates")
-async def get_templates(category: Optional[str] = None):
+async def get_templates(category: Optional[str] = None, workspace_id: str = Depends(get_current_workspace_id)):
     query = {}
     if category:
         query["category"] = category
-    templates = await templates_col.find(query).sort("created_at", -1).to_list(100)
+    q = dict(query); q["workspace_id"] = workspace_id
+    templates = await templates_col.find(q).sort("created_at", -1).to_list(100)
     return [serialize_doc(t) for t in templates]
 
 @app.get("/api/templates/{template_id}")
-async def get_template(template_id: str):
-    template = await templates_col.find_one({"template_id": template_id})
+async def get_template(template_id: str, workspace_id: str = Depends(get_current_workspace_id)):
+    template = await templates_col.find_one({"workspace_id": workspace_id, "template_id": template_id})
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
     return serialize_doc(template)
 
 @app.post("/api/templates")
-async def create_template(req: ContentTemplateRequest):
+async def create_template(req: ContentTemplateRequest, workspace_id: str = Depends(get_current_workspace_id)):
     template = {
         "template_id": str(uuid.uuid4()),
+        "workspace_id": workspace_id,
         "name": req.name,
         "category": req.category,
         "template_type": req.template_type,
@@ -1826,11 +2334,11 @@ async def create_template(req: ContentTemplateRequest):
         "created_by": "user",
     }
     await templates_col.insert_one(template)
-    await log_activity("content", "Template created", f"New template: {req.name}", template["template_id"], "template")
+    await log_activity("content", "Template created", f"New template: {req.name}", template["template_id"], "template", workspace_id=workspace_id)
     return serialize_doc(template)
 
 @app.put("/api/templates/{template_id}")
-async def update_template(template_id: str, req: ContentTemplateRequest):
+async def update_template(template_id: str, req: ContentTemplateRequest, workspace_id: str = Depends(get_current_workspace_id)):
     update = {
         "name": req.name,
         "category": req.category,
@@ -1841,23 +2349,23 @@ async def update_template(template_id: str, req: ContentTemplateRequest):
         "tags": req.tags,
         "updated_at": now_iso(),
     }
-    result = await templates_col.update_one({"template_id": template_id}, {"$set": update})
+    result = await templates_col.update_one({"workspace_id": workspace_id, "template_id": template_id}, {"$set": update})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Template not found")
-    updated = await templates_col.find_one({"template_id": template_id})
+    updated = await templates_col.find_one({"workspace_id": workspace_id, "template_id": template_id})
     return serialize_doc(updated)
 
 @app.delete("/api/templates/{template_id}")
-async def delete_template(template_id: str):
-    result = await templates_col.delete_one({"template_id": template_id})
+async def delete_template(template_id: str, workspace_id: str = Depends(get_current_workspace_id)):
+    result = await templates_col.delete_one({"workspace_id": workspace_id, "template_id": template_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Template not found")
     return {"success": True}
 
-async def build_template_prompt(business_profile=None):
+async def build_template_prompt(business_profile=None, workspace_id: str = DEFAULT_WORKSPACE_ID):
     """Build template enhancement prompt with business profile context."""
     if not business_profile:
-        profile = await business_profile_col.find_one({"profile_id": "default"}, {"_id": 0})
+        profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
         business_profile = profile if profile else {"industry": "other"}
     
     industry = business_profile.get("industry", "other")
@@ -1887,9 +2395,9 @@ Respond with ONLY valid JSON (no markdown fences):
 Style: Professional, warm, trustworthy. On-brand for {industry_context}."""
 
 @app.post("/api/templates/{template_id}/generate")
-async def generate_from_template(template_id: str, req: GenerateFromTemplateRequest):
+async def generate_from_template(template_id: str, req: GenerateFromTemplateRequest, workspace_id: str = Depends(get_current_workspace_id)):
     """Generate AI-enhanced content from a template with context variables."""
-    template = await templates_col.find_one({"template_id": template_id})
+    template = await templates_col.find_one({"workspace_id": workspace_id, "template_id": template_id})
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
     
@@ -1901,7 +2409,7 @@ async def generate_from_template(template_id: str, req: GenerateFromTemplateRequ
         subject = subject.replace(f"{{{{{key}}}}}", str(value))
     
     # Use AI to enhance with business profile context
-    template_prompt = await build_template_prompt()
+    template_prompt = await build_template_prompt(workspace_id=workspace_id)
     
     chat = LlmChat(
         api_key=EMERGENT_LLM_KEY,
@@ -1973,9 +2481,9 @@ class BusinessProfileUpdate(BaseModel):
     language: Optional[str] = None  # ISO 639-1 code: 'es' | 'en' (extensible)
 
 @app.get("/api/business-profile")
-async def get_business_profile():
+async def get_business_profile(workspace_id: str = Depends(get_current_workspace_id)):
     """Get the current business profile configuration."""
-    profile = await business_profile_col.find_one({"profile_id": "default"}, {"_id": 0})
+    profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
     if not profile:
         # Return default if not found
         return {
@@ -1994,10 +2502,10 @@ async def get_business_profile():
     return serialize_doc(profile)
 
 @app.put("/api/business-profile")
-async def update_business_profile(req: BusinessProfileUpdate):
+async def update_business_profile(req: BusinessProfileUpdate, workspace_id: str = Depends(get_current_workspace_id)):
     """Update the business profile configuration."""
     # Get current profile to check if we need to generate simulation data
-    current_profile = await business_profile_col.find_one({"profile_id": "default"}, {"_id": 0})
+    current_profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
     old_simulation_mode = current_profile.get("simulation_mode", False) if current_profile else False
     old_industry = current_profile.get("industry", "other") if current_profile else "other"
     
@@ -2013,12 +2521,12 @@ async def update_business_profile(req: BusinessProfileUpdate):
         update_data["language"] = req.language
     
     result = await business_profile_col.update_one(
-        {"profile_id": "default"},
+        {"workspace_id": workspace_id},
         {"$set": update_data},
         upsert=True
     )
     
-    await log_activity("system", "Business Profile updated", f"Industry: {req.industry}, Simulation: {req.simulation_mode}", "default", "profile")
+    await log_activity("system", "Business Profile updated", f"Industry: {req.industry}, Simulation: {req.simulation_mode}", workspace_id, "profile")
 
     # Auto-generate simulation dataset when entering Simulation Mode if:
     #   (a) turning simulation ON and no simulation data exists yet, OR
@@ -2042,7 +2550,7 @@ async def update_business_profile(req: BusinessProfileUpdate):
             await generate_simulation_data(req.industry)
             await log_activity("system", "Simulation data auto-generated", f"Generated {req.industry} data", "simulation", "system")
 
-    updated = await business_profile_col.find_one({"profile_id": "default"}, {"_id": 0})
+    updated = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
     return serialize_doc(updated)
 
 # ─── Integrations Config ───────────────────────────────────────────────
@@ -2051,21 +2559,21 @@ class IntegrationUpdate(BaseModel):
     config: dict = {}
 
 @app.get("/api/integrations")
-async def get_integrations():
-    """Get all integration configurations."""
-    integrations = await integrations_config_col.find({}, {"_id": 0}).to_list(100)
+async def get_integrations(workspace_id: str = Depends(get_current_workspace_id)):
+    """Get all integration configurations for the current workspace."""
+    integrations = await integrations_config_col.find({"workspace_id": workspace_id}, {"_id": 0}).to_list(100)
     return [serialize_doc(i) for i in integrations]
 
 @app.get("/api/integrations/{provider}")
-async def get_integration(provider: str):
+async def get_integration(provider: str, workspace_id: str = Depends(get_current_workspace_id)):
     """Get a specific integration configuration."""
-    integration = await integrations_config_col.find_one({"provider": provider}, {"_id": 0})
+    integration = await integrations_config_col.find_one({"workspace_id": workspace_id, "provider": provider}, {"_id": 0})
     if not integration:
         raise HTTPException(status_code=404, detail="Integration not found")
     return serialize_doc(integration)
 
 @app.put("/api/integrations/{provider}")
-async def update_integration(provider: str, req: IntegrationUpdate):
+async def update_integration(provider: str, req: IntegrationUpdate, workspace_id: str = Depends(get_current_workspace_id)):
     """Update an integration configuration."""
     update_data = {
         "status": req.status,
@@ -2077,22 +2585,23 @@ async def update_integration(provider: str, req: IntegrationUpdate):
         update_data["last_sync_at"] = now_iso()
     
     result = await integrations_config_col.update_one(
-        {"provider": provider},
+        {"workspace_id": workspace_id, "provider": provider},
         {"$set": update_data}
     )
     
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Integration not found")
     
-    await log_activity("system", f"{provider.title()} integration updated", f"Status: {req.status}", provider, "integration")
+    await log_activity("system", f"{provider.title()} integration updated", f"Status: {req.status}", provider, "integration", workspace_id=workspace_id)
+    await log_audit(f"integration.{req.status}", f"{provider} -> {req.status}", workspace_id=workspace_id, metadata={"provider": provider})
     
-    updated = await integrations_config_col.find_one({"provider": provider}, {"_id": 0})
+    updated = await integrations_config_col.find_one({"workspace_id": workspace_id, "provider": provider}, {"_id": 0})
     return serialize_doc(updated)
 
 @app.post("/api/integrations/{provider}/test")
-async def test_integration(provider: str):
+async def test_integration(provider: str, workspace_id: str = Depends(get_current_workspace_id)):
     """Test an integration connection (simulated)."""
-    integration = await integrations_config_col.find_one({"provider": provider}, {"_id": 0})
+    integration = await integrations_config_col.find_one({"workspace_id": workspace_id, "provider": provider}, {"_id": 0})
     if not integration:
         raise HTTPException(status_code=404, detail="Integration not found")
     
@@ -2313,9 +2822,9 @@ async def generate_simulation_data(industry: str):
 
 
 @app.post("/api/simulation/generate")
-async def generate_simulation():
+async def generate_simulation(workspace_id: str = Depends(get_current_workspace_id)):
     """Generate simulation data for the current industry."""
-    profile = await business_profile_col.find_one({"profile_id": "default"}, {"_id": 0})
+    profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
     if not profile:
         raise HTTPException(status_code=404, detail="Business profile not found")
     
@@ -2331,7 +2840,7 @@ async def generate_simulation():
 
 
 @app.post("/api/simulation/clear")
-async def clear_simulation():
+async def clear_simulation(workspace_id: str = Depends(get_current_workspace_id)):
     """Clear all simulation data."""
     deleted_counts = {
         "contacts": (await contacts_col.delete_many({"is_simulation": True})).deleted_count,
@@ -2347,9 +2856,9 @@ async def clear_simulation():
 
 
 @app.get("/api/simulation/status")
-async def simulation_status():
+async def simulation_status(workspace_id: str = Depends(get_current_workspace_id)):
     """Get simulation mode status and data counts."""
-    profile = await business_profile_col.find_one({"profile_id": "default"}, {"_id": 0})
+    profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
     simulation_mode = profile.get("simulation_mode", False) if profile else False
     
     counts = {

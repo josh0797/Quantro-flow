@@ -19,6 +19,29 @@ export const translations = {
   // Español
   // ────────────────────────────────────────────────────────────
   es: {
+    // Auth (Phase 7a)
+    auth: {
+      sign_in_title: 'Bienvenido a Quantro Flow',
+      sign_in_subtitle: 'Tu Sistema Operativo de Negocios. Inicia sesión para continuar.',
+      sign_in_with_google: 'Continuar con Google',
+      signing_in: 'Iniciando sesión…',
+      signing_out: 'Cerrando sesión…',
+      signed_out_title: 'Has cerrado sesión',
+      signed_out_subtitle: 'Vuelve cuando quieras.',
+      login_failed_title: 'No se pudo iniciar sesión',
+      login_failed_desc: 'Intenta nuevamente o contacta a soporte.',
+      welcome_back: 'Bienvenido de vuelta, {{name}}',
+      logout: 'Cerrar sesión',
+      my_workspace: 'Mi Espacio de Trabajo',
+      switch_workspace: 'Cambiar de espacio',
+      active_workspace: 'Espacio activo',
+      you_are_owner: 'Propietario',
+      secure_session: 'Sesión segura',
+      secured_by: 'Seguridad administrada por Emergent',
+      no_workspace_title: 'Aún no tienes un espacio de trabajo',
+      no_workspace_subtitle: 'Crea uno para empezar a operar.',
+      new_workspace: 'Nuevo espacio',
+    },
     common: {
       loading: 'Cargando...',
       save: 'Guardar',
@@ -636,6 +659,29 @@ export const translations = {
   // English
   // ────────────────────────────────────────────────────────────
   en: {
+    // Auth (Phase 7a)
+    auth: {
+      sign_in_title: 'Welcome to Quantro Flow',
+      sign_in_subtitle: 'Your Business Operating System. Sign in to continue.',
+      sign_in_with_google: 'Continue with Google',
+      signing_in: 'Signing in…',
+      signing_out: 'Signing out…',
+      signed_out_title: 'You have been signed out',
+      signed_out_subtitle: 'Come back anytime.',
+      login_failed_title: 'Sign-in failed',
+      login_failed_desc: 'Please try again or contact support.',
+      welcome_back: 'Welcome back, {{name}}',
+      logout: 'Sign out',
+      my_workspace: 'My Workspace',
+      switch_workspace: 'Switch workspace',
+      active_workspace: 'Active workspace',
+      you_are_owner: 'Owner',
+      secure_session: 'Secure session',
+      secured_by: 'Security managed by Emergent',
+      no_workspace_title: 'No workspace yet',
+      no_workspace_subtitle: 'Create one to start operating.',
+      new_workspace: 'New workspace',
+    },
     common: {
       loading: 'Loading...',
       save: 'Save',
