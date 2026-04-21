@@ -32,11 +32,15 @@
     "status": "completed"
   },
   {
-    "content": "Test backend auth + workspace scoping (testing agent)",
-    "status": "in_progress"
+    "content": "Test backend auth + workspace scoping (testing agent) - 100% passed",
+    "status": "completed"
+  },
+  {
+    "content": "Startup safety-net: seed_workspace_config for every existing workspace - DONE",
+    "status": "completed"
   },
   {
     "content": "Test frontend login + all pages authenticated (testing agent)",
-    "status": "pending"
+    "status": "in_progress"
   }
 ]

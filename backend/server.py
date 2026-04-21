@@ -912,6 +912,14 @@ async def backfill_workspace_scoping():
             "claimed": False,
         })
 
+    # Safety net: every existing workspace must have its integrations catalog and business_profile.
+    # This heals legacy/manually-inserted workspaces that may be missing config rows.
+    all_workspaces = await workspaces_col.find({}, {"_id": 0, "workspace_id": 1}).to_list(1000)
+    for w in all_workspaces:
+        wid = w.get("workspace_id")
+        if wid:
+            await seed_workspace_config(wid)
+
 
 async def seed_workspace_config(workspace_id: str, *, industry: str = "other", language: str = "es"):
     """Create the baseline business_profile + integrations_config + policies
