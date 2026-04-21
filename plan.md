@@ -30,7 +30,11 @@
   - Simulation Mode → sandbox dataset only
   - Live Mode → real workspace dataset only (`is_simulation != True`)
   - **Zero mixing** and **zero ambiguity** about which dataset is visible.
-- Prepare for future SaaS scaling (multi-tenant, auth, RBAC, audit export) **without shipping auth yet**.
+- **Ship SaaS foundation with strict tenant isolation**:
+  - Google OAuth (Emergent Managed Google Auth)
+  - Multi-workspace per user
+  - Workspace-scoped data model across all operational and configuration collections
+  - Audit logging foundation for trust and compliance
 
 **Current status (as of this update):**
 - ✅ **Phases 1–5 complete** (Core app + workflow engine + policies/escalations + templates + auto-execution).
@@ -43,7 +47,8 @@
 - ✅ **Brand rename shipped:** **Quantro One → Quantro Flow**.
 - ✅ **Simulation Mode UX shipped:** persistent toggle in Sidebar + Settings, localized, confirmation modal on Simulation→Live, localStorage mirroring.
 - ✅ **Phase 6.10 complete:** Simulation/Live Data Wiring Hardening (**strict dataset isolation + E2E verification complete**).
-- ⏭️ Phase 7 is next **but OAuth/auth should not start until explicit user approval**.
+- ✅ **Phase 7a complete:** Auth + Workspace creation + Workspace-scoped DB (**backend 100%, frontend 100%**).
+- ⏭️ Next: **Phase 7b** (multi-workspace UX + invitations + RBAC enforcement) and **Phase 7c** (audit logs UI + export).
 
 ---
 
@@ -124,290 +129,181 @@ Transform the product from:
 into:
 - **“Quantro Flow | Business OS”** (horizontal, configurable, multi-industry)
 
-This phase remains **single-tenant** (no auth yet) but is **designed for future multi-tenant support**.
-
 #### 6.1 Global Rebranding (Quantro Flow | Business OS)
 **Status: ✅ Completed**
-
-**Scope (delivered)**
-- Replace legacy **“Realty OS” → “Business OS”**.
-- Rename product brand: **“Quantro One” → “Quantro Flow”** (no reversion).
-- Updated:
-  - Frontend i18n brand keys and marketing taglines
-  - Sidebar brand
-  - Backend health service label + FastAPI app title
-  - AI prompt persona copy
-  - Seeded activity event copy
-
-**Exit criteria**
-- ✅ Product is consistently branded as **Quantro Flow | Business OS**.
 
 #### 6.2 Business Profile (Core System Layer)
 **Status: ✅ Completed**
 
-**Goal (delivered)**
-Configurable **Business Profile** layer (single-tenant for now; workspace-scoped later).
-
 **Business Profile fields (delivered)**
-- Industry (dropdown): Real Estate, Healthcare, Consulting, E-commerce, Other
-- Use case (free text)
-- Entity naming overrides: Contacts, Team Members, Meetings, Events, Services
-- `simulation_mode` toggle (Simulation Layer)
-- `language` (NEW): `"es" | "en"`
+- Industry, Use case, Entity labels
+- `simulation_mode`
+- `language` (`"es" | "en"`)
 
-**Behavior requirements (delivered)**
-- UI labels adapt dynamically based on selected industry + naming overrides.
-- AI prompts incorporate Business Profile context for:
-  - intent classification
-  - entity extraction
-  - content generation
-- AI outputs enforce language based on Business Profile `language`.
-
-**Implementation notes (delivered)**
-- MongoDB `business_profile` document.
-- Backend endpoints:
-  - `GET /api/business-profile`
-  - `PUT /api/business-profile`
-
-**Exit criteria**
-- ✅ Changing Business Profile updates UI terminology and influences AI outputs.
+**Endpoints**
+- `GET /api/business-profile`
+- `PUT /api/business-profile`
 
 #### 6.3 Settings Section (Operational Control Center)
 **Status: ✅ Completed (production-grade + QA-validated)**
 
-**Goal (delivered)**
-Provide a SaaS-grade Settings section that functions as the **operational core** of the system.
-
-**Settings layout (delivered)**
-- **Top-of-page Simulation Mode banner** (see §6.6)
-- Tabs:
-  1) 🔌 Integrations (production-grade, input-ready)
-  2) ⚙️ Automation
-  3) 🧠 Business Profile
-  4) 👥 Workspace (includes Language selector)
-
-**Integrations tab (delivered)**
-- Implemented as a true **control center** (not placeholder):
-  - **AI & Intelligence**
-    - OpenAI / LLM Provider: API key input (**masked + eye toggle**), model selector, connect/update/test/disconnect.
-  - **Email & Calendar**
-    - Gmail: OAuth-ready connect CTA (simulated), connected-account field.
-    - Google Calendar: OAuth-ready connect CTA (simulated), calendar id field.
-  - **CRM**
-    - Provider selector (HubSpot / GoHighLevel / Pipedrive / Salesforce / Custom)
-    - Masked API key + optional base URL
-  - **Webhooks & Endpoints**
-    - Copyable inbound endpoint URL + optional shared secret
-    - Clipboard copy fallback for hardened/headless contexts
-- UX: grouped sections, status badges, timestamps, required-field validation.
-
-**Critical bug fixed (P0)**
-- Root cause: `seed_database()` gated on `inbox_col` emptiness → integrations not created on some instances → Integrations UI returned null for every card → blank panel.
-
-**Fixes applied (delivered)**
-- Backend (`server.py`):
-  - Added `DEFAULT_INTEGRATIONS_CATALOG` and `ensure_integrations_seeded()`.
-  - Runs every startup and idempotently ensures providers exist.
-  - Backfills missing `category`/`display_name` without overwriting valid config.
-- Frontend:
-  - Added `/app/frontend/src/components/IntegrationsPanel.js` with static manifest so UI never blanks.
-
-**Exit criteria**
-- ✅ Integrations never blank.
-- ✅ Providers seed correctly on legacy instances.
-- ✅ Connect/test/disconnect UX works.
-
 #### 6.4 System Health / Self-Healing Surface Layer (Trust Signal)
-**Status: ✅ Completed (verified healthy + auto-repaired states)**
-
-**Goal (delivered)**
-Turn “micro-feedback invisible → visible” and convert self-healing into brand trust.
-
-**Deliverables (delivered)**
-1) Backend health surface (`system_health_events` + `/api/system/health`)
-2) Settings → Integrations banner (`SystemStatusBanner`)
-3) Dashboard integration (`SystemHealthCard`)
-4) Optional toast (session-gated)
-
-**Exit criteria**
-- ✅ Healthy state visible in both Settings + Dashboard.
-- ✅ Auto-repair state visible with repair detail.
-- ✅ Toast fires only once per event.
+**Status: ✅ Completed**
 
 #### 6.5 Multilingual System (i18n) — OS-level capability
-**Status: ✅ Completed (ES + EN shipped, production-ready)**
-
-**Goal (delivered)**
-Lightweight, scalable i18n across core OS surfaces.
-
-**Deliverables (delivered)**
-- Single translations source: `/app/frontend/src/i18n/translations.js`
-- Global language context + persistence
-- UI migration across all major modules
-- Decision/agent key pattern
-- AI prompt language enforcement
+**Status: ✅ Completed (ES + EN shipped)**
 
 #### 6.6 Simulation Layer UX (First-class product control)
-**Status: ✅ Completed (UX shipped + visually verified)**
-
-**Goal (delivered)**
-Expose Simulation Mode as a first-class operating mode with safe switching.
-
-**Deliverables (delivered)**
-- `SimulationModeToggle` component (compact/banner/inline)
-- Sidebar + Settings placements
-- Badges + confirmation modal (Simulation → Live)
-- Persistence:
-  - localStorage mirror (`realtyos_mode`)
-  - backend `business_profile.simulation_mode`
-- Fully localized ES + EN
-
-**Verification**
-- ✅ Toggle visible in Sidebar and Settings.
-- ✅ Badge + modal behavior verified.
-- ✅ Backend persistence verified.
+**Status: ✅ Completed**
 
 #### 6.7 Data model: “Workspace-ready” scoping (single-tenant)
-**Status: 🟡 Partially complete (deferred to Phase 7 hardening)**
-
-**Goal**
-Keep DB layout compatible with future workspace scoping.
-
-**Next steps**
-- Add `workspace_id` consistently to:
-  - `integrations_config`, `business_profile`, `system_health_events`
-  - relevant operational collections
-- Default `workspace_id = "default"`.
-
-**Exit criteria**
-- No hard-coded global integration settings.
-- All config stored in workspace-compatible structure.
+**Status: ✅ Completed via Phase 7a**
 
 #### 6.8 UX Guidelines (apply throughout Phase 6)
-**Status: ✅ Completed (validated)**
-- Dark mode, premium UI.
-- Minimal layout, subtle motion.
-- Clear status indicators.
-- Settings communicates trust, safety, and control.
+**Status: ✅ Completed**
 
 #### 6.9 Testing & verification (Phase 6)
 **Status: ✅ Completed**
-- Backend Self-Healing QA
-- Frontend cross-module regression QA
-- System Health surfaces verified
-- i18n verified
-- Simulation Mode UX verified
 
 #### 6.10 Simulation/Live Data Wiring Hardening (Strict Isolation)
 **Status: ✅ Completed (P0 / critical trust requirement satisfied)**
 
-**Problem (resolved)**
-- Simulation datasets existed (`is_simulation: True`), but core endpoints returned mixed datasets.
-- Legacy seeded demo data was inserted without `is_simulation` and leaked into Live Mode.
-
-**Goals (achieved)**
-1) **Mode isolation**
-   - Simulation ON → *only* `is_simulation: True`
-   - Simulation OFF → *only* `is_simulation != True`
-2) **No leakage** across Dashboard, Smart Inbox, CRM, Schedule, Activity, AI suggestions.
-3) **Writes respect current mode** (sandbox writes in Simulation; real writes in Live).
-4) **Predictable, safe, trustworthy**: users always know what they’re seeing.
-
-**What was implemented (delivered)**
-1) **Backfill legacy seed data**
-   - Added startup migration `backfill_simulation_flag()` to tag records missing `is_simulation` as `is_simulation=True`.
-   - Collections covered: `contacts`, `inbox_items`, `calendar_events`, `agents`, `activity_events`, `content_items`, `onboarding_tasks`.
-   - Non-destructive: only updates docs where `is_simulation` is absent.
-
-2) **Centralized mode filtering in backend**
-   - Added helpers:
-     - `is_simulation_mode()`
-     - `get_mode_filter()`
-     - `merge_query(base, mode)`
-   - Applied to all operational read endpoints:
-     - `/api/inbox`, `/api/inbox/{id}`
-     - `/api/contacts`, `/api/contacts/{id}` (joins mode-scoped)
-     - `/api/calendar`
-     - `/api/activity`
-     - `/api/agents`
-     - `/api/content`
-     - `/api/dashboard/metrics` (includes `simulation_mode` field)
-     - `/api/dashboard/suggestions`
-
-3) **Tag writes with current mode**
-   - Added `is_simulation` tagging to:
-     - `POST /api/contacts`
-     - `POST /api/calendar`
-     - `POST /api/agents` (+ onboarding tasks)
-     - `POST /api/content/generate`
-     - Inbox action pipelines and auto-execution downstream artifacts (inherit mode from the triggering inbox item)
-   - `log_activity()` now tags events with `is_simulation` per current mode.
-
-4) **Non-destructive toggle behavior**
-   - Updated Business Profile PUT behavior:
-     - Simulation → Live no longer deletes sandbox data.
-     - Simulation data is preserved and instantly re-available when toggling back on.
-
-5) **Auto-seed simulation dataset on entry**
-   - When entering Simulation Mode with an empty sandbox, simulation data is auto-generated for the current industry.
-   - When industry changes while in Simulation, sandbox is regenerated to match.
-
-6) **Frontend re-fetch + Live empty-state guidance**
-   - All key pages re-fetch when `profile.simulation_mode` changes (Dashboard, Smart Inbox, CRM, Schedule, Content Engine).
-   - Added `LiveEmptyState` component with clear CTAs:
-     - **Connect integrations** (routes to Settings)
-     - **Try Simulation Mode** (enables simulation safely)
-   - Added localized shared copy keys under `simulation.live_empty_*` in `translations.js` (EN + ES).
-
-**Exit criteria (met)**
-- ✅ Simulation ON shows only simulation data everywhere.
-- ✅ Live OFF shows only real workspace data everywhere.
-- ✅ Records created in Simulation remain isolated.
-- ✅ Records created in Live remain visible only in Live.
-- ✅ No mixing in Dashboard metrics/suggestions.
-- ✅ Graceful empty states in Live mode with clear guidance.
+**Key implementation (delivered)**
+- `backfill_simulation_flag()` startup backfill
+- `get_mode_filter()` applied to all operational reads
+- Writes tagged with `is_simulation`
+- Non-destructive Simulation↔Live toggling
+- Auto-seed simulation dataset on first Simulation entry
+- Frontend re-fetch on mode change + Live empty-state guidance (`LiveEmptyState`)
 
 **Testing (completed)**
-- ✅ Backend E2E isolation suite: **100% pass** (`/app/test_reports/iteration_6.json`).
-- ✅ Frontend mode toggle + cross-module verification: **passed** (confirmation modal, persistence, empty states, no mixing).
-  - Note: a temporary false positive occurred during automated runs due to test-created live records; verified clean baseline behavior is correct.
+- Backend: **100% pass** (`/app/test_reports/iteration_6.json`).
+- Frontend: passed cross-module verification.
 
 ---
 
 ### Phase 7 — SaaS Foundation (Auth + Multi-tenant + RBAC + Audit Logs)
-**Status: 🟡 Deferred (do NOT start OAuth yet)**
 
-**Phase 7 configuration (planned)**
-- Auth provider: Google OAuth via Emergent Integration
-- Roles: Owner / Admin / Manager / Operator / Agent
-- Multi-workspace per user + invitation flow
-- Audit logs: standard (user + system)
-- Export: CSV + JSON
+#### Phase 7a — Auth + Workspace Creation + Strict Workspace Scoping
+**Status: ✅ Completed (stable; verified)**
 
-**Note**
-Phase 7 begins only after explicit user approval.
+**User-approved configuration (implemented)**
+- Auth provider: **Emergent Managed Google Auth**
+- Tenancy model: **multi-workspace per user**
+- First-time onboarding: **auto-create/claim personal workspace**
+  - First authenticated user claims legacy `workspace_id="default"` workspace (no data loss)
+  - Subsequent users get a fresh personal workspace
+
+**What was implemented (delivered)**
+1) **Auth endpoints (backend)**
+- `POST /api/auth/session` (session_id exchange)
+- `GET /api/auth/me`
+- `POST /api/auth/logout`
+- `POST /api/auth/workspaces` (create workspace)
+- `POST /api/auth/workspaces/switch` (switch current workspace)
+
+2) **Auth model (backend)**
+- Collections:
+  - `users`, `user_sessions`, `workspaces`, `workspace_members`
+
+3) **Workspace scoping (backend)**
+- Added `workspace_id` across **all operational + config** collections.
+- Startup backfill: `backfill_workspace_scoping()` tags all legacy docs as `workspace_id="default"`.
+- Read/write endpoints now scope by active workspace via `get_current_workspace_id()`.
+
+4) **Simulation isolation preserved per workspace (backend)**
+- `get_mode_filter(workspace_id)` returns `{workspace_id, is_simulation: ...}`.
+- `dashboard/metrics` includes `simulation_mode` for the **current workspace**.
+
+5) **Audit logging foundation (backend)**
+- `audit_log` collection + `log_audit()` helper.
+- Events captured at minimum for auth + integrations connect/disconnect.
+
+6) **Frontend auth (delivered)**
+- `AuthContext` + `AuthProvider`
+- `ProtectedRoute`
+- `LoginPage` + `AuthCallback`
+- Sidebar user menu (name/workspace + logout)
+
+**Important production constraint handled**
+- Due to ingress forcing `Access-Control-Allow-Origin: *` (cookie credentials blocked),
+  the frontend uses **Bearer session tokens** stored in `localStorage` (`quantro_session_token`).
+
+**Testing (completed)**
+- ✅ Backend Phase 7a suite: **100% pass** (`/app/test_reports/iteration_8.json`).
+- ✅ Frontend Phase 7a suite: **100% pass** (`/app/test_reports/iteration_9.json`).
+
+**Exit criteria (met)**
+- ✅ User can sign in via Google (Emergent-managed flow)
+- ✅ Workspace is auto-created/claimed
+- ✅ Legacy default data is preserved and associated with the claimed workspace
+- ✅ All reads/writes are strictly workspace-scoped
+- ✅ Simulation vs Live isolation remains strict inside each workspace
+
+---
+
+#### Phase 7b — Multi-workspace UX + Invitations + RBAC Enforcement
+**Status: ⏭️ Ready (requires explicit user approval to start)**
+
+**Goals**
+- Workspace switching UI (workspace selector in sidebar/settings)
+- Workspace member management UI
+- Invitation links (token-based, email-free)
+- RBAC enforcement (Owner/Admin/Manager/Operator/Agent) across backend + UI
+
+**Deliverables (planned)**
+- Backend:
+  - Invite token endpoints
+  - Membership CRUD + role assignments
+  - RBAC dependency (`require_role`) and permission matrix for endpoints
+- Frontend:
+  - Workspace switcher
+  - Members screen + role editor
+  - Invite link generation + revoke
+
+**Testing**
+- Verify strict workspace isolation under multi-workspace switching.
+- Verify permissions matrix for each role.
+
+---
+
+#### Phase 7c — Audit Logs UI + Export (CSV/JSON) + Deep Trust Events
+**Status: ⏭️ Ready (requires explicit user approval to start)**
+
+**Goals**
+- Make audit logs user-visible and exportable.
+- Capture critical trust events:
+  - Simulation↔Live toggles
+  - integrations connect/disconnect
+  - automation actions executed
+  - self-healing repair events
+
+**Deliverables (planned)**
+- Backend:
+  - `/api/audit` list endpoint (filter by date/event_type/user)
+  - `/api/audit/export` (CSV + JSON)
+  - Expand audit coverage for automation + simulation toggles + system health repairs
+- Frontend:
+  - Audit Logs screen (filters, search, pagination)
+  - Export actions
 
 ---
 
 ## 3. Next Actions
 
-**Immediate (P1):**
-1) Decide whether to begin **Phase 7** (Auth + multi-tenant + RBAC). Do not start OAuth until explicit approval.
-2) P1 hardening polish (post-isolation):
-   - Standardize decision objects to use `titleKey/summaryKey` everywhere as the decision system expands.
-   - Continue i18n microcopy completeness (placeholders/select labels) using translation keys.
+**Immediate (P0/P1):**
+1) **Hold for user approval** on whether to start:
+   - **Phase 7b** (multi-workspace UX + invitations + RBAC enforcement)
+   - OR **Phase 7c** (audit logs UI + export)
+2) Phase 7a polish (optional):
+   - Workspace switcher UI (if you want this in 7a scope, otherwise defer to 7b)
+   - Remove any remaining legacy references to `profile_id="default"` (keep backward compatibility but prefer workspace_id)
 
-**Near-term (pre-Phase 7 hardening — P1/P2):**
-3) Make operational collections and config **workspace-ready** (prepare for tenant model):
-   - Add `workspace_id` to `integrations_config`, `business_profile`, `system_health_events`, and operational collections.
-   - Default `workspace_id = "default"`.
-
-**Secondary (P2 hardening / refactor):**
-4) Refactor oversized modules to reduce complexity:
+**Secondary (P2 hardening):**
+3) Refactor oversized modules:
    - Backend: `server.py`
    - Frontend: `SmartInbox.js`, `ContentEngine.js`, `Dashboard.js`
-5) Optional: add missing detail endpoint(s) (e.g., `GET /api/calendar/{event_id}`) if needed for deep-linking.
-6) Optional: add webhook inbound handler to match displayed endpoint.
+4) Optional: add webhook inbound handler to match displayed endpoint.
 
 ---
 
@@ -438,8 +334,19 @@ Phase 7 begins only after explicit user approval.
 - ✅ Dashboard metrics + AI suggestions respect the current mode.
 - ✅ Live empty state is intentional, clean, and guides the user to connect integrations or create first records.
 
+**Phase 7a Success Criteria (Auth + Workspace + Migration + Scoping): ✅ ACHIEVED**
+- ✅ User can log in via Google (Emergent Managed Auth).
+- ✅ A workspace is automatically created/claimed.
+- ✅ Existing default data migrated/associated to that workspace.
+- ✅ All queries/writes scoped by `workspace_id`.
+- ✅ App works as before but under authenticated context.
+- ✅ No cross-workspace data leakage.
+- ✅ Simulation vs Live remains strict within each workspace.
+
 **Phase 7 Success Criteria (SaaS Foundation):**
-- Google OAuth login working end-to-end.
-- Multi-workspace support with smooth switching.
-- RBAC enforced across API + UI.
-- Audit logs filterable + exportable (CSV + JSON) with user/system attribution.
+- Phase 7b:
+  - Multi-workspace UX + invitation links
+  - RBAC enforced across API + UI
+- Phase 7c:
+  - Audit logs user-visible, filterable, and exportable (CSV + JSON)
+  - Audit coverage includes Simulation toggles, integrations connect/disconnect, automation executions, and self-healing events

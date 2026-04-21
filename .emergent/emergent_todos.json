@@ -1,46 +1,6 @@
 [
   {
-    "content": "Design data model + backend auth infrastructure",
+    "content": "Phase 7a: Complete",
     "status": "completed"
-  },
-  {
-    "content": "Backend: auth module + endpoints",
-    "status": "completed"
-  },
-  {
-    "content": "Backend: dependencies + migration backfill",
-    "status": "completed"
-  },
-  {
-    "content": "Backend: scope ALL endpoints by workspace_id",
-    "status": "completed"
-  },
-  {
-    "content": "Frontend: AuthContext + ProtectedRoute + LoginPage + AuthCallback",
-    "status": "completed"
-  },
-  {
-    "content": "Frontend: user profile + logout in sidebar",
-    "status": "completed"
-  },
-  {
-    "content": "Frontend: Bearer token flow (ingress CORS workaround) via authFetch",
-    "status": "completed"
-  },
-  {
-    "content": "i18n: login/auth/workspace keys (EN + ES)",
-    "status": "completed"
-  },
-  {
-    "content": "Test backend auth + workspace scoping (testing agent) - 100% passed",
-    "status": "completed"
-  },
-  {
-    "content": "Startup safety-net: seed_workspace_config for every existing workspace - DONE",
-    "status": "completed"
-  },
-  {
-    "content": "Test frontend login + all pages authenticated (testing agent)",
-    "status": "in_progress"
   }
 ]
