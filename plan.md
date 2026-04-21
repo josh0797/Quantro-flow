@@ -39,10 +39,10 @@
 - ✅ **Settings Operational Control Center** complete.
 - ✅ Backend integrations config is **self-healing** (auto-seeded on startup; idempotent).
 - ✅ **System Health surface layer shipped** (Settings banner + Dashboard card + repair toast + backend health endpoint/events).
-- ✅ **Multilingual i18n system shipped (ES + EN)** with global Language Context, translation keys, persistence, and AI language enforcement.
+- ✅ **Multilingual i18n system shipped** (ES + EN) with global Language Context, translation keys, persistence, and AI language enforcement.
 - ✅ **Brand rename shipped:** **Quantro One → Quantro Flow**.
 - ✅ **Simulation Mode UX shipped:** persistent toggle in Sidebar + Settings, localized, confirmation modal on Simulation→Live, localStorage mirroring.
-- 🟡 **Phase 6.10 next:** Simulation/Live Data Wiring Hardening (strict dataset isolation + E2E verification).
+- ✅ **Phase 6.10 complete:** Simulation/Live Data Wiring Hardening (**strict dataset isolation + E2E verification complete**).
 - ⏭️ Phase 7 is next **but OAuth/auth should not start until explicit user approval**.
 
 ---
@@ -299,13 +299,13 @@ Keep DB layout compatible with future workspace scoping.
 - Simulation Mode UX verified
 
 #### 6.10 Simulation/Live Data Wiring Hardening (Strict Isolation)
-**Status: 🟡 In Progress (P0 / critical trust requirement)**
+**Status: ✅ Completed (P0 / critical trust requirement satisfied)**
 
-**Problem**
-- Simulation datasets exist (`is_simulation: True`), but core endpoints currently return mixed datasets.
-- Legacy seeded demo data was inserted without `is_simulation` and therefore leaks into Live Mode.
+**Problem (resolved)**
+- Simulation datasets existed (`is_simulation: True`), but core endpoints returned mixed datasets.
+- Legacy seeded demo data was inserted without `is_simulation` and leaked into Live Mode.
 
-**Goals**
+**Goals (achieved)**
 1) **Mode isolation**
    - Simulation ON → *only* `is_simulation: True`
    - Simulation OFF → *only* `is_simulation != True`
@@ -313,50 +313,53 @@ Keep DB layout compatible with future workspace scoping.
 3) **Writes respect current mode** (sandbox writes in Simulation; real writes in Live).
 4) **Predictable, safe, trustworthy**: users always know what they’re seeing.
 
-**Implementation plan**
+**What was implemented (delivered)**
 1) **Backfill legacy seed data**
-   - Add a startup migration that marks all legacy seeded records as `is_simulation: True` where missing.
-   - Collections in scope:
-     - `contacts`, `inbox_items`, `calendar_events`, `agents`, `activity_events`, `content_templates/content` (as applicable)
-   - Non-destructive: only sets `is_simulation=True` when field is absent.
+   - Added startup migration `backfill_simulation_flag()` to tag records missing `is_simulation` as `is_simulation=True`.
+   - Collections covered: `contacts`, `inbox_items`, `calendar_events`, `agents`, `activity_events`, `content_items`, `onboarding_tasks`.
+   - Non-destructive: only updates docs where `is_simulation` is absent.
 
-2) **Centralize mode filtering in backend**
-   - Add `get_mode_filter()` helper reading `business_profile.simulation_mode` and returning:
-     - simulation: `{ "is_simulation": True }`
-     - live: `{ "is_simulation": {"$ne": True} }`
-   - Apply the filter to all relevant reads:
-     - `GET /api/inbox` (+ status filter)
-     - `GET /api/inbox/{id}`
-     - `GET /api/contacts` / `GET /api/contacts/{id}` (and related inbox/events/activity joins)
-     - `GET /api/calendar`
-     - `GET /api/activity`
-     - `GET /api/agents`
-     - `GET /api/content`
-     - `GET /api/dashboard/metrics`
-     - `GET /api/dashboard/suggestions`
-     - any other list/detail endpoints that render operational data
+2) **Centralized mode filtering in backend**
+   - Added helpers:
+     - `is_simulation_mode()`
+     - `get_mode_filter()`
+     - `merge_query(base, mode)`
+   - Applied to all operational read endpoints:
+     - `/api/inbox`, `/api/inbox/{id}`
+     - `/api/contacts`, `/api/contacts/{id}` (joins mode-scoped)
+     - `/api/calendar`
+     - `/api/activity`
+     - `/api/agents`
+     - `/api/content`
+     - `/api/dashboard/metrics` (includes `simulation_mode` field)
+     - `/api/dashboard/suggestions`
 
 3) **Tag writes with current mode**
-   - For create/update endpoints that generate new operational records:
-     - Calendar event creation
-     - Contact creation
-     - Content generation/creation
-     - Any “approve/action” pipeline steps that insert downstream artifacts
-   - Ensure new records include `is_simulation = current_mode`.
+   - Added `is_simulation` tagging to:
+     - `POST /api/contacts`
+     - `POST /api/calendar`
+     - `POST /api/agents` (+ onboarding tasks)
+     - `POST /api/content/generate`
+     - Inbox action pipelines and auto-execution downstream artifacts (inherit mode from the triggering inbox item)
+   - `log_activity()` now tags events with `is_simulation` per current mode.
 
-4) **Auto-seed simulation dataset when entering Simulation Mode**
-   - If user turns Simulation ON and no simulation data exists:
-     - generate simulation data for current industry.
-   - Ensure this does not affect Live data.
+4) **Non-destructive toggle behavior**
+   - Updated Business Profile PUT behavior:
+     - Simulation → Live no longer deletes sandbox data.
+     - Simulation data is preserved and instantly re-available when toggling back on.
 
-5) **Frontend: enforce consistent mode refresh + empty states**
-   - On toggle change, ensure all pages re-fetch data and render consistent results.
-   - Live mode with no data should show clean guidance:
-     - connect integrations
-     - or create first records manually
-   - No broken UI, no “half populated” cards.
+5) **Auto-seed simulation dataset on entry**
+   - When entering Simulation Mode with an empty sandbox, simulation data is auto-generated for the current industry.
+   - When industry changes while in Simulation, sandbox is regenerated to match.
 
-**Exit criteria**
+6) **Frontend re-fetch + Live empty-state guidance**
+   - All key pages re-fetch when `profile.simulation_mode` changes (Dashboard, Smart Inbox, CRM, Schedule, Content Engine).
+   - Added `LiveEmptyState` component with clear CTAs:
+     - **Connect integrations** (routes to Settings)
+     - **Try Simulation Mode** (enables simulation safely)
+   - Added localized shared copy keys under `simulation.live_empty_*` in `translations.js` (EN + ES).
+
+**Exit criteria (met)**
 - ✅ Simulation ON shows only simulation data everywhere.
 - ✅ Live OFF shows only real workspace data everywhere.
 - ✅ Records created in Simulation remain isolated.
@@ -364,15 +367,10 @@ Keep DB layout compatible with future workspace scoping.
 - ✅ No mixing in Dashboard metrics/suggestions.
 - ✅ Graceful empty states in Live mode with clear guidance.
 
-**Testing plan (full E2E)**
-- Backend:
-  - Validate filters per endpoint in both modes.
-  - Validate joins (e.g., contact detail includes only same-mode inbox/events/activity).
-  - Validate write tagging.
-- Frontend:
-  - Toggle Simulation ↔ Live and verify all modules update coherently:
-    - Dashboard, Smart Inbox, CRM, Schedule, Activity feed, AI suggestions.
-  - Validate empty states in Live with no real records.
+**Testing (completed)**
+- ✅ Backend E2E isolation suite: **100% pass** (`/app/test_reports/iteration_6.json`).
+- ✅ Frontend mode toggle + cross-module verification: **passed** (confirmation modal, persistence, empty states, no mixing).
+  - Note: a temporary false positive occurred during automated runs due to test-created live records; verified clean baseline behavior is correct.
 
 ---
 
@@ -393,30 +391,23 @@ Phase 7 begins only after explicit user approval.
 
 ## 3. Next Actions
 
-**Immediate (P0):**
-1) **Phase 6.10 — Simulation/Live Data Wiring Hardening**
-   - Implement strict `is_simulation` separation across backend reads/writes.
-   - Backfill legacy seeded records as simulation.
-   - Ensure toggle flips all datasets coherently.
-   - Add/verify empty states in Live mode.
-   - Run full E2E verification.
+**Immediate (P1):**
+1) Decide whether to begin **Phase 7** (Auth + multi-tenant + RBAC). Do not start OAuth until explicit approval.
+2) P1 hardening polish (post-isolation):
+   - Standardize decision objects to use `titleKey/summaryKey` everywhere as the decision system expands.
+   - Continue i18n microcopy completeness (placeholders/select labels) using translation keys.
 
-**Near-term (pre-Phase 7 hardening — P1):**
-2) Standardize decision objects to use `titleKey/summaryKey` everywhere as the decision system ships.
-3) Ensure `system_health_events`, `integrations_config`, and `business_profile` become workspace-ready once tenant model is introduced.
-4) Final microcopy polish for i18n completeness (remaining deep form placeholders and select labels) — continue using translation-key pattern.
-
-**Phase 7 kickoff (P1 — only after approval):**
-1) Confirm tenancy model + workspace scoping strategy (`workspace_id` everywhere).
-2) Implement Google OAuth login and session handling.
-3) Add workspace switching + invitation flow.
-4) Enforce RBAC on key endpoints and UI controls.
-5) Implement audit log collection + export (CSV + JSON).
+**Near-term (pre-Phase 7 hardening — P1/P2):**
+3) Make operational collections and config **workspace-ready** (prepare for tenant model):
+   - Add `workspace_id` to `integrations_config`, `business_profile`, `system_health_events`, and operational collections.
+   - Default `workspace_id = "default"`.
 
 **Secondary (P2 hardening / refactor):**
-6) Continue refactors of monolith files:
-   - `server.py`, `ContentEngine.js`, `Dashboard.js`, `SmartInbox.js`
-7) Add webhook inbound handler (optional) to match displayed endpoint.
+4) Refactor oversized modules to reduce complexity:
+   - Backend: `server.py`
+   - Frontend: `SmartInbox.js`, `ContentEngine.js`, `Dashboard.js`
+5) Optional: add missing detail endpoint(s) (e.g., `GET /api/calendar/{event_id}`) if needed for deep-linking.
+6) Optional: add webhook inbound handler to match displayed endpoint.
 
 ---
 
@@ -440,12 +431,12 @@ Phase 7 begins only after explicit user approval.
 - ✅ i18n shipped with full EN/ES coverage + persistence.
 - ✅ Simulation Mode UX shipped as a first-class control.
 
-**Phase 6.10 Success Criteria (Data Layer Isolation):**
-- Simulation Mode is a **true sandbox**: only `is_simulation: True` data is visible and writable.
-- Live Mode is a **true workspace view**: only `is_simulation != True` data is visible and writable.
-- Switching modes never deletes real data and never causes data leakage.
-- Dashboard metrics + AI suggestions respect the current mode.
-- Live empty state is intentional, clean, and guides the user to connect integrations or create first records.
+**Phase 6.10 Success Criteria (Data Layer Isolation): ✅ ACHIEVED**
+- ✅ Simulation Mode is a **true sandbox**: only `is_simulation: True` data is visible and writable.
+- ✅ Live Mode is a **true workspace view**: only `is_simulation != True` data is visible and writable.
+- ✅ Switching modes never deletes real data and never causes data leakage.
+- ✅ Dashboard metrics + AI suggestions respect the current mode.
+- ✅ Live empty state is intentional, clean, and guides the user to connect integrations or create first records.
 
 **Phase 7 Success Criteria (SaaS Foundation):**
 - Google OAuth login working end-to-end.

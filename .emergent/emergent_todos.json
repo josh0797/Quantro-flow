@@ -32,7 +32,7 @@
     "status": "completed"
   },
   {
-    "content": "Run frontend e2e tests (testing agent) for mode toggle + empty states",
-    "status": "in_progress"
+    "content": "Run frontend e2e tests (testing agent) for mode toggle + empty states - 9/9 passed (false positive on CRM was test residue; verified fixed)",
+    "status": "completed"
   }
 ]
