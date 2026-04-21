@@ -8,11 +8,11 @@
     "status": "completed"
   },
   {
-    "content": "Apply mode filter to all GET endpoints: /api/inbox, /api/inbox/{id}, /api/contacts, /api/contacts/{id}, /api/calendar, /api/activity, /api/agents, /api/content, /api/dashboard/metrics, /api/dashboard/suggestions",
+    "content": "Apply mode filter to all GET endpoints",
     "status": "completed"
   },
   {
-    "content": "Tag writes (POST /api/calendar, /api/contacts, /api/content/generate, inbox approve pipelines) with current is_simulation value",
+    "content": "Tag writes with current is_simulation value",
     "status": "completed"
   },
   {
@@ -28,11 +28,11 @@
     "status": "completed"
   },
   {
-    "content": "Run backend e2e tests (testing agent) for mode isolation",
-    "status": "in_progress"
+    "content": "Run backend e2e tests (testing agent) for mode isolation - 100% passed",
+    "status": "completed"
   },
   {
     "content": "Run frontend e2e tests (testing agent) for mode toggle + empty states",
-    "status": "pending"
+    "status": "in_progress"
   }
 ]
