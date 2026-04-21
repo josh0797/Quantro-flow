@@ -87,7 +87,7 @@ async def build_intent_prompt(business_profile=None):
     
     entity_name = labels.get("services", "property")
     
-    return f"""You are an AI assistant for Quantro One, a Business Operating System.
+    return f"""You are an AI assistant for Quantro Flow, a Business Operating System.
 The business operates in: {industry_context}.
 {_lang_directive(language)}
 
@@ -419,7 +419,7 @@ async def seed_database():
 
     # Activity events
     activity_events = [
-        {"event_id": str(uuid.uuid4()), "event_type": "system", "title": "System initialized", "description": "Quantro One OS started successfully. All services running.", "related_id": None, "related_type": None, "timestamp": now - timedelta(hours=12)},
+        {"event_id": str(uuid.uuid4()), "event_type": "system", "title": "System initialized", "description": "Quantro Flow OS started successfully. All services running.", "related_id": None, "related_type": None, "timestamp": now - timedelta(hours=12)},
         {"event_id": str(uuid.uuid4()), "event_type": "inbox", "title": "New message received", "description": "Email from Sarah Chen: Property viewing request", "related_id": inbox_items[0]["inbox_id"], "related_type": "inbox", "timestamp": now - timedelta(hours=1)},
         {"event_id": str(uuid.uuid4()), "event_type": "inbox", "title": "New message received", "description": "Email from Linda Vasquez: Urgent escalation", "related_id": inbox_items[2]["inbox_id"], "related_type": "inbox", "timestamp": now - timedelta(hours=2)},
         {"event_id": str(uuid.uuid4()), "event_type": "ai", "title": "AI processed inbox", "description": "Intent detected: follow_up for Mark Thompson's message", "related_id": inbox_items[3]["inbox_id"], "related_type": "inbox", "timestamp": now - timedelta(hours=4, minutes=50)},
@@ -652,7 +652,7 @@ async def lifespan(app: FastAPI):
     yield
     client.close()
 
-app = FastAPI(title="Quantro One | Realty OS", lifespan=lifespan)
+app = FastAPI(title="Quantro Flow | Business OS", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -665,7 +665,7 @@ app.add_middleware(
 # ─── Health ────────────────────────────────────────────────────────────
 @app.get("/api/health")
 async def health():
-    return {"status": "running", "service": "Quantro One | Business OS", "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "running", "service": "Quantro Flow | Business OS", "timestamp": datetime.utcnow().isoformat()}
 
 # ─── System Health / Self-Healing Surface ─────────────────────────────
 @app.get("/api/system/health")

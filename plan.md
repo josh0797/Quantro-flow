@@ -1,7 +1,7 @@
 # plan.md (Updated)
 
 ## 1. Objectives
-- Deliver a premium **dark-first**, OS-like SaaS web app: **Quantro One | Business OS**.
+- Deliver a premium **dark-first**, OS-like SaaS web app: **Quantro Flow | Business OS**.
 - Ship a connected, production-feeling workflow engine:
   **Smart Inbox → AI triage (single + batch) → automation policy evaluation → (auto-run OR review & control) → (simulated) Calendar/CRM updates → activity + execution trail**.
 - Maintain **multi-industry adaptability** via configuration (Business Profile) — no industry-specific rewrites.
@@ -14,7 +14,7 @@
 - Keep integrations mocked/simulated for now, but ensure the UI/UX is **production-grade** and trust-building.
 - **Expose the self-healing layer as a user-facing trust signal** (Apple/Stripe-style):
   - “System Status: Healthy / Auto‑Repaired / Degraded”
-  - “Quantro OS detects and fixes issues before you notice them.”
+  - “Quantro Flow detects and fixes issues before you notice them.”
   - Surface integrity checks + repair explanations.
 - **Ship a robust multilingual system (i18n) as an OS-level capability**, not a simple UI translation layer:
   - UI text + dashboard labels
@@ -22,6 +22,10 @@
   - Self-healing surface copy
   - Decision system (Quantro Revenue / Action Center) via **keys**, not stored translated strings
   - AI-generated content language enforced via prompt injection
+- **Ship Simulation Mode as a first-class product control (not demo data):**
+  - Simulation Mode ON: realistic, industry-specific sample dataset drives the full app.
+  - Live Mode: uses exclusively user integrations + real workspace data.
+  - Mode switching is instant, safe, and **never destroys real data**.
 - Prepare for future SaaS scaling (multi-tenant, auth, RBAC, audit export) **without shipping auth yet**.
 
 **Current status (as of this update):**
@@ -34,6 +38,8 @@
 - ✅ **System Health surface layer shipped** (Settings banner + Dashboard card + repair toast + backend health endpoint/events).
 - ✅ **Multilingual i18n system shipped (ES + EN)** with global Language Context, translation keys, persistence, and AI language enforcement.
 - ✅ **Incremental i18n migration Round 2 COMPLETE** (deep-copy migration across remaining modules).
+- ✅ **Brand rename shipped:** **Quantro One → Quantro Flow** (horizontal multi-industry positioning preserved).
+- ✅ **Simulation Mode UX shipped:** persistent toggle in Sidebar + Settings, localized, confirmation modal on Simulation→Live, localStorage mirroring.
 - 🟢 **Phase 6 complete and production-ready**.
 - ⏭️ Phase 7 is next **but OAuth/auth should not start until explicit user approval**.
 
@@ -114,30 +120,25 @@ Transform the product from:
 - “Quantro One | Realty OS” (real-estate specific)
 
 into:
-- **“Quantro One | Business OS”** (horizontal, configurable, multi-industry)
+- **“Quantro Flow | Business OS”** (horizontal, configurable, multi-industry)
 
 This phase remains **single-tenant** (no auth yet) but is **designed for future multi-tenant support**.
 
-#### 6.1 Global Rebranding (Quantro One | Business OS)
+#### 6.1 Global Rebranding (Quantro Flow | Business OS)
 **Status: ✅ Completed**
 
 **Scope (delivered)**
-- Replace all instances of **“Realty OS” → “Business OS”**.
-- Keep **“Quantro One”** as product name.
+- Replace legacy **“Realty OS” → “Business OS”**.
+- Rename product brand: **“Quantro One” → “Quantro Flow”** (no reversion to Realty OS).
 - Updated:
-  - Sidebar/header labels
-  - Dashboard headings
-  - Page titles
-  - Seeded copy made more industry-agnostic
-
-**Terminology normalization (delivered)**
-- “Agents” → **Team Members**
-- “Clients” → **Contacts**
-- “Property viewing” → **Meeting / Appointment**
-- “Open house” → **Event**
+  - Frontend i18n brand keys and marketing taglines
+  - Sidebar brand
+  - Backend health service label + FastAPI app title
+  - AI prompt persona copy
+  - Seeded activity event copy
 
 **Exit criteria**
-- ✅ No real-estate-only language remains in UI defaults.
+- ✅ Product is consistently branded as **Quantro Flow | Business OS**.
 
 #### 6.2 Business Profile (Core System Layer)
 **Status: ✅ Completed**
@@ -175,8 +176,15 @@ Configurable **Business Profile** layer (single-tenant for now; workspace-scoped
 **Goal (delivered)**
 Provide a SaaS-grade Settings section that functions as the **operational core** of the system.
 
-**Settings tabs (delivered)**
-1) 🔌 Integrations (production-grade, input-ready)
+**Settings layout (delivered)**
+- **Top-of-page Simulation Mode banner** (NEW; see §6.6)
+- Tabs:
+  1) 🔌 Integrations (production-grade, input-ready)
+  2) ⚙️ Automation
+  3) 🧠 Business Profile
+  4) 👥 Workspace (includes Language selector)
+
+**Integrations tab (delivered)**
 - Implemented as a true **control center** (not placeholder):
   - **AI & Intelligence**
     - OpenAI / LLM Provider: API key input (**masked + eye toggle**), model selector, connect/update/test/disconnect.
@@ -190,16 +198,6 @@ Provide a SaaS-grade Settings section that functions as the **operational core**
     - Copyable inbound endpoint URL + optional shared secret
     - Added **copy fallback** for hardened/headless contexts (execCommand + user-facing guidance)
 - UX: grouped sections, status badges, timestamps, required-field validation.
-
-2) ⚙️ Automation
-- Shortcut to manage Automation Policies + quick overview.
-
-3) 🧠 Business Profile
-- Industry selector, use case, entity naming, simulation mode toggle + save.
-
-4) 👥 Workspace
-- Placeholder with workspace name; Phase 7 will add multi-tenant + team management.
-- Includes **Language selector** (NEW)
 
 **Critical bug fixed (P0)**
 - Root cause: `seed_database()` gated on `inbox_col` emptiness → integrations not created on some instances → Integrations UI returned null for every card → blank panel.
@@ -224,7 +222,7 @@ Provide a SaaS-grade Settings section that functions as the **operational core**
 
 **Goal (delivered)**
 Turn “micro-feedback invisible → visible” and convert self-healing into brand trust:
-- “Quantro OS detects and fixes issues before you notice them.”
+- “Quantro Flow detects and fixes issues before you notice them.”
 
 **Deliverables (delivered)**
 1) **Backend health surface**
@@ -248,7 +246,7 @@ Turn “micro-feedback invisible → visible” and convert self-healing into br
   - **Localized via i18n**
 
 3) **Dashboard integration**
-- New `SystemHealthCard` (compact view):
+- `SystemHealthCard` (compact view):
   - Shows 3 checks and state
   - Clickable + “Details →” to Settings
   - **Localized via i18n**
@@ -302,56 +300,16 @@ Implement a scalable, lightweight i18n system that covers:
 4) **App integration**
 - `App.js` wrapped with `<LanguageProvider>` (provider wraps Sidebar + all pages).
 
-5) **UI migration — Round 1 (core surfaces)**
-Migrated to `t()`:
-- Sidebar (nav + brand + system status)
-- Dashboard header + Live/Simulation label
-- Settings title/subtitle, tabs, Automation copy, Workspace copy + embedded switcher
-- SystemHealthCard
-- IntegrationsPanel SystemStatusBanner
-- IntegrationsPanel toasts + field labels + connect CTAs
+5) **UI migration — Round 1 + Round 2**
+- All major modules migrated to `t()` (core + deep copy across remaining modules).
 
-6) **UI migration — Round 2 (deep copy across remaining modules)**
-**Status: ✅ Completed**
-
-**Translations expanded (delivered)**
-- `smart_inbox`: filters, intents, status, batch actions, toasts
-- `crm`: table headers, status labels, forms, details, toasts
-- `schedule`: sections (today/tomorrow/upcoming), form labels, status, toasts
-- `content_engine`: generate/templates/history tabs, tones, template fields, toasts
-- `onboarding`: flows/steps labels, form labels, toasts
-- `automation`: policies/escalations tabs, rule types, priorities, toasts
-- `dashboard`: AI engine labels, running/active, empty states, suggestion/activities copy
-
-**Pages migrated to `useLanguage()` + `t()` (delivered)**
-- `Schedule.js`
-- `Onboarding.js`
-- `CRM.js`
-- `AutomationPolicies.js`
-- `Dashboard.js` deep content (KPIs, Quick Actions, empty states, integration banner, mini System Health area)
-- `ContentEngine.js` (heading + critical toasts)
-- `SmartInbox.js` (heading + all critical toasts)
-
-**Verification**
-- Verified end-to-end in both ES and EN — screenshots captured for:
-  - Dashboard/Panel
-  - Smart Inbox/Bandeja Inteligente
-  - Schedule/Agenda
-  - CRM
-  - Content Engine/Motor de Contenido
-  - Automation/Automatización
-- All lint-clean; full app `esbuild` compiles cleanly.
-
-**Known deliberate exceptions (by design)**
-- Some select options / domain identifiers remain untranslated where they act as stable internal identifiers (e.g., certain rule type values). These should be surfaced via `t()` in display contexts when the decision/action center solidifies, while keeping stored values stable.
-
-7) **Agents + Decisions (pattern)**
+6) **Agents + Decisions (pattern)**
 - `translations.js` includes:
   - `decisions.revenue.raise_prices.{title,summary,impact,action_label}`
   - `agents.{pricing,retention,triage}.{label,description}`
 - Requirement met: decisions store `titleKey/summaryKey`, rendered via `t(key, variables)`.
 
-8) **AI language enforcement**
+7) **AI language enforcement**
 - Backend AI prompts inject `_lang_directive()`:
   - “Respond in Spanish/English...”
 - Applied to:
@@ -359,7 +317,47 @@ Migrated to `t()`:
   - content prompt
   - template prompt
 
-#### 6.6 Data model: “Workspace-ready” scoping (single-tenant)
+#### 6.6 Simulation Layer UX (First-class product control)
+**Status: ✅ Completed (UX shipped + visually verified)**
+
+**Goal (delivered)**
+Expose the Simulation Layer as a first-class operating mode:
+- **Simulation ON:** user experiences a fully operational OS using realistic sample data.
+- **Live:** app uses real integrations + workspace data.
+- Switching is safe and never deletes real data.
+
+**Deliverables (delivered)**
+1) **Simulation Mode toggle component**
+- New component: `/app/frontend/src/components/SimulationModeToggle.js`
+- Variants: `compact` (Sidebar), `banner` (Settings top), `inline` (utility)
+
+2) **Persistent placement**
+- Sidebar: bottom section, **above “System Running / Synced”**
+- Settings: **top of page, first section before tabs**
+
+3) **Behavior requirements**
+- Badges:
+  - ON: amber pill **● SIMULATION**
+  - OFF: green pill **● LIVE**
+- Persistence:
+  - localStorage mirror: `realtyos_mode = "simulation" | "live"`
+  - Backend sync: `business_profile.simulation_mode`
+- Confirmation modal:
+  - Only when switching **Simulation → Live**
+  - Copy: “You’re switching to Live Mode. Your real integrations and workspace data will be used. Sample data will be hidden.”
+  - Buttons: **Go Live** (primary/cyan) + **Stay in Simulation** (secondary)
+- UX: subtle, elegant amber accent (no heavy warning border flood).
+- Duplicate Simulation toggle removed from Business Profile form to avoid conflicting controls.
+- Fully localized ES + EN.
+
+**Verification**
+- ✅ Toggle visible in Sidebar.
+- ✅ Toggle visible in Settings.
+- ✅ Badge updates correctly.
+- ✅ Confirmation appears only on Simulation→Live.
+- ✅ LocalStorage and backend profile sync validated.
+
+#### 6.7 Data model: “Workspace-ready” scoping (single-tenant)
 **Status: 🟡 Partially complete (deferred to Phase 7 hardening)**
 
 **Goal**
@@ -382,39 +380,20 @@ While still single-tenant, ensure stored config is future workspace-scoped.
 - No hard-coded global integration settings.
 - All config stored in DB in a workspace-compatible structure.
 
-#### 6.7 UX Guidelines (apply throughout Phase 6)
+#### 6.8 UX Guidelines (apply throughout Phase 6)
 **Status: ✅ Completed (validated)**
 - Dark mode, premium UI.
 - Minimal layout, subtle motion.
 - Clear status indicators.
 - Settings communicates trust, safety, and control.
 
-#### 6.8 Testing & verification (Phase 6)
-**Status: ✅ Completed (Session 3C + System Health verification + i18n verification + Round 2 verification)**
-
-**Backend Self-Healing QA (7/7 PASS)**
-- Idempotency across 3 restarts (no duplicates; stable IDs)
-- Legacy repopulation (missing providers restored)
-- Partial corruption recovery (backfills metadata **without losing user status/config**)
-- Collection-missing recovery (auto-creates all providers)
-- Empty integrations + seeded inbox scenario covered
-- Unknown-provider survival (extra provider does not break system)
-- Final API returns all 5 providers
-
-**Frontend + Cross-Module Regression QA (15/15 PASS)**
-- Integrations renders 5 cards; no blank states
-- OpenAI connect/test/disconnect + eye-toggle
-- CRM provider selector options + required-field validation
-- Webhook endpoint URL shown and copy button present
-- Industry switch + terminology updates
-- Dashboard/Smart Inbox/CRM/Schedule/Content Engine load; **zero JS console errors**
-
-**System Health Surface Verification**
-- Verified healthy + repaired UI states on Settings banner + Dashboard card.
-
-**i18n Verification (Round 1 + Round 2)**
-- Verified ES default and EN switching + persistence (localStorage + backend).
-- Verified deep-copy surfaces in both ES and EN across all modules.
+#### 6.9 Testing & verification (Phase 6)
+**Status: ✅ Completed**
+- Backend Self-Healing QA (7/7 PASS)
+- Frontend cross-module regression QA (15/15 PASS)
+- System Health surfaces verified (healthy + repaired)
+- i18n verified (Round 1 + Round 2)
+- Simulation Mode UX verified (EN + ES, both placements)
 
 ---
 
@@ -436,21 +415,25 @@ Phase 7 begins only after explicit user approval.
 ## 3. Next Actions
 
 **Immediate (pre-Phase 7 hardening — P1):**
-1. Standardize decision objects to use `titleKey/summaryKey` everywhere as the decision system ships.
-2. Ensure `system_health_events`, `integrations_config`, and `business_profile` become workspace-ready once tenant model is introduced.
-3. Final microcopy polish for i18n completeness (remaining deep form placeholders and select labels) — continue using the same translation-key pattern.
+1) Ensure Simulation Mode reliably flips all pages to the correct dataset sources (no mixing):
+   - ON: show simulation datasets
+   - OFF: show real integration datasets
+   - Keep transitions instant and non-destructive.
+2) Standardize decision objects to use `titleKey/summaryKey` everywhere as the decision system ships.
+3) Ensure `system_health_events`, `integrations_config`, and `business_profile` become workspace-ready once tenant model is introduced.
+4) Final microcopy polish for i18n completeness (remaining deep form placeholders and select labels) — continue using the same translation-key pattern.
 
 **Phase 7 kickoff (P1 — only after approval):**
-1. Confirm tenancy model + workspace scoping strategy (`workspace_id` everywhere).
-2. Implement Google OAuth login and session handling.
-3. Add workspace switching + invitation flow.
-4. Enforce RBAC on key endpoints and UI controls.
-5. Implement audit log collection + export (CSV/JSON).
+1) Confirm tenancy model + workspace scoping strategy (`workspace_id` everywhere).
+2) Implement Google OAuth login and session handling.
+3) Add workspace switching + invitation flow.
+4) Enforce RBAC on key endpoints and UI controls.
+5) Implement audit log collection + export (CSV/JSON).
 
 **Secondary (P2 hardening / refactor):**
-6. Continue refactors of monolith files:
+6) Continue refactors of monolith files:
    - `server.py`, `ContentEngine.js`, `Dashboard.js`, `SmartInbox.js`
-7. Add webhook inbound handler (optional) to match displayed endpoint.
+7) Add webhook inbound handler (optional) to match displayed endpoint.
 
 ---
 
@@ -462,7 +445,7 @@ Phase 7 begins only after explicit user approval.
 - Advanced escalation safety net.
 
 **Phase 6 Success Criteria (Business OS Transformation): ✅ ACHIEVED**
-- ✅ App fully rebranded to **Quantro One | Business OS**.
+- ✅ App fully rebranded to **Quantro Flow | Business OS**.
 - ✅ Terminology industry-agnostic and configurable.
 - ✅ Business Profile drives:
   - dynamic UI labels
@@ -482,6 +465,13 @@ Phase 7 begins only after explicit user approval.
   - EN fallback + key fallback
   - AI prompt language injection
   - deep-copy coverage across all modules (Round 2 complete)
+- ✅ **Simulation Mode UX shipped** as a first-class product control:
+  - persistent toggle in Sidebar + Settings
+  - localized badges (SIMULATION/LIVE)
+  - confirmation on Simulation→Live
+  - localStorage mirroring (`realtyos_mode`)
+  - backend sync (`business_profile.simulation_mode`)
+  - visually verified
 - ✅ Session 3C QA complete with **GO** results.
 
 **Phase 7 Success Criteria (SaaS Foundation):**

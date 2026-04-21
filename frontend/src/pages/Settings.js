@@ -13,6 +13,7 @@ import { INDUSTRIES } from '../config/industryConfig';
 import { toast } from 'sonner';
 import IntegrationsPanel from '../components/IntegrationsPanel';
 import LanguageSwitcher from '../components/LanguageSwitcher';
+import SimulationModeToggle from '../components/SimulationModeToggle';
 import { useLanguage } from '../context/LanguageContext';
 
 export default function Settings() {
@@ -77,6 +78,11 @@ export default function Settings() {
             <h1 className="text-2xl font-semibold text-foreground">{t('settings.title')}</h1>
             <p className="text-sm text-muted-foreground">{t('settings.subtitle')}</p>
           </div>
+        </div>
+
+        {/* Simulation Mode — first visible section before tabs */}
+        <div data-testid="settings-simulation-banner">
+          <SimulationModeToggle variant="banner" />
         </div>
 
         {/* Tabs */}
@@ -269,32 +275,8 @@ export default function Settings() {
                   </div>
                 </div>
 
-                {/* Simulation Mode */}
-                <div className="border-t border-[hsl(var(--border))] pt-6 mt-6">
-                  <div className="flex items-start justify-between gap-4 p-4 rounded-lg bg-[hsl(var(--warning)/0.05)] border border-[hsl(var(--warning)/0.2)]">
-                    <div className="flex items-start gap-3 flex-1">
-                      <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-[hsl(var(--warning)/0.15)] shrink-0">
-                        <Zap size={18} className="text-[hsl(var(--warning))]" />
-                      </div>
-                      <div className="flex-1">
-                        <h4 className="text-sm font-semibold text-foreground mb-1">Simulation Mode</h4>
-                        <p className="text-xs text-muted-foreground">
-                          Load realistic sample operational data for your selected industry. Perfect for testing workflows, validating automations, and demoing the system before connecting live integrations.
-                        </p>
-                        {profileForm.simulation_mode && (
-                          <p className="text-xs text-[hsl(var(--warning))] mt-2">
-                            ⚡ Active: The system is populated with simulated data
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                    <Switch
-                      checked={profileForm.simulation_mode}
-                      onCheckedChange={checked => setProfileForm({...profileForm, simulation_mode: checked})}
-                      data-testid="simulation-mode-toggle"
-                    />
-                  </div>
-                </div>
+                {/* Simulation Mode is now controlled from the banner at the top of Settings
+                    and the Sidebar footer toggle — no duplicate form control here. */}
 
                 {/* Save Button */}
                 <div className="flex justify-end pt-4">

@@ -1,42 +1,30 @@
 [
   {
-    "content": "Expand translations.js with deep keys for remaining views (inbox, crm, schedule, content, onboarding, automation, dashboard)",
+    "content": "Rename 'Quantro One' → 'Quantro Flow' across the app (translations + sidebar brand)",
     "status": "completed"
   },
   {
-    "content": "Migrate Schedule.js (209 lines)",
+    "content": "Add simulation mode translations (badge, dialog, labels)",
     "status": "completed"
   },
   {
-    "content": "Migrate Onboarding.js (244 lines)",
+    "content": "Build SimulationModeToggle component (badge + dialog + localStorage sync)",
     "status": "completed"
   },
   {
-    "content": "Migrate CRM.js (328 lines)",
+    "content": "Place toggle in Sidebar (above System Running)",
     "status": "completed"
   },
   {
-    "content": "Migrate AutomationPolicies.js (421 lines)",
+    "content": "Place toggle at top of Settings (before tabs)",
     "status": "completed"
   },
   {
-    "content": "Migrate Dashboard.js deep content (KPIs, AI suggestions, quick actions, meetings)",
+    "content": "Apply subtle amber accent (no heavy border flood)",
     "status": "completed"
   },
   {
-    "content": "Migrate ContentEngine.js (687 lines)",
+    "content": "Visually verify in ES + EN via screenshot tool",
     "status": "completed"
-  },
-  {
-    "content": "Migrate SmartInbox.js (1003 lines)",
-    "status": "completed"
-  },
-  {
-    "content": "Lint + esbuild compile verify + screenshot verification (ES + EN)",
-    "status": "completed"
-  },
-  {
-    "content": "Pause for Phase 7 approval",
-    "status": "in_progress"
   }
 ]

@@ -1,5 +1,5 @@
 /**
- * Quantro OS — Single source of truth for all user-facing copy.
+ * Quantro Flow — Single source of truth for all user-facing copy.
  *
  * Conventions:
  *   - Hierarchical, dot-addressable keys resolved via t('a.b.c')
@@ -52,15 +52,36 @@ export const translations = {
       switched_to: 'Idioma cambiado a {{language}}',
     },
 
+    simulation: {
+      label: 'Modo Simulación',
+      badge_simulation: 'SIMULACIÓN',
+      badge_live: 'EN VIVO',
+      tooltip_on: 'Estás viendo datos de muestra. Desactiva para usar tus integraciones reales.',
+      tooltip_off: 'Usando datos reales de tus integraciones conectadas.',
+      banner_title: 'Modo Simulación',
+      banner_description_on:
+        'Estás explorando Quantro Flow con un conjunto de datos de muestra realista. Tus integraciones reales no están en uso todavía.',
+      banner_description_off:
+        'Quantro Flow está operando con tus integraciones reales y datos en vivo.',
+      confirm_title: 'Cambiar a Modo Live',
+      confirm_body:
+        'Vas a cambiar a Modo Live. Tus integraciones reales y los datos del workspace serán utilizados. Los datos de muestra se ocultarán.',
+      confirm_go_live: 'Activar Live',
+      confirm_stay: 'Permanecer en Simulación',
+      toast_on: 'Modo Simulación activado',
+      toast_off: 'Modo Live activado',
+      toast_failed: 'No se pudo cambiar el modo',
+    },
+
     login: {
-      title: 'Bienvenido a Quantro One',
+      title: 'Bienvenido a Quantro Flow',
       subtitle: 'Tu sistema operativo autónomo para el negocio.',
       sign_in_google: 'Iniciar sesión con Google',
       loading: 'Verificando credenciales...',
     },
 
     sidebar: {
-      brand: 'Quantro One',
+      brand: 'Quantro Flow',
       brand_subtitle: 'BUSINESS OS',
       dashboard: 'Panel',
       smart_inbox: 'Bandeja Inteligente',
@@ -111,18 +132,18 @@ export const translations = {
 
     system_health: {
       title: 'Estado del Sistema',
-      tagline: 'Quantro OS detecta y resuelve problemas antes de que los notes.',
+      tagline: 'Quantro Flow detecta y resuelve problemas antes de que los notes.',
       status_healthy: 'Sistema Saludable',
       status_repaired: 'Sistema Auto-Reparado',
       status_degraded: 'Sistema Degradado',
       all_operational: 'Todos los sistemas operativos',
       last_check: 'Última verificación: {{time}}',
       subcopy_healthy:
-        'Quantro OS mantiene activamente tus integraciones. Las inconsistencias se detectan y resuelven automáticamente.',
+        'Quantro Flow mantiene activamente tus integraciones. Las inconsistencias se detectan y resuelven automáticamente.',
       subcopy_repaired:
-        'Quantro OS detectó componentes faltantes y los reparó automáticamente.',
+        'Quantro Flow detectó componentes faltantes y los reparó automáticamente.',
       subcopy_degraded:
-        'Algunos componentes requieren atención. Quantro OS está trabajando en resolverlos.',
+        'Algunos componentes requieren atención. Quantro Flow está trabajando en resolverlos.',
       checks: {
         integrations_stable: 'Integraciones estables',
         integrations_stable_ok: '{{have}}/{{total}} proveedores registrados',
@@ -638,15 +659,36 @@ export const translations = {
       switched_to: 'Language switched to {{language}}',
     },
 
+    simulation: {
+      label: 'Simulation Mode',
+      badge_simulation: 'SIMULATION',
+      badge_live: 'LIVE',
+      tooltip_on: 'You are viewing sample data. Turn off to use your real integrations.',
+      tooltip_off: 'Using real data from your connected integrations.',
+      banner_title: 'Simulation Mode',
+      banner_description_on:
+        'You are exploring Quantro Flow with a realistic sample dataset. Your real integrations are not being used yet.',
+      banner_description_off:
+        'Quantro Flow is operating with your real integrations and live data.',
+      confirm_title: 'Switch to Live Mode',
+      confirm_body:
+        "You're switching to Live Mode. Your real integrations and workspace data will be used. Sample data will be hidden.",
+      confirm_go_live: 'Go Live',
+      confirm_stay: 'Stay in Simulation',
+      toast_on: 'Simulation Mode activated',
+      toast_off: 'Live Mode activated',
+      toast_failed: 'Failed to switch mode',
+    },
+
     login: {
-      title: 'Welcome to Quantro One',
+      title: 'Welcome to Quantro Flow',
       subtitle: 'Your autonomous operating system for business.',
       sign_in_google: 'Sign in with Google',
       loading: 'Verifying credentials...',
     },
 
     sidebar: {
-      brand: 'Quantro One',
+      brand: 'Quantro Flow',
       brand_subtitle: 'BUSINESS OS',
       dashboard: 'Dashboard',
       smart_inbox: 'Smart Inbox',
@@ -697,18 +739,18 @@ export const translations = {
 
     system_health: {
       title: 'System Health',
-      tagline: 'Quantro OS detects and fixes issues before you notice them.',
+      tagline: 'Quantro Flow detects and fixes issues before you notice them.',
       status_healthy: 'System Status: Healthy',
       status_repaired: 'System Status: Auto-Repaired',
       status_degraded: 'System Status: Degraded',
       all_operational: 'All systems operational',
       last_check: 'Last check: {{time}}',
       subcopy_healthy:
-        'Quantro OS is actively maintaining your integrations. Any inconsistencies are detected and resolved automatically.',
+        'Quantro Flow is actively maintaining your integrations. Any inconsistencies are detected and resolved automatically.',
       subcopy_repaired:
-        'Quantro OS detected missing components and repaired them automatically.',
+        'Quantro Flow detected missing components and repaired them automatically.',
       subcopy_degraded:
-        'Some components require attention. Quantro OS is working to resolve them.',
+        'Some components require attention. Quantro Flow is working to resolve them.',
       checks: {
         integrations_stable: 'Integrations stable',
         integrations_stable_ok: '{{have}}/{{total}} providers registered',

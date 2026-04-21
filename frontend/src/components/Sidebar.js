@@ -5,6 +5,7 @@ import { useState, useEffect } from 'react';
 import { getSystemStatus } from '../lib/api';
 import { useLanguage } from '../context/LanguageContext';
 import LanguageSwitcher from './LanguageSwitcher';
+import SimulationModeToggle from './SimulationModeToggle';
 
 const navItems = [
   { to: '/dashboard', icon: LayoutDashboard, labelKey: 'sidebar.dashboard', testId: 'nav-dashboard' },
@@ -101,11 +102,17 @@ export default function Sidebar() {
         })}
       </nav>
 
-      {/* Language Switcher + System Status */}
+      {/* Language Switcher + Simulation Toggle + System Status */}
       <div className="px-3 pb-4 space-y-2">
         {!collapsed && (
           <div data-testid="sidebar-language-footer" className="px-1">
             <LanguageSwitcher variant="compact" />
+          </div>
+        )}
+
+        {!collapsed && (
+          <div data-testid="sidebar-simulation-toggle">
+            <SimulationModeToggle variant="compact" />
           </div>
         )}
 
