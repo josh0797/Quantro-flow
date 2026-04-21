@@ -79,7 +79,7 @@ export default function ContentEngine() {
     }
   }, []);
 
-  useEffect(() => { fetchContent(); fetchTemplates(); }, [fetchContent, fetchTemplates]);
+  useEffect(() => { fetchContent(); fetchTemplates(); }, [fetchContent, fetchTemplates, profile?.simulation_mode]);
 
   const handleGenerate = async () => {
     if (!prompt.trim()) {

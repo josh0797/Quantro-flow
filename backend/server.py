@@ -58,6 +58,43 @@ def serialize_doc(doc):
 def now_iso():
     return datetime.utcnow()
 
+# ─── Simulation Mode Helpers (Strict Data Isolation) ──────────────────
+# These helpers are the single source of truth for deciding whether a
+# request should operate in the simulation sandbox or against the real
+# workspace. All list / detail / metrics endpoints MUST use
+# `get_mode_filter()` when querying operational collections to guarantee
+# zero data leakage between modes. All write endpoints MUST tag new
+# records with `is_simulation = await is_simulation_mode()` so they stay
+# in the correct dataset.
+async def is_simulation_mode() -> bool:
+    """Return True if the system is currently in Simulation Mode."""
+    profile = await business_profile_col.find_one(
+        {"profile_id": "default"},
+        {"_id": 0, "simulation_mode": 1},
+    )
+    return bool((profile or {}).get("simulation_mode", False))
+
+
+async def get_mode_filter() -> dict:
+    """Return the Mongo filter that isolates the current mode.
+
+    - Simulation ON  → {"is_simulation": True}
+    - Simulation OFF → {"is_simulation": {"$ne": True}}
+    """
+    if await is_simulation_mode():
+        return {"is_simulation": True}
+    return {"is_simulation": {"$ne": True}}
+
+
+def merge_query(base: dict, mode: dict) -> dict:
+    """Merge a caller-provided base query with a mode filter safely."""
+    if not base:
+        return dict(mode)
+    out = dict(base)
+    out.update(mode)
+    return out
+
+
 # ─── AI Prompts ────────────────────────────────────────────────────────
 LANGUAGE_NAMES = {"es": "Spanish", "en": "English"}
 
@@ -169,6 +206,7 @@ async def log_activity(event_type, title, description, related_id=None, related_
         "related_id": related_id,
         "related_type": related_type,
         "timestamp": now_iso(),
+        "is_simulation": await is_simulation_mode(),
     }
     await activity_col.insert_one(event)
     return event
@@ -185,6 +223,9 @@ async def execute_action_for_item(item, source="auto"):
     action_type = action["type"]
     entities = item.get("ai_intent", {}).get("entities", {})
     results = []
+    # Downstream artifacts inherit the mode of the triggering inbox item
+    # so everything remains in the correct sandbox/workspace.
+    sim_flag = bool(item.get("is_simulation", False))
     
     if action_type == "schedule_meeting":
         event = {
@@ -199,6 +240,7 @@ async def execute_action_for_item(item, source="auto"):
             "source": f"ai_{source}",
             "created_at": now_iso(),
             "contact_id": item.get("contact_id"),
+            "is_simulation": sim_flag,
         }
         await calendar_col.insert_one(event)
         await log_activity("calendar", f"Meeting auto-scheduled ({source})", f"Meeting with {item['from_name']} created automatically", event["event_id"], "calendar")
@@ -218,6 +260,7 @@ async def execute_action_for_item(item, source="auto"):
             "created_at": now_iso(),
             "updated_at": now_iso(),
             "notes": item.get("ai_intent", {}).get("summary", ""),
+            "is_simulation": sim_flag,
         }
         await contacts_col.insert_one(contact)
         await inbox_col.update_one({"inbox_id": item["inbox_id"]}, {"$set": {"contact_id": contact["contact_id"]}})
@@ -235,10 +278,11 @@ async def execute_action_for_item(item, source="auto"):
             "start_date": datetime.utcnow().isoformat(),
             "photo_url": None,
             "created_at": now_iso(),
+            "is_simulation": sim_flag,
         }
         await agents_col.insert_one(agent)
         for idx, title in enumerate(["Complete compliance training", "Set up CRM profile", "Configure email signature", "Schedule orientation with team lead", "Access granted to listing portal"]):
-            await onboarding_col.insert_one({"task_id": str(uuid.uuid4()), "agent_id": agent["agent_id"], "title": title, "description": f"Auto-generated step {idx+1}", "status": "pending", "order": idx + 1, "completed_at": None, "auto_generated": True})
+            await onboarding_col.insert_one({"task_id": str(uuid.uuid4()), "agent_id": agent["agent_id"], "title": title, "description": f"Auto-generated step {idx+1}", "status": "pending", "order": idx + 1, "completed_at": None, "auto_generated": True, "is_simulation": sim_flag})
         await log_activity("onboarding", f"Onboarding auto-started ({source})", f"Agent {agent['name']} onboarding initiated automatically", agent["agent_id"], "agent")
         results.append({"type": "agent_created", "agent_id": agent["agent_id"]})
     
@@ -644,11 +688,64 @@ async def ensure_integrations_seeded():
     if old_events:
         await system_health_col.delete_many({"_id": {"$in": [e["_id"] for e in old_events]}})
 
+# ─── Simulation Data Backfill (one-time, idempotent) ──────────────────
+# Historically, `seed_database()` inserted demo records WITHOUT the
+# `is_simulation` flag. To enforce strict Simulation vs Live isolation we
+# retro-flag any legacy record missing this field as `is_simulation=True`.
+# This runs on every startup and is a no-op once applied. Real records
+# created by the user in Live Mode always set `is_simulation=False`
+# explicitly, so they are never touched by this backfill.
+BACKFILLED_COLLECTIONS = [
+    "contacts",
+    "inbox_items",
+    "calendar_events",
+    "agents",
+    "activity_events",
+    "content_items",
+    "onboarding_tasks",
+]
+
+
+async def backfill_simulation_flag():
+    """Mark legacy un-flagged operational records as simulation data.
+
+    Only records where `is_simulation` does not exist are updated. Records
+    that already have `is_simulation: True` or `is_simulation: False` are
+    left untouched, so user-created live records remain in Live Mode."""
+    repaired = {}
+    for name in BACKFILLED_COLLECTIONS:
+        col = db[name]
+        res = await col.update_many(
+            {"is_simulation": {"$exists": False}},
+            {"$set": {"is_simulation": True}},
+        )
+        if res.modified_count:
+            repaired[name] = res.modified_count
+    if repaired:
+        try:
+            await system_health_col.insert_one({
+                "event_id": str(uuid.uuid4()),
+                "scope": "data_isolation",
+                "status": "repaired",
+                "repairs": [
+                    {"type": "simulation_flag_backfilled", "provider": k, "detail": f"{v} legacy records tagged as simulation"}
+                    for k, v in repaired.items()
+                ],
+                "repair_count": sum(repaired.values()),
+                "checked_at": datetime.utcnow(),
+            })
+        except Exception:
+            # Non-critical; ignore logging errors on startup
+            pass
+    return repaired
+
+
 # ─── Lifespan ──────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await seed_database()
     await ensure_integrations_seeded()
+    await backfill_simulation_flag()
     yield
     client.close()
 
@@ -749,15 +846,16 @@ async def system_health():
 # ─── Dashboard ─────────────────────────────────────────────────────────
 @app.get("/api/dashboard/metrics")
 async def get_dashboard_metrics():
-    total_agents = await agents_col.count_documents({})
-    active_agents = await agents_col.count_documents({"status": "active"})
-    total_contacts = await contacts_col.count_documents({})
-    total_inbox = await inbox_col.count_documents({})
-    unread_inbox = await inbox_col.count_documents({"read": False})
-    today_events = await calendar_col.count_documents({})
-    synced_contacts = await contacts_col.count_documents({"ghl_sync_status": "synced"})
-    total_content = await content_col.count_documents({})
-    
+    mode_filter = await get_mode_filter()
+    total_agents = await agents_col.count_documents(mode_filter)
+    active_agents = await agents_col.count_documents(merge_query({"status": "active"}, mode_filter))
+    total_contacts = await contacts_col.count_documents(mode_filter)
+    total_inbox = await inbox_col.count_documents(mode_filter)
+    unread_inbox = await inbox_col.count_documents(merge_query({"read": False}, mode_filter))
+    today_events = await calendar_col.count_documents(mode_filter)
+    synced_contacts = await contacts_col.count_documents(merge_query({"ghl_sync_status": "synced"}, mode_filter))
+    total_content = await content_col.count_documents(mode_filter)
+
     return {
         "agents": {"total": total_agents, "active": active_agents},
         "contacts": {"total": total_contacts, "synced": synced_contacts},
@@ -766,12 +864,14 @@ async def get_dashboard_metrics():
         "content": {"total": total_content},
         "system_status": "running",
         "last_sync": datetime.utcnow().isoformat(),
+        "simulation_mode": await is_simulation_mode(),
     }
 
 @app.get("/api/dashboard/suggestions")
 async def get_ai_suggestions():
-    unprocessed = await inbox_col.find({"status": "new", "ai_intent": None}).to_list(5)
-    processed_pending = await inbox_col.find({"status": "processed", "ai_intent": {"$ne": None}}).to_list(5)
+    mode_filter = await get_mode_filter()
+    unprocessed = await inbox_col.find(merge_query({"status": "new", "ai_intent": None}, mode_filter)).to_list(5)
+    processed_pending = await inbox_col.find(merge_query({"status": "processed", "ai_intent": {"$ne": None}}, mode_filter)).to_list(5)
     suggestions = []
     for item in unprocessed:
         suggestions.append({
@@ -798,12 +898,14 @@ async def get_inbox(status: Optional[str] = None):
     query = {}
     if status:
         query["status"] = status
-    items = await inbox_col.find(query).sort("received_at", -1).to_list(100)
+    mode_filter = await get_mode_filter()
+    items = await inbox_col.find(merge_query(query, mode_filter)).sort("received_at", -1).to_list(100)
     return [serialize_doc(item) for item in items]
 
 @app.get("/api/inbox/{inbox_id}")
 async def get_inbox_item(inbox_id: str):
-    item = await inbox_col.find_one({"inbox_id": inbox_id})
+    mode_filter = await get_mode_filter()
+    item = await inbox_col.find_one(merge_query({"inbox_id": inbox_id}, mode_filter))
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
     return serialize_doc(item)
@@ -892,6 +994,7 @@ async def approve_inbox_action(inbox_id: str):
     action = item["ai_suggested_action"]
     action_type = action["type"]
     results = []
+    sim_flag = bool(item.get("is_simulation", False))
     
     # Execute action based on type
     if action_type == "schedule_meeting":
@@ -908,6 +1011,7 @@ async def approve_inbox_action(inbox_id: str):
             "source": "ai_action",
             "created_at": now_iso(),
             "contact_id": item.get("contact_id"),
+            "is_simulation": sim_flag,
         }
         await calendar_col.insert_one(event)
         await log_activity("calendar", "Meeting scheduled", f"Meeting with {item['from_name']} created from AI action", event["event_id"], "calendar")
@@ -928,6 +1032,7 @@ async def approve_inbox_action(inbox_id: str):
             "created_at": now_iso(),
             "updated_at": now_iso(),
             "notes": item.get("ai_intent", {}).get("summary", ""),
+            "is_simulation": sim_flag,
         }
         await contacts_col.insert_one(contact)
         await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"contact_id": contact["contact_id"]}})
@@ -946,6 +1051,7 @@ async def approve_inbox_action(inbox_id: str):
             "start_date": datetime.utcnow().isoformat(),
             "photo_url": None,
             "created_at": now_iso(),
+            "is_simulation": sim_flag,
         }
         await agents_col.insert_one(agent)
         
@@ -966,6 +1072,7 @@ async def approve_inbox_action(inbox_id: str):
                 "order": i + 1,
                 "completed_at": None,
                 "auto_generated": True,
+                "is_simulation": sim_flag,
             }
             await onboarding_col.insert_one(task)
         
@@ -1127,6 +1234,7 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest):
             # Reuse the existing approve logic
             action = item["ai_suggested_action"]
             action_type = action["type"]
+            sim_flag = bool(item.get("is_simulation", False))
             
             if action_type == "schedule_meeting":
                 entities = item.get("ai_intent", {}).get("entities", {})
@@ -1142,6 +1250,7 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest):
                     "source": "ai_batch",
                     "created_at": now_iso(),
                     "contact_id": item.get("contact_id"),
+                    "is_simulation": sim_flag,
                 }
                 await calendar_col.insert_one(event)
                 await log_activity("calendar", "Meeting scheduled (batch)", f"Meeting with {item['from_name']}", event["event_id"], "calendar")
@@ -1161,6 +1270,7 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest):
                     "created_at": now_iso(),
                     "updated_at": now_iso(),
                     "notes": item.get("ai_intent", {}).get("summary", ""),
+                    "is_simulation": sim_flag,
                 }
                 await contacts_col.insert_one(contact)
                 await log_activity("crm", "Contact created (batch)", f"New contact {contact['name']}", contact["contact_id"], "contact")
@@ -1180,10 +1290,11 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest):
                     "start_date": datetime.utcnow().isoformat(),
                     "photo_url": None,
                     "created_at": now_iso(),
+                    "is_simulation": sim_flag,
                 }
                 await agents_col.insert_one(agent)
                 for idx, title in enumerate(["Complete compliance training", "Set up CRM profile", "Configure email signature", "Schedule orientation with team lead", "Access granted to listing portal"]):
-                    await onboarding_col.insert_one({"task_id": str(uuid.uuid4()), "agent_id": agent["agent_id"], "title": title, "description": f"Auto-generated step {idx+1}", "status": "pending", "order": idx + 1, "completed_at": None, "auto_generated": True})
+                    await onboarding_col.insert_one({"task_id": str(uuid.uuid4()), "agent_id": agent["agent_id"], "title": title, "description": f"Auto-generated step {idx+1}", "status": "pending", "order": idx + 1, "completed_at": None, "auto_generated": True, "is_simulation": sim_flag})
                 await log_activity("onboarding", "Onboarding started (batch)", f"Agent {agent['name']} onboarding initiated", agent["agent_id"], "agent")
             
             else:
@@ -1248,6 +1359,7 @@ async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest
     action_type = action["type"]
     entities = item.get("ai_intent", {}).get("entities", {})
     results = []
+    sim_flag = bool(item.get("is_simulation", False))
     
     if action_type == "schedule_meeting":
         event = {
@@ -1262,6 +1374,7 @@ async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest
             "source": "ai_override",
             "created_at": now_iso(),
             "contact_id": item.get("contact_id"),
+            "is_simulation": sim_flag,
         }
         await calendar_col.insert_one(event)
         await log_activity("calendar", "Meeting scheduled", f"Meeting with {item['from_name']} (with adjustments)", event["event_id"], "calendar")
@@ -1281,6 +1394,7 @@ async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest
             "created_at": now_iso(),
             "updated_at": now_iso(),
             "notes": item.get("ai_intent", {}).get("summary", ""),
+            "is_simulation": sim_flag,
         }
         await contacts_col.insert_one(contact)
         await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"contact_id": contact["contact_id"]}})
@@ -1298,10 +1412,11 @@ async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest
             "start_date": datetime.utcnow().isoformat(),
             "photo_url": None,
             "created_at": now_iso(),
+            "is_simulation": sim_flag,
         }
         await agents_col.insert_one(agent)
         for idx, title in enumerate(["Complete compliance training", "Set up CRM profile", "Configure email signature", "Schedule orientation with team lead", "Access granted to listing portal"]):
-            await onboarding_col.insert_one({"task_id": str(uuid.uuid4()), "agent_id": agent["agent_id"], "title": title, "description": f"Auto-generated step {idx+1}", "status": "pending", "order": idx + 1, "completed_at": None, "auto_generated": True})
+            await onboarding_col.insert_one({"task_id": str(uuid.uuid4()), "agent_id": agent["agent_id"], "title": title, "description": f"Auto-generated step {idx+1}", "status": "pending", "order": idx + 1, "completed_at": None, "auto_generated": True, "is_simulation": sim_flag})
         await log_activity("onboarding", "Onboarding started", f"Agent {agent['name']} onboarding initiated (with adjustments)", agent["agent_id"], "agent")
         results.append({"type": "agent_created", "agent_id": agent["agent_id"]})
     
@@ -1320,7 +1435,8 @@ async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest
 # ─── Calendar ──────────────────────────────────────────────────────────
 @app.get("/api/calendar")
 async def get_calendar_events():
-    events = await calendar_col.find({}).sort("start_time", 1).to_list(100)
+    mode_filter = await get_mode_filter()
+    events = await calendar_col.find(mode_filter).sort("start_time", 1).to_list(100)
     return [serialize_doc(e) for e in events]
 
 @app.post("/api/calendar", status_code=201)
@@ -1337,6 +1453,7 @@ async def create_calendar_event(req: CreateEventRequest):
         "source": "manual",
         "created_at": now_iso(),
         "contact_id": req.contact_id,
+        "is_simulation": await is_simulation_mode(),
     }
     await calendar_col.insert_one(event)
     await log_activity("calendar", "Event created", f"New event: {req.title}", event["event_id"], "calendar")
@@ -1355,22 +1472,22 @@ async def get_contacts(lifecycle_stage: Optional[str] = None):
     query = {}
     if lifecycle_stage:
         query["lifecycle_stage"] = lifecycle_stage
-    contacts = await contacts_col.find(query).sort("updated_at", -1).to_list(100)
+    mode_filter = await get_mode_filter()
+    contacts = await contacts_col.find(merge_query(query, mode_filter)).sort("updated_at", -1).to_list(100)
     return [serialize_doc(c) for c in contacts]
 
 @app.get("/api/contacts/{contact_id}")
 async def get_contact(contact_id: str):
-    contact = await contacts_col.find_one({"contact_id": contact_id})
+    mode_filter = await get_mode_filter()
+    contact = await contacts_col.find_one(merge_query({"contact_id": contact_id}, mode_filter))
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
-    
-    # Get related inbox items
-    inbox_items = await inbox_col.find({"contact_id": contact_id}).sort("received_at", -1).to_list(10)
-    # Get related events
-    events = await calendar_col.find({"contact_id": contact_id}).sort("start_time", -1).to_list(10)
-    # Get related activity
-    activities = await activity_col.find({"related_id": contact_id}).sort("timestamp", -1).to_list(20)
-    
+
+    # Get related inbox items (mode-scoped to prevent cross-mode leakage)
+    inbox_items = await inbox_col.find(merge_query({"contact_id": contact_id}, mode_filter)).sort("received_at", -1).to_list(10)
+    events = await calendar_col.find(merge_query({"contact_id": contact_id}, mode_filter)).sort("start_time", -1).to_list(10)
+    activities = await activity_col.find(merge_query({"related_id": contact_id}, mode_filter)).sort("timestamp", -1).to_list(20)
+
     result = serialize_doc(contact)
     result["inbox_items"] = [serialize_doc(i) for i in inbox_items]
     result["events"] = [serialize_doc(e) for e in events]
@@ -1392,6 +1509,7 @@ async def create_contact(req: CreateContactRequest):
         "created_at": now_iso(),
         "updated_at": now_iso(),
         "notes": req.notes,
+        "is_simulation": await is_simulation_mode(),
     }
     await contacts_col.insert_one(contact)
     await log_activity("crm", "Contact created", f"New contact: {req.name}", contact["contact_id"], "contact")
@@ -1400,7 +1518,8 @@ async def create_contact(req: CreateContactRequest):
 # ─── Agents ────────────────────────────────────────────────────────────
 @app.get("/api/agents")
 async def get_agents():
-    agents = await agents_col.find({}).sort("created_at", -1).to_list(100)
+    mode_filter = await get_mode_filter()
+    agents = await agents_col.find(mode_filter).sort("created_at", -1).to_list(100)
     result = []
     for agent in agents:
         a = serialize_doc(agent)
@@ -1414,6 +1533,7 @@ async def get_agents():
 
 @app.post("/api/agents")
 async def create_agent(req: CreateAgentRequest):
+    sim_flag = await is_simulation_mode()
     agent = {
         "agent_id": str(uuid.uuid4()),
         "name": req.name,
@@ -1424,6 +1544,7 @@ async def create_agent(req: CreateAgentRequest):
         "start_date": datetime.utcnow().isoformat(),
         "photo_url": None,
         "created_at": now_iso(),
+        "is_simulation": sim_flag,
     }
     await agents_col.insert_one(agent)
     
@@ -1444,6 +1565,7 @@ async def create_agent(req: CreateAgentRequest):
             "order": i + 1,
             "completed_at": None,
             "auto_generated": True,
+            "is_simulation": sim_flag,
         }
         await onboarding_col.insert_one(task)
     
@@ -1479,7 +1601,8 @@ async def get_content(content_type: Optional[str] = None):
     query = {}
     if content_type:
         query["type"] = content_type
-    items = await content_col.find(query).sort("created_at", -1).to_list(100)
+    mode_filter = await get_mode_filter()
+    items = await content_col.find(merge_query(query, mode_filter)).sort("created_at", -1).to_list(100)
     return [serialize_doc(i) for i in items]
 
 @app.post("/api/content/generate")
@@ -1500,6 +1623,7 @@ async def generate_content(req: ContentGenerateRequest):
         raise HTTPException(status_code=500, detail="AI failed to generate valid content")
     
     items_created = []
+    sim_flag = await is_simulation_mode()
     
     if req.type in ["social_post", "both"] and "social_post" in ai_result:
         social_item = {
@@ -1510,6 +1634,7 @@ async def generate_content(req: ContentGenerateRequest):
             "status": "draft",
             "created_at": now_iso(),
             "created_by": "ai",
+            "is_simulation": sim_flag,
         }
         await content_col.insert_one(social_item)
         items_created.append(serialize_doc(social_item))
@@ -1523,6 +1648,7 @@ async def generate_content(req: ContentGenerateRequest):
             "status": "draft",
             "created_at": now_iso(),
             "created_by": "ai",
+            "is_simulation": sim_flag,
         }
         await content_col.insert_one(email_item)
         items_created.append(serialize_doc(email_item))
@@ -1544,7 +1670,8 @@ async def get_activity(limit: int = Query(default=20, le=100), event_type: Optio
     query = {}
     if event_type:
         query["event_type"] = event_type
-    events = await activity_col.find(query).sort("timestamp", -1).to_list(limit)
+    mode_filter = await get_mode_filter()
+    events = await activity_col.find(merge_query(query, mode_filter)).sort("timestamp", -1).to_list(limit)
     return [serialize_doc(e) for e in events]
 
 # ─── Automation Policies ───────────────────────────────────────────────
@@ -1892,23 +2019,29 @@ async def update_business_profile(req: BusinessProfileUpdate):
     )
     
     await log_activity("system", "Business Profile updated", f"Industry: {req.industry}, Simulation: {req.simulation_mode}", "default", "profile")
-    
-    # Auto-generate simulation data if:
-    # 1. Simulation mode was just enabled, OR
-    # 2. Simulation is active and industry changed
-    if req.simulation_mode and (not old_simulation_mode or req.industry != old_industry):
-        await generate_simulation_data(req.industry)
-        await log_activity("system", "Simulation data auto-generated", f"Generated {req.industry} data", "simulation", "system")
-    
-    # Clear simulation data if simulation mode was disabled
-    if old_simulation_mode and not req.simulation_mode:
-        await contacts_col.delete_many({"is_simulation": True})
-        await inbox_col.delete_many({"is_simulation": True})
-        await calendar_col.delete_many({"is_simulation": True})
-        await agents_col.delete_many({"is_simulation": True})
-        await activity_col.delete_many({"is_simulation": True})
-        await log_activity("system", "Simulation data cleared", "Simulation mode disabled", "simulation", "system")
-    
+
+    # Auto-generate simulation dataset when entering Simulation Mode if:
+    #   (a) turning simulation ON and no simulation data exists yet, OR
+    #   (b) simulation is ON and industry changed (new-industry sandbox).
+    # Switching simulation OFF is *non-destructive*: the sandbox dataset
+    # is preserved silently and will reappear the moment the user flips
+    # Simulation back ON. This guarantees the promise: mode switching is
+    # instant, safe, and never destroys data (real OR simulation).
+    if req.simulation_mode:
+        need_regenerate = False
+        if not old_simulation_mode:
+            # Entering Simulation Mode: seed sandbox if it's empty for this industry.
+            existing_sim = await inbox_col.count_documents({"is_simulation": True})
+            if existing_sim == 0:
+                need_regenerate = True
+        elif req.industry != old_industry:
+            # Industry changed while in Simulation: regenerate sandbox to match new industry.
+            need_regenerate = True
+
+        if need_regenerate:
+            await generate_simulation_data(req.industry)
+            await log_activity("system", "Simulation data auto-generated", f"Generated {req.industry} data", "simulation", "system")
+
     updated = await business_profile_col.find_one({"profile_id": "default"}, {"_id": 0})
     return serialize_doc(updated)
 

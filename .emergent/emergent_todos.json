@@ -1,30 +1,38 @@
 [
   {
-    "content": "Rename 'Quantro One' → 'Quantro Flow' across the app (translations + sidebar brand)",
+    "content": "Add startup backfill: mark all legacy seeded records missing is_simulation as is_simulation=True",
     "status": "completed"
   },
   {
-    "content": "Add simulation mode translations (badge, dialog, labels)",
+    "content": "Add get_mode_filter() helper reading business_profile.simulation_mode",
     "status": "completed"
   },
   {
-    "content": "Build SimulationModeToggle component (badge + dialog + localStorage sync)",
+    "content": "Apply mode filter to all GET endpoints: /api/inbox, /api/inbox/{id}, /api/contacts, /api/contacts/{id}, /api/calendar, /api/activity, /api/agents, /api/content, /api/dashboard/metrics, /api/dashboard/suggestions",
     "status": "completed"
   },
   {
-    "content": "Place toggle in Sidebar (above System Running)",
+    "content": "Tag writes (POST /api/calendar, /api/contacts, /api/content/generate, inbox approve pipelines) with current is_simulation value",
     "status": "completed"
   },
   {
-    "content": "Place toggle at top of Settings (before tabs)",
+    "content": "Auto-seed simulation dataset when user toggles Simulation ON if none exists (preserve on OFF)",
     "status": "completed"
   },
   {
-    "content": "Apply subtle amber accent (no heavy border flood)",
+    "content": "Frontend: ensure mode toggle triggers page re-fetch (Dashboard, Inbox, CRM, Schedule, Content)",
     "status": "completed"
   },
   {
-    "content": "Visually verify in ES + EN via screenshot tool",
+    "content": "Add i18n empty-state copy (EN+ES) for Live mode + LiveEmptyState component wired into Inbox/CRM/Schedule",
     "status": "completed"
+  },
+  {
+    "content": "Run backend e2e tests (testing agent) for mode isolation",
+    "status": "in_progress"
+  },
+  {
+    "content": "Run frontend e2e tests (testing agent) for mode toggle + empty states",
+    "status": "pending"
   }
 ]

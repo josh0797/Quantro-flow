@@ -67,18 +67,24 @@ export default function Dashboard() {
       ]);
       setMetrics(m);
       setSimulationStatus(sim);
-      
-      // Use industry-specific activities if available, otherwise use fetched activities
-      const industryActivities = industryConfig.activities.map((act, idx) => ({
-        ...act,
-        event_id: `industry-${idx}`,
-        timestamp: new Date(Date.now() - idx * 60000).toISOString(),
-      }));
-      setActivities(industryActivities.length > 0 ? industryActivities : a);
-      
-      // Use industry-specific suggestions
-      setSuggestions(industryConfig.aiSuggestions || s);
-      
+
+      // Strict mode isolation: only fall back to industry-specific
+      // canned activities/suggestions in Simulation Mode. In Live Mode,
+      // Dashboard shows ONLY real workspace data (or empty states).
+      const inSimulation = !!profile?.simulation_mode;
+      if (inSimulation) {
+        const industryActivities = industryConfig.activities.map((act, idx) => ({
+          ...act,
+          event_id: `industry-${idx}`,
+          timestamp: new Date(Date.now() - idx * 60000).toISOString(),
+        }));
+        setActivities(industryActivities.length > 0 ? industryActivities : a);
+        setSuggestions((industryConfig.aiSuggestions && industryConfig.aiSuggestions.length > 0) ? industryConfig.aiSuggestions : s);
+      } else {
+        setActivities(a);
+        setSuggestions(s);
+      }
+
       setEvents(e);
       setIntegrations(i);
     } catch (err) {
@@ -86,15 +92,16 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }, [industryConfig]);
+  }, [industryConfig, profile?.simulation_mode]);
 
   useEffect(() => {
     if (!profileLoading) {
+      setLoading(true);
       fetchData();
       const interval = setInterval(fetchData, 15000);
       return () => clearInterval(interval);
     }
-  }, [fetchData, profileLoading]);
+  }, [fetchData, profileLoading, profile?.simulation_mode]);
 
   const todayEvents = events.filter(e => {
     try { return isToday(parseISO(e.start_time)); } catch { return false; }

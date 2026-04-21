@@ -27,6 +27,7 @@ import { format, parseISO } from 'date-fns';
 import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 import { getEntityLabel } from '../config/industryConfig';
 import { useLanguage } from '../context/LanguageContext';
+import LiveEmptyState from '../components/LiveEmptyState';
 
 // Human-friendly intent labels (no AI jargon)
 const intentConfig = {
@@ -103,11 +104,15 @@ export default function SmartInbox() {
     }
   }, [filter]);
 
+  // Re-fetch whenever Simulation Mode flips so datasets stay coherent.
   useEffect(() => {
+    setLoading(true);
+    setSelectedItem(null);
+    setSelectedIds(new Set());
     fetchInbox();
     const interval = setInterval(fetchInbox, 10000);
     return () => clearInterval(interval);
-  }, [fetchInbox]);
+  }, [fetchInbox, profile?.simulation_mode]);
 
   // Selection helpers
   const toggleSelect = (id) => {
@@ -476,6 +481,8 @@ export default function SmartInbox() {
 
 // ─── Triage View ─────────────────────────────────────────────────────
 function TriageView({ items, loading, selectedIds, toggleSelect, selectedItem, setSelectedItem, analyzing, handleAnalyze, batchProcessing }) {
+  const { profile } = useBusinessProfile();
+  const { t } = useLanguage();
   if (loading) {
     return (
       <div className="space-y-3">
@@ -485,11 +492,17 @@ function TriageView({ items, loading, selectedIds, toggleSelect, selectedItem, s
   }
 
   if (items.length === 0) {
+    // Live Mode with no real data → guide the user. Simulation Mode
+    // fallback keeps the original "all caught up" empty card.
+    if (!profile?.simulation_mode) {
+      return <LiveEmptyState moduleKey="inbox" />;
+    }
     return (
       <Card className="py-16">
         <CardContent className="text-center">
           <Mail size={40} className="mx-auto text-muted-foreground mb-3" />
-          <p className="text-sm text-muted-foreground">All caught up. The system is monitoring for new messages.</p>
+          <p className="text-sm text-muted-foreground">{t('smart_inbox.empty_state')}</p>
+          <p className="text-xs text-muted-foreground mt-1">{t('smart_inbox.empty_hint')}</p>
         </CardContent>
       </Card>
     );

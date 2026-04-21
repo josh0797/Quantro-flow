@@ -18,6 +18,7 @@ import { format, parseISO } from 'date-fns';
 import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 import { getEntityLabel } from '../config/industryConfig';
 import { useLanguage } from '../context/LanguageContext';
+import LiveEmptyState from '../components/LiveEmptyState';
 
 const lifecycleColors = {
   new: 'bg-[hsl(var(--info)/0.15)] text-[hsl(var(--info))]',
@@ -60,7 +61,7 @@ export default function CRM() {
     }
   }, [filter]);
 
-  useEffect(() => { fetchContacts(); }, [fetchContacts]);
+  useEffect(() => { fetchContacts(); }, [fetchContacts, profile?.simulation_mode]);
 
   const selectContact = async (contact) => {
     setSelectedContact(contact);
@@ -163,6 +164,10 @@ export default function CRM() {
               {loading ? (
                 <div className="p-4 space-y-3">
                   {[1,2,3,4].map(i => <Skeleton key={i} className="h-14" />)}
+                </div>
+              ) : contacts.length === 0 && !profile?.simulation_mode ? (
+                <div className="p-4">
+                  <LiveEmptyState moduleKey="crm" />
                 </div>
               ) : (
                 <Table data-testid="crm-contacts-table">

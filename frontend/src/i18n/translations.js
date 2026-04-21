@@ -71,6 +71,16 @@ export const translations = {
       toast_on: 'Modo Simulación activado',
       toast_off: 'Modo Live activado',
       toast_failed: 'No se pudo cambiar el modo',
+      // Live mode empty states (shared copy across modules)
+      live_empty_title: 'Modo Live activo',
+      live_empty_subtitle: 'Aún no hay datos reales en tu espacio de trabajo. Conecta tus integraciones o crea tu primer registro manualmente.',
+      live_empty_cta_connect: 'Conectar integraciones',
+      live_empty_cta_simulation: 'Activar Simulación para explorar',
+      live_empty_inbox: 'Tu bandeja está vacía. Conecta Gmail u otro canal para empezar a recibir mensajes reales.',
+      live_empty_crm: 'Aún no tienes contactos reales. Conecta tu CRM o agrega uno manualmente.',
+      live_empty_schedule: 'Tu calendario está vacío. Conecta Google Calendar o crea tu primer evento.',
+      live_empty_activity: 'Aún no hay actividad real. La actividad aparecerá aquí cuando empieces a operar.',
+      live_empty_content: 'Aún no hay contenido generado. Usa el Motor de Contenido para crear tu primera pieza.',
     },
 
     login: {
@@ -678,6 +688,16 @@ export const translations = {
       toast_on: 'Simulation Mode activated',
       toast_off: 'Live Mode activated',
       toast_failed: 'Failed to switch mode',
+      // Live mode empty states (shared copy across modules)
+      live_empty_title: 'Live Mode active',
+      live_empty_subtitle: 'No real workspace data yet. Connect your integrations or create your first record manually.',
+      live_empty_cta_connect: 'Connect integrations',
+      live_empty_cta_simulation: 'Try Simulation Mode',
+      live_empty_inbox: 'Your inbox is empty. Connect Gmail or another channel to start receiving real messages.',
+      live_empty_crm: 'No real contacts yet. Connect your CRM or add one manually.',
+      live_empty_schedule: 'Your calendar is empty. Connect Google Calendar or create your first event.',
+      live_empty_activity: 'No real activity yet. Activity will appear here as you start operating.',
+      live_empty_content: 'No generated content yet. Use the Content Engine to create your first piece.',
     },
 
     login: {

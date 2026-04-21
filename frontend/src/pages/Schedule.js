@@ -15,6 +15,7 @@ import { format, parseISO, isToday, isTomorrow, addDays, isBefore, isAfter, star
 import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 import { getEntityLabel, getIndustryConfig } from '../config/industryConfig';
 import { useLanguage } from '../context/LanguageContext';
+import LiveEmptyState from '../components/LiveEmptyState';
 
 export default function Schedule() {
   const { profile } = useBusinessProfile();
@@ -41,7 +42,7 @@ export default function Schedule() {
     }
   }, []);
 
-  useEffect(() => { fetchEvents(); }, [fetchEvents]);
+  useEffect(() => { fetchEvents(); }, [fetchEvents, profile?.simulation_mode]);
 
   const handleCreate = async () => {
     if (!form.title || !form.start_time || !form.end_time) {
@@ -199,6 +200,8 @@ export default function Schedule() {
         <div className="space-y-4">
           {[1,2,3].map(i => <Skeleton key={i} className="h-20 rounded-xl" />)}
         </div>
+      ) : events.length === 0 && !profile?.simulation_mode ? (
+        <LiveEmptyState moduleKey="schedule" />
       ) : (
         <div data-testid="schedule-calendar">
           <EventSection title={t('schedule.today')} events={groups.today} emptyText={t('schedule.empty_hint')} />
