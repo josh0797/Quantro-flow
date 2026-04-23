@@ -1,7 +1,7 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from './components/ui/sonner';
-import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { AuthProvider } from './contexts/AuthContext';
 import { BusinessProfileProvider } from './contexts/BusinessProfileContext';
 import { LanguageProvider } from './context/LanguageContext';
 import ProtectedRoute from './components/ProtectedRoute';
@@ -17,6 +17,7 @@ import Settings from './pages/Settings';
 import PlanAndUsage from './pages/PlanAndUsage';
 import LoginPage from './pages/LoginPage';
 import AuthCallback from './pages/AuthCallback';
+import OnboardingLite from './pages/OnboardingLite';
 import './App.css';
 
 /**
@@ -56,6 +57,17 @@ function AppRoutes() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/auth/callback" element={<AuthCallback />} />
+      {/* Onboarding-lite sits OUTSIDE the AppShell (full-screen intake) but
+          still behind auth. We pass bypassOnboarding so we don't loop on
+          ourselves when ProtectedRoute evaluates the needs_onboarding flag. */}
+      <Route
+        path="/onboarding-lite"
+        element={
+          <ProtectedRoute bypassOnboarding>
+            <OnboardingLite />
+          </ProtectedRoute>
+        }
+      />
       <Route
         path="/*"
         element={

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ShieldCheck, Sparkles, Globe, Zap, Mail, Lock, Loader2 } from 'lucide-react';
+import { ShieldCheck, Sparkles, Globe, Zap, Mail, Lock, User, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -10,17 +10,33 @@ import { Navigate } from 'react-router-dom';
 import LanguageSwitcher from '../components/LanguageSwitcher';
 
 /**
+ * Validates that a full name contains at least two whitespace-separated
+ * words (first + last name). Trims and collapses extra whitespace.
+ */
+export function isValidFullName(value) {
+  if (!value) return false;
+  const parts = String(value).trim().split(/\s+/).filter(Boolean);
+  return parts.length >= 2 && parts.every((p) => p.length >= 2);
+}
+
+/**
  * LoginPage — first surface of the authenticated product.
  *
  * Powered by Supabase Auth (email + password). Uses the SAME Supabase
  * project as the Quantro landing so sessions, profiles and AI usage are
  * shared seamlessly across the ecosystem. Users that already signed up
  * on https://quantro.technology can sign in here directly.
+ *
+ * Signup additionally collects the user's `full_name` (min 2 words),
+ * which is stored in ``user_metadata.full_name`` and later upserted into
+ * `profiles.full_name`. Right after signup the user is sent through the
+ * `/onboarding-lite` step to capture country, industry and company name.
  */
 export default function LoginPage() {
   const { t } = useLanguage();
   const { user, loading, signIn, signUp } = useAuth();
   const [mode, setMode] = useState('signin'); // 'signin' | 'signup'
+  const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -49,20 +65,29 @@ export default function LoginPage() {
       setFormError(t('auth.missing_fields'));
       return;
     }
-    if (mode === 'signup' && password.length < 8) {
-      setFormError(t('auth.password_min'));
-      return;
+    if (mode === 'signup') {
+      if (!isValidFullName(fullName)) {
+        setFormError(t('auth.full_name_invalid'));
+        return;
+      }
+      if (password.length < 8) {
+        setFormError(t('auth.password_min'));
+        return;
+      }
     }
 
     setSubmitting(true);
     try {
       if (mode === 'signin') {
         await signIn(email, password);
-        // Success → AuthContext hydrates and we redirect via <Navigate />
       } else {
-        const result = await signUp(email, password);
+        const cleanName = String(fullName).trim().replace(/\s+/g, ' ');
+        const result = await signUp(email, password, {
+          full_name: cleanName,
+          name: cleanName,
+          needs_onboarding: true,
+        });
         if (result?.session) {
-          // Signup auto-confirmed (depends on project settings).
           toast.success(t('auth.account_confirmed'));
         } else {
           toast.success(t('auth.signup_success_title'), {
@@ -141,6 +166,29 @@ export default function LoginPage() {
           </div>
 
           <div className="space-y-4">
+            {mode === 'signup' && (
+              <div className="space-y-1.5">
+                <Label htmlFor="full_name" className="text-xs text-muted-foreground">
+                  {t('auth.full_name_label')}
+                </Label>
+                <div className="relative">
+                  <User size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    id="full_name"
+                    data-testid="login-full-name-input"
+                    type="text"
+                    autoComplete="name"
+                    placeholder={t('auth.full_name_placeholder')}
+                    value={fullName}
+                    onChange={(e) => setFullName(e.target.value)}
+                    disabled={submitting}
+                    required
+                    className="pl-9 h-10 bg-[hsl(var(--surface-1))] border-[hsl(var(--border))]"
+                  />
+                </div>
+              </div>
+            )}
+
             <div className="space-y-1.5">
               <Label htmlFor="email" className="text-xs text-muted-foreground">
                 {t('auth.email_label')}

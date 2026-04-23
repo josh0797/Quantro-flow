@@ -45,6 +45,13 @@ function mapSupabaseUser(supaUser, workspaces = []) {
     name: meta.full_name || meta.name || (supaUser.email || 'User').split('@')[0],
     picture: meta.avatar_url || meta.picture || null,
     current_workspace_id: currentWs?.workspace_id || null,
+    // Onboarding hints surfaced for ProtectedRoute to decide whether to
+    // send the user through /onboarding-lite after signup.
+    needs_onboarding: meta.needs_onboarding === true,
+    country: meta.country || null,
+    industry: meta.industry || null,
+    company_name: meta.company_name || null,
+    user_metadata: meta,
   };
 }
 

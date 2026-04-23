@@ -1,58 +1,30 @@
 [
   {
-    "content": "Install dependencies: @supabase/supabase-js (frontend), PyJWT + cryptography (backend)",
+    "content": "Add full_name input (User icon + isValidFullName validation) to LoginPage signup mode",
     "status": "completed"
   },
   {
-    "content": "Add Supabase env vars to frontend .env and backend .env",
+    "content": "Update AuthContext.signUp to pass full_name metadata + mark needs_onboarding=true",
     "status": "completed"
   },
   {
-    "content": "Create /app/frontend/src/lib/supabaseClient.js",
+    "content": "Create OnboardingLite.js page with 3 questions (country, industry, company_name)",
     "status": "completed"
   },
   {
-    "content": "Rewrite AuthContext.js to use Supabase Auth (getSession + onAuthStateChange)",
+    "content": "Add /onboarding-lite route and gate ProtectedRoute on needs_onboarding flag",
     "status": "completed"
   },
   {
-    "content": "Update authFetch.js to inject Supabase access_token as Bearer",
+    "content": "Persist answers to user_metadata + best-effort upsert to profiles (full_name, country, industry, company_name)",
     "status": "completed"
   },
   {
-    "content": "Rewrite LoginPage.js for email+password (with signup option)",
+    "content": "Add i18n translations (ES/EN) for onboarding-lite",
     "status": "completed"
   },
   {
-    "content": "Update AuthCallback.js for Supabase email confirmation flow",
-    "status": "completed"
-  },
-  {
-    "content": "Update api.js: remove Emergent auth exports, add Supabase-friendly helpers",
-    "status": "completed"
-  },
-  {
-    "content": "Update Sidebar.js to use Supabase signOut via context",
-    "status": "completed"
-  },
-  {
-    "content": "Rewrite PlanAndUsage.js to query Supabase directly (profiles + ai_usage)",
-    "status": "completed"
-  },
-  {
-    "content": "Backend: add Supabase JWT verifier (HS256 legacy + ES256 JWKS) and replace get_current_user",
-    "status": "completed"
-  },
-  {
-    "content": "Backend: rewrite /api/auth/me to read from Supabase JWT + upsert user + claim workspace",
-    "status": "completed"
-  },
-  {
-    "content": "Backend: remove/deprecate /api/auth/session, /api/auth/logout endpoints",
-    "status": "completed"
-  },
-  {
-    "content": "Test: Sign in with existing Supabase account → VALIDATED by user end-to-end",
+    "content": "Verify build + screenshot test",
     "status": "completed"
   }
 ]

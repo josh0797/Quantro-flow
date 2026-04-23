@@ -5,11 +5,13 @@ import { useLanguage } from '../context/LanguageContext';
 
 /**
  * ProtectedRoute — wraps every authenticated screen.
- * - If still loading /auth/me → shows a slim skeleton.
+ * - If still hydrating session → shows a slim loader.
  * - If unauthenticated → redirects to /login (preserves the intended URL).
- * - If authenticated → renders children.
+ * - If authenticated but onboarding is still pending and we're NOT
+ *   already on /onboarding-lite → redirect there first.
+ * - Otherwise → renders children.
  */
-export default function ProtectedRoute({ children }) {
+export default function ProtectedRoute({ children, bypassOnboarding = false }) {
   const { user, loading } = useAuth();
   const { t } = useLanguage();
   const location = useLocation();
@@ -30,6 +32,14 @@ export default function ProtectedRoute({ children }) {
 
   if (!user) {
     return <Navigate to="/login" replace state={{ from: location }} />;
+  }
+
+  // Onboarding gate: freshly-signed-up users must finish the 3-question
+  // intake before reaching the main platform. Existing users (who signed
+  // up on the landing and never saw this flow) are NOT forced through it
+  // because they don't carry the `needs_onboarding` flag.
+  if (!bypassOnboarding && user.needs_onboarding && location.pathname !== '/onboarding-lite') {
+    return <Navigate to="/onboarding-lite" replace />;
   }
 
   return children;
