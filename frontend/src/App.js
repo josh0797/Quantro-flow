@@ -14,6 +14,7 @@ import Onboarding from './pages/Onboarding';
 import ContentEngine from './pages/ContentEngine';
 import AutomationPolicies from './pages/AutomationPolicies';
 import Settings from './pages/Settings';
+import PlanAndUsage from './pages/PlanAndUsage';
 import LoginPage from './pages/LoginPage';
 import AuthCallback from './pages/AuthCallback';
 import './App.css';
@@ -41,6 +42,7 @@ function AppShell() {
             <Route path="/content" element={<ContentEngine />} />
             <Route path="/automation" element={<AutomationPolicies />} />
             <Route path="/automation-policies" element={<AutomationPolicies />} />
+            <Route path="/plan" element={<PlanAndUsage />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
         </main>

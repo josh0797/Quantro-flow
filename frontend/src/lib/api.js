@@ -95,7 +95,9 @@ export const getSystemStatus = () => api.get('/system/status').then(r => r.data)
 
 // Automation Policies
 export const getPolicies = () => api.get('/policies').then(r => r.data);
+export const createPolicy = (payload) => api.post('/policies', payload).then(r => r.data);
 export const updatePolicy = (id, data) => api.put(`/policies/${id}`, data).then(r => r.data);
+export const deletePolicy = (id) => api.delete(`/policies/${id}`).then(r => r.data);
 export const evaluatePolicy = (inboxId) => api.get(`/policies/evaluate/${inboxId}`).then(r => r.data);
 
 // Escalation Rules

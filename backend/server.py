@@ -1336,6 +1336,84 @@ async def system_health(workspace_id: str = Depends(get_current_workspace_id)):
         "total_repair_events": total_repair_events,
     }
 
+# ─── Plan & Usage ──────────────────────────────────────────────────────
+@app.get("/api/usage")
+async def get_usage(workspace_id: str = Depends(get_current_workspace_id)):
+    """Return Plan + API Usage + Billing snapshot for the current workspace.
+
+    Until we wire billing/metering, we compute *this month's* API call
+    counts from activity + inbox/contact/content volumes so the UI has
+    realistic data to render. The plan + billing blocks return a default
+    'Starter (Trial)' shape that can be replaced once a Stripe (or other)
+    integration is wired up."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    scope = {"workspace_id": workspace_id}
+    month_scope = dict(scope)
+    month_scope["timestamp"] = {"$gte": start_of_month}
+
+    # Per-module "API calls" proxy — counts how many records were produced
+    # this month by each subsystem. This is illustrative only; once real
+    # metering is in place this endpoint becomes the single source of truth.
+    inbox_calls = await activity_col.count_documents(merge_query({"event_type": "inbox"}, month_scope))
+    crm_calls = await activity_col.count_documents(merge_query({"event_type": {"$in": ["crm", "calendar"]}}, month_scope))
+    content_calls = await activity_col.count_documents(merge_query({"event_type": "content"}, month_scope))
+    automation_calls = await activity_col.count_documents(merge_query({"event_type": {"$in": ["system", "onboarding"]}}, month_scope))
+    total_calls = inbox_calls + crm_calls + content_calls + automation_calls
+
+    monthly_limit = 10000  # default trial limit — can be overridden per-plan later
+    usage_percent = min(100, round((total_calls / monthly_limit) * 100, 1)) if monthly_limit else 0
+    overage = max(0, total_calls - monthly_limit)
+
+    # Breakdown with shares
+    def pct(n):
+        return round((n / total_calls) * 100, 1) if total_calls else 0
+    breakdown = [
+        {"module": "inbox_ai", "label": "Inbox AI", "calls": inbox_calls, "share": pct(inbox_calls)},
+        {"module": "crm", "label": "CRM", "calls": crm_calls, "share": pct(crm_calls)},
+        {"module": "content", "label": "Content Engine", "calls": content_calls, "share": pct(content_calls)},
+        {"module": "automations", "label": "Automations", "calls": automation_calls, "share": pct(automation_calls)},
+    ]
+
+    # Plan + billing placeholder until a real billing integration is wired.
+    workspace_doc = await workspaces_col.find_one({"workspace_id": workspace_id}, {"_id": 0}) or {}
+    trial_start = workspace_doc.get("created_at") or now
+    if isinstance(trial_start, str):
+        from datetime import datetime as _dt
+        trial_start = _dt.fromisoformat(trial_start.replace("Z", "+00:00"))
+    if trial_start.tzinfo is None:
+        trial_start = trial_start.replace(tzinfo=timezone.utc)
+    renewal = trial_start + timedelta(days=30)
+
+    return {
+        "plan": {
+            "name": "Starter",
+            "tier": "trial",
+            "status": "trial",
+            "renewal_date": renewal.isoformat(),
+            "features": ["Smart Inbox", "CRM", "Content Engine", "Automations", "Simulation Mode"],
+        },
+        "usage": {
+            "total_calls": total_calls,
+            "monthly_limit": monthly_limit,
+            "usage_percent": usage_percent,
+            "overage": overage,
+            "period_start": start_of_month.isoformat(),
+            "breakdown": breakdown,
+        },
+        "billing": {
+            "payment_method": None,  # masked last-4 once integrated (e.g. "•••• 4242")
+            "next_billing_date": renewal.isoformat(),
+            "amount_due": 0,
+            "currency": "USD",
+        },
+    }
+
+
+
+
 # ─── Dashboard ─────────────────────────────────────────────────────────
 @app.get("/api/dashboard/metrics")
 async def get_dashboard_metrics(workspace_id: str = Depends(get_current_workspace_id)):
@@ -2192,6 +2270,34 @@ async def get_activity(limit: int = Query(default=20, le=100), event_type: Optio
 async def get_policies(workspace_id: str = Depends(get_current_workspace_id)):
     policies = await policies_col.find({"workspace_id": workspace_id}).to_list(100)
     return [serialize_doc(p) for p in policies]
+
+@app.post("/api/policies")
+async def create_policy(req: AutomationPolicyRequest, workspace_id: str = Depends(get_current_workspace_id)):
+    policy = {
+        "policy_id": str(uuid.uuid4()),
+        "workspace_id": workspace_id,
+        "intent": req.intent,
+        "action": req.action,
+        "confidence_threshold_high": req.confidence_threshold_high,
+        "confidence_threshold_medium": req.confidence_threshold_medium,
+        "high_action": req.high_action,
+        "medium_action": req.medium_action,
+        "low_action": req.low_action,
+        "enabled": req.enabled,
+        "created_at": now_iso(),
+    }
+    await policies_col.insert_one(policy)
+    await log_activity("system", "Policy created", f"New automation policy for '{req.intent}'", policy["policy_id"], "policy", workspace_id=workspace_id)
+    await log_audit("policy.created", f"Created policy for intent '{req.intent}'", workspace_id=workspace_id)
+    return serialize_doc(policy)
+
+@app.delete("/api/policies/{policy_id}")
+async def delete_policy(policy_id: str, workspace_id: str = Depends(get_current_workspace_id)):
+    result = await policies_col.delete_one({"workspace_id": workspace_id, "policy_id": policy_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    await log_audit("policy.deleted", f"Deleted policy {policy_id}", workspace_id=workspace_id)
+    return {"success": True}
 
 @app.put("/api/policies/{policy_id}")
 async def update_policy(policy_id: str, req: AutomationPolicyRequest, workspace_id: str = Depends(get_current_workspace_id)):

@@ -1,6 +1,10 @@
 [
   {
-    "content": "Phase 7a: Complete",
+    "content": "Survey + i18n + Plan y Uso page + Sidebar + Automation rewrite",
     "status": "completed"
+  },
+  {
+    "content": "Run frontend testing agent for Plan y Uso, Sidebar menu, Automation CRUD",
+    "status": "in_progress"
   }
 ]

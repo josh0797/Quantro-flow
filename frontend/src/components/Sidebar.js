@@ -1,6 +1,6 @@
 import React from 'react';
-import { NavLink, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Inbox, Calendar, Users, UserPlus, PenTool, ChevronLeft, ChevronRight, Zap, Bot, Settings, LogOut } from 'lucide-react';
+import { NavLink, useLocation, useNavigate } from 'react-router-dom';
+import { LayoutDashboard, Inbox, Calendar, Users, UserPlus, PenTool, ChevronLeft, ChevronRight, Zap, Bot, Settings, LogOut, Receipt, UserCircle } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { getSystemStatus } from '../lib/api';
 import { useLanguage } from '../context/LanguageContext';
@@ -26,6 +26,7 @@ const navItems = [
   { to: '/onboarding', icon: UserPlus, labelKey: 'sidebar.onboarding', testId: 'nav-onboarding' },
   { to: '/content', icon: PenTool, labelKey: 'sidebar.content_engine', testId: 'nav-content-engine' },
   { to: '/automation', icon: Bot, labelKey: 'sidebar.automation', testId: 'nav-automation' },
+  { to: '/plan', icon: Receipt, labelKey: 'plan_usage.nav_label', testId: 'nav-plan-usage' },
   { to: '/settings', icon: Settings, labelKey: 'sidebar.settings', testId: 'nav-settings' },
 ];
 
@@ -34,6 +35,7 @@ export default function Sidebar() {
   const [systemStatus, setSystemStatus] = useState(null);
   const [integrationStatus, setIntegrationStatus] = useState({});
   const location = useLocation();
+  const navigate = useNavigate();
   const { t } = useLanguage();
   const { user, workspaces, logout } = useAuth();
 
@@ -202,13 +204,28 @@ export default function Sidebar() {
                 </div>
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent side="top" align="start" className="w-56" data-testid="sidebar-user-menu">
+            <DropdownMenuContent side="top" align="start" className="w-60" data-testid="sidebar-user-menu">
               <DropdownMenuLabel>
                 <div className="flex flex-col">
                   <span className="text-xs font-medium truncate">{user.name}</span>
                   <span className="text-[10px] text-muted-foreground truncate">{user.email}</span>
                 </div>
               </DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                data-testid="sidebar-menu-view-account"
+                onClick={() => navigate('/plan')}
+              >
+                <UserCircle size={14} className="mr-2" />
+                {t('plan_usage.view_account')}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                data-testid="sidebar-menu-plan-usage"
+                onClick={() => navigate('/plan')}
+              >
+                <Receipt size={14} className="mr-2" />
+                {t('plan_usage.nav_label')}
+              </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={handleLogout} data-testid="sidebar-logout-btn" className="text-[hsl(var(--destructive))]">
                 <LogOut size={14} className="mr-2" />
