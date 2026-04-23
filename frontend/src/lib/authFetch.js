@@ -1,14 +1,25 @@
-import { getStoredToken } from './api';
+import { supabase } from './supabaseClient';
 
 /**
- * authFetch — drop-in replacement for fetch() that attaches the
- * Bearer session token automatically. Components that previously used
- * raw fetch() (e.g., BusinessProfileContext, Sidebar, IntegrationsPanel)
- * use this to stay authenticated without manually wiring each request.
+ * authFetch — drop-in replacement for fetch() that attaches the current
+ * Supabase access token as a Bearer header. Components that previously used
+ * raw fetch() (BusinessProfileContext, Sidebar, IntegrationsPanel) use this
+ * to stay authenticated without wiring each request manually.
+ *
+ * Implementation note: we call supabase.auth.getSession() inside the
+ * wrapper so token refresh is picked up automatically without needing a
+ * re-render or an explicit event. @supabase/supabase-js caches the
+ * session in memory so this is effectively a synchronous lookup.
  */
 export async function authFetch(url, options = {}) {
   const headers = { ...(options.headers || {}) };
-  const token = getStoredToken();
+  let token = null;
+  try {
+    const { data } = await supabase.auth.getSession();
+    token = data?.session?.access_token || null;
+  } catch (_) {
+    token = null;
+  }
   if (token) {
     headers.Authorization = `Bearer ${token}`;
   }

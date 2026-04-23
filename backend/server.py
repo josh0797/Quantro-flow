@@ -1,12 +1,15 @@
 import os
 import uuid
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 load_dotenv()
 
 import httpx
+import jwt as pyjwt
+from jwt import PyJWKClient, InvalidTokenError, ExpiredSignatureError
 from fastapi import FastAPI, HTTPException, Query, Request, Response, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -18,9 +21,33 @@ from emergentintegrations.llm.chat import LlmChat, UserMessage
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
 DB_NAME = os.environ.get("DB_NAME", "quantro_os")
 EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
-EMERGENT_AUTH_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
-SESSION_COOKIE_NAME = "session_token"
-SESSION_TTL_DAYS = 7
+
+# ─── Supabase Auth (shared project with the Quantro landing) ──────────
+# The frontend signs users in through Supabase Auth; we simply verify the
+# JWT here. We support BOTH signing methods Supabase is currently using
+# for this project:
+#   • Current key  → ECC (P-256) via JWKS (ES256)
+#   • Previous key → Legacy HS256 shared secret
+# This dual verification means tokens issued before or after a key rotation
+# keep working without user impact.
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
+SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET", "")
+SUPABASE_JWKS_URL = f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json" if SUPABASE_URL else ""
+
+# Lazy JWKS client (PyJWT caches keys in memory for us).
+_jwks_client: Optional[PyJWKClient] = None
+
+def _get_jwks_client() -> Optional[PyJWKClient]:
+    global _jwks_client
+    if not SUPABASE_JWKS_URL:
+        return None
+    if _jwks_client is None:
+        try:
+            _jwks_client = PyJWKClient(SUPABASE_JWKS_URL, cache_keys=True, lifespan=3600)
+        except Exception:
+            _jwks_client = None
+    return _jwks_client
 
 # ─── MongoDB ───────────────────────────────────────────────────────────
 client = AsyncIOMotorClient(MONGO_URL)
@@ -74,7 +101,7 @@ def now_iso():
     return datetime.utcnow()
 
 
-# ─── Auth & Workspace (Phase 7a) ──────────────────────────────────────
+# ─── Auth & Workspace (Supabase-backed) ───────────────────────────────
 class User(BaseModel):
     user_id: str
     email: str
@@ -83,46 +110,169 @@ class User(BaseModel):
     current_workspace_id: Optional[str] = None
 
 
-def _coerce_expiry(expires_at):
-    """Return a timezone-aware UTC datetime from either str or datetime."""
-    if isinstance(expires_at, str):
-        expires_at = datetime.fromisoformat(expires_at)
-    if expires_at is not None and expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    return expires_at
+def _extract_bearer_token(request: Request) -> Optional[str]:
+    """Pull a Bearer token from the Authorization header (Supabase access token).
 
-
-async def _extract_session_token(request: Request) -> Optional[str]:
-    token = request.cookies.get(SESSION_COOKIE_NAME)
-    if token:
-        return token
+    Frontend also attaches the Supabase session via authFetch/axios. We no longer
+    accept cookies because the entire ecosystem standardised on Supabase Bearer
+    tokens (shared with the landing page)."""
     auth = request.headers.get("authorization") or request.headers.get("Authorization")
     if auth and auth.lower().startswith("bearer "):
         return auth.split(" ", 1)[1].strip()
     return None
 
 
-async def get_current_user(request: Request) -> User:
-    """FastAPI dependency: resolve the authenticated user from a session cookie.
+def _verify_supabase_jwt(token: str) -> dict:
+    """Verify a Supabase JWT and return its claims dict.
 
-    Raises 401 if session is missing/expired/invalid. Every workspace-scoped
-    endpoint depends on this (directly or via get_current_workspace_id)."""
-    token = await _extract_session_token(request)
+    Strategy (in order):
+      1. Inspect the unverified header. If ``alg`` is an asymmetric algorithm
+         (ES256/RS256/EdDSA), fetch the matching public key from the project's
+         JWKS endpoint and verify with it.
+      2. If ``alg`` is HS256 (legacy shared-secret tokens) verify with the
+         project's SUPABASE_JWT_SECRET.
+      3. Otherwise, fall back to trying both paths in sequence so we never
+         lock out a user during a Supabase signing-key rotation.
+
+    Raises HTTPException(401) if the token is invalid/expired.
+    """
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
-    session_doc = await user_sessions_col.find_one({"session_token": token}, {"_id": 0})
-    if not session_doc:
-        raise HTTPException(status_code=401, detail="Invalid session")
+    try:
+        header = pyjwt.get_unverified_header(token)
+    except InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Malformed token")
 
-    expires_at = _coerce_expiry(session_doc.get("expires_at"))
-    if expires_at and expires_at < datetime.now(timezone.utc):
+    alg = (header.get("alg") or "").upper()
+    # Decode options: Supabase issues `aud: "authenticated"` for signed-in users.
+    decode_kwargs = dict(
+        audience="authenticated",
+        options={"verify_aud": True, "require": ["exp", "sub"]},
+        leeway=5,
+    )
+
+    last_err: Optional[Exception] = None
+
+    def _try_jwks():
+        client = _get_jwks_client()
+        if not client:
+            raise RuntimeError("JWKS client unavailable")
+        signing_key = client.get_signing_key_from_jwt(token).key
+        return pyjwt.decode(token, signing_key, algorithms=[alg or "ES256", "RS256", "EdDSA"], **decode_kwargs)
+
+    def _try_hs256():
+        if not SUPABASE_JWT_SECRET:
+            raise RuntimeError("JWT secret unavailable")
+        return pyjwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"], **decode_kwargs)
+
+    # Primary path based on header alg.
+    try:
+        if alg == "HS256":
+            return _try_hs256()
+        # Everything else → JWKS first.
+        return _try_jwks()
+    except ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Session expired")
+    except Exception as e:
+        last_err = e
 
-    user_doc = await users_col.find_one({"user_id": session_doc["user_id"]}, {"_id": 0})
-    if not user_doc:
-        raise HTTPException(status_code=401, detail="User not found")
+    # Fallback path (rotation safety net).
+    for attempt in (_try_hs256, _try_jwks):
+        try:
+            return attempt()
+        except ExpiredSignatureError:
+            raise HTTPException(status_code=401, detail="Session expired")
+        except Exception as e:
+            last_err = e
+            continue
 
+    # All paths failed.
+    raise HTTPException(status_code=401, detail=f"Invalid token: {last_err}")
+
+
+async def _upsert_user_from_claims(claims: dict) -> dict:
+    """Ensure a Mongo users_col row exists for this Supabase identity.
+
+    Key behaviour:
+      • user_id is ALWAYS the Supabase UUID (``sub`` claim).
+      • If a legacy Emergent-era user with the same email exists, we migrate
+        its workspace memberships and config to the new user_id so no data
+        is lost when switching auth providers.
+      • Updates name/picture/last_login_at on every call (cheap).
+    """
+    user_id = claims.get("sub")
+    email = claims.get("email") or (claims.get("user_metadata") or {}).get("email")
+    if not user_id or not email:
+        raise HTTPException(status_code=401, detail="Token missing sub/email")
+
+    meta = claims.get("user_metadata") or {}
+    name = meta.get("full_name") or meta.get("name") or email.split("@")[0]
+    picture = meta.get("avatar_url") or meta.get("picture")
+
+    existing = await users_col.find_one({"user_id": user_id}, {"_id": 0})
+    if not existing:
+        # Migrate legacy user (matched by email) if any → reuse its workspace.
+        legacy = await users_col.find_one({"email": email, "user_id": {"$ne": user_id}}, {"_id": 0})
+        if legacy:
+            legacy_id = legacy["user_id"]
+            await workspace_members_col.update_many(
+                {"user_id": legacy_id}, {"$set": {"user_id": user_id}}
+            )
+            await workspaces_col.update_many(
+                {"owner_user_id": legacy_id}, {"$set": {"owner_user_id": user_id}}
+            )
+            # Keep legacy row for audit history but rename its id to prevent
+            # future matches.
+            await users_col.update_one(
+                {"user_id": legacy_id},
+                {"$set": {"user_id": f"legacy_{legacy_id}", "migrated_to": user_id}},
+            )
+
+        user_doc = {
+            "user_id": user_id,
+            "email": email,
+            "name": name,
+            "picture": picture,
+            "created_at": datetime.now(timezone.utc),
+            "last_login_at": datetime.now(timezone.utc),
+            "auth_provider": "supabase",
+        }
+        await users_col.insert_one(user_doc)
+        existing = user_doc
+    else:
+        await users_col.update_one(
+            {"user_id": user_id},
+            {"$set": {
+                "email": email,
+                "name": name,
+                "picture": picture,
+                "last_login_at": datetime.now(timezone.utc),
+                "auth_provider": "supabase",
+            }},
+        )
+        existing.update({"email": email, "name": name, "picture": picture})
+
+    # Ensure the user has an active workspace.
+    if not existing.get("current_workspace_id"):
+        ws_id = await claim_or_create_workspace_for_user(existing)
+        await users_col.update_one(
+            {"user_id": user_id},
+            {"$set": {"current_workspace_id": ws_id}},
+        )
+        existing["current_workspace_id"] = ws_id
+
+    return existing
+
+
+async def get_current_user(request: Request) -> User:
+    """FastAPI dependency: resolve the authenticated user from the Supabase
+    access token (Bearer). All workspace-scoped endpoints depend on this."""
+    token = _extract_bearer_token(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    claims = _verify_supabase_jwt(token)
+    user_doc = await _upsert_user_from_claims(claims)
     return User(**{k: user_doc.get(k) for k in ["user_id", "email", "name", "picture", "current_workspace_id"]})
 
 
@@ -1054,119 +1204,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─── Auth Endpoints (Phase 7a) ────────────────────────────────────────
-class SessionExchangeRequest(BaseModel):
-    session_id: str
-
-
-def _set_session_cookie(response: Response, token: str):
-    """Set the session cookie with production-grade attributes."""
-    response.set_cookie(
-        key=SESSION_COOKIE_NAME,
-        value=token,
-        max_age=SESSION_TTL_DAYS * 24 * 3600,
-        httponly=True,
-        secure=True,
-        samesite="none",
-        path="/",
-    )
-
-
-@app.post("/api/auth/session")
-async def auth_session_exchange(req: SessionExchangeRequest, response: Response):
-    """Exchange an Emergent Auth session_id (one-time) for a persistent session cookie.
-
-    Flow:
-      1. Frontend redirects to auth.emergentagent.com which returns with #session_id=<id>.
-      2. Frontend posts that session_id here.
-      3. Backend calls Emergent's /session-data to fetch the user profile + session_token.
-      4. Backend upserts the user, creates/claims a workspace, stores the session, and
-         sets an httpOnly cookie. Frontend then navigates to the dashboard.
-    """
-    async with httpx.AsyncClient(timeout=15.0) as http:
-        r = await http.get(EMERGENT_AUTH_URL, headers={"X-Session-ID": req.session_id})
-    if r.status_code != 200:
-        raise HTTPException(status_code=401, detail="Invalid session_id")
-    data = r.json()
-    email = data.get("email")
-    name = data.get("name") or (email or "User").split("@")[0]
-    picture = data.get("picture")
-    session_token = data.get("session_token")
-    if not email or not session_token:
-        raise HTTPException(status_code=502, detail="Malformed auth response")
-
-    # Upsert user by email
-    user_doc = await users_col.find_one({"email": email}, {"_id": 0})
-    is_new_user = user_doc is None
-    if is_new_user:
-        user_id = f"user_{uuid.uuid4().hex[:12]}"
-        user_doc = {
-            "user_id": user_id,
-            "email": email,
-            "name": name,
-            "picture": picture,
-            "created_at": datetime.now(timezone.utc),
-            "last_login_at": datetime.now(timezone.utc),
-        }
-        await users_col.insert_one(user_doc)
-    else:
-        await users_col.update_one(
-            {"email": email},
-            {"$set": {
-                "name": name,
-                "picture": picture,
-                "last_login_at": datetime.now(timezone.utc),
-            }},
-        )
-
-    # Ensure workspace membership
-    workspace_id = await claim_or_create_workspace_for_user(user_doc)
-    await users_col.update_one(
-        {"user_id": user_doc["user_id"]},
-        {"$set": {"current_workspace_id": workspace_id}},
-    )
-
-    # Persist session
-    expires_at = datetime.now(timezone.utc) + timedelta(days=SESSION_TTL_DAYS)
-    await user_sessions_col.update_one(
-        {"session_token": session_token},
-        {"$set": {
-            "session_token": session_token,
-            "user_id": user_doc["user_id"],
-            "expires_at": expires_at,
-            "created_at": datetime.now(timezone.utc),
-        }},
-        upsert=True,
-    )
-
-    _set_session_cookie(response, session_token)
-
-    await log_audit(
-        "auth.login",
-        f"{email} logged in",
-        user_id=user_doc["user_id"],
-        workspace_id=workspace_id,
-        metadata={"new_user": is_new_user},
-    )
-
-    return {
-        "user": {
-            "user_id": user_doc["user_id"],
-            "email": email,
-            "name": name,
-            "picture": picture,
-            "current_workspace_id": workspace_id,
-        },
-        "workspace_id": workspace_id,
-        # Bearer token for clients that cannot persist cookies
-        # (e.g., Kubernetes ingress forces ACAO: * which blocks cookie CORS).
-        "session_token": session_token,
-        "expires_at": expires_at.isoformat(),
-    }
+# ─── Auth Endpoints (Supabase-backed) ─────────────────────────────────
+# Note: sign-in / sign-up / sign-out all happen on the frontend against
+# Supabase directly (see /app/frontend/src/lib/supabaseClient.js). The
+# backend only needs to:
+#   • Verify the Supabase JWT on every request (see get_current_user).
+#   • Expose /api/auth/me so the SPA can hydrate the user + workspaces.
+#   • Allow users to list / create / switch workspaces (still MongoDB-backed).
+# The legacy /api/auth/session and /api/auth/logout endpoints from the
+# previous Emergent Google Auth flow have been intentionally removed.
 
 
 @app.get("/api/auth/me")
 async def auth_me(user: User = Depends(get_current_user)):
+    """Return the authenticated user + their workspace memberships.
+
+    The Supabase JWT is verified by ``get_current_user`` which also upserts
+    the user into MongoDB and claims/creates a workspace on first login."""
     memberships = await workspace_members_col.find({"user_id": user.user_id}, {"_id": 0}).to_list(50)
     workspace_ids = [m["workspace_id"] for m in memberships]
     workspaces = []
@@ -1188,23 +1242,6 @@ async def auth_me(user: User = Depends(get_current_user)):
         "current_workspace_id": user.current_workspace_id,
         "workspaces": workspaces,
     }
-
-
-@app.post("/api/auth/logout")
-async def auth_logout(request: Request, response: Response):
-    token = await _extract_session_token(request)
-    if token:
-        session = await user_sessions_col.find_one({"session_token": token}, {"_id": 0})
-        if session:
-            await log_audit(
-                "auth.logout",
-                "user logged out",
-                user_id=session.get("user_id"),
-                workspace_id=None,
-            )
-        await user_sessions_col.delete_one({"session_token": token})
-    response.delete_cookie(SESSION_COOKIE_NAME, path="/", samesite="none", secure=True)
-    return {"success": True}
 
 
 class CreateWorkspaceRequest(BaseModel):

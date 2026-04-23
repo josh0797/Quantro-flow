@@ -1,10 +1,58 @@
 [
   {
-    "content": "Survey + i18n + Plan y Uso page + Sidebar + Automation rewrite",
+    "content": "Install dependencies: @supabase/supabase-js (frontend), PyJWT + cryptography (backend)",
     "status": "completed"
   },
   {
-    "content": "Run frontend testing agent for Plan y Uso, Sidebar menu, Automation CRUD",
+    "content": "Add Supabase env vars to frontend .env and backend .env",
+    "status": "completed"
+  },
+  {
+    "content": "Create /app/frontend/src/lib/supabaseClient.js",
+    "status": "completed"
+  },
+  {
+    "content": "Rewrite AuthContext.js to use Supabase Auth (getSession + onAuthStateChange)",
+    "status": "completed"
+  },
+  {
+    "content": "Update authFetch.js to inject Supabase access_token as Bearer",
+    "status": "completed"
+  },
+  {
+    "content": "Rewrite LoginPage.js for email+password (with signup option)",
+    "status": "completed"
+  },
+  {
+    "content": "Update AuthCallback.js for Supabase email confirmation flow",
+    "status": "completed"
+  },
+  {
+    "content": "Update api.js: remove Emergent auth exports, add Supabase-friendly helpers",
+    "status": "completed"
+  },
+  {
+    "content": "Update Sidebar.js to use Supabase signOut via context",
+    "status": "completed"
+  },
+  {
+    "content": "Rewrite PlanAndUsage.js to query Supabase directly (profiles + ai_usage)",
+    "status": "completed"
+  },
+  {
+    "content": "Backend: add Supabase JWT verifier (HS256 legacy + ES256 JWKS) and replace get_current_user",
+    "status": "completed"
+  },
+  {
+    "content": "Backend: rewrite /api/auth/me to read from Supabase JWT + upsert user + claim workspace",
+    "status": "completed"
+  },
+  {
+    "content": "Backend: remove/deprecate /api/auth/session, /api/auth/logout endpoints",
+    "status": "completed"
+  },
+  {
+    "content": "Test: Sign in with existing Supabase account from quantro.technology to verify end-to-end flow",
     "status": "in_progress"
   }
 ]

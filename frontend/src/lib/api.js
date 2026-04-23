@@ -1,33 +1,47 @@
 import axios from 'axios';
+import { supabase } from './supabaseClient';
 
 const API_BASE = process.env.REACT_APP_BACKEND_URL || '';
-const TOKEN_STORAGE_KEY = 'quantro_session_token';
 
+/**
+ * Legacy helpers kept around so older imports keep compiling. They now
+ * read/write the Supabase session indirectly. Prefer using the Supabase
+ * client directly (or useAuth()) in new code.
+ */
 export const getStoredToken = () => {
-  try { return localStorage.getItem(TOKEN_STORAGE_KEY) || null; } catch (_) { return null; }
-};
-export const setStoredToken = (token) => {
+  // Read the token synchronously from the cache that @supabase/supabase-js
+  // maintains in localStorage. We parse it best-effort — if the structure
+  // changes we fall back to null.
   try {
-    if (token) localStorage.setItem(TOKEN_STORAGE_KEY, token);
-    else localStorage.removeItem(TOKEN_STORAGE_KEY);
-  } catch (_) { /* ignore */ }
+    const raw = localStorage.getItem('quantro-flow-auth');
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed?.access_token || parsed?.currentSession?.access_token || null;
+  } catch (_) {
+    return null;
+  }
 };
+
+// Historic setter — noop now (Supabase owns the session).
+export const setStoredToken = (_token) => {};
 
 const api = axios.create({
   baseURL: `${API_BASE}/api`,
   headers: { 'Content-Type': 'application/json' },
 });
 
-// Attach Bearer token on every request (the Kubernetes ingress forces
-// `Access-Control-Allow-Origin: *`, which browsers refuse in combination
-// with credentialed cookies. Bearer tokens avoid that limitation while
-// providing the same security properties over HTTPS.)
-api.interceptors.request.use((config) => {
-  const t = getStoredToken();
-  if (t) {
-    config.headers = config.headers || {};
-    config.headers.Authorization = `Bearer ${t}`;
-  }
+// Attach the current Supabase access token on every request. We call
+// supabase.auth.getSession() so we always pick up the freshest token
+// (the SDK auto-refreshes in the background).
+api.interceptors.request.use(async (config) => {
+  try {
+    const { data } = await supabase.auth.getSession();
+    const token = data?.session?.access_token;
+    if (token) {
+      config.headers = config.headers || {};
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+  } catch (_) { /* ignore */ }
   return config;
 });
 
@@ -36,17 +50,14 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      setStoredToken(null);
       window.dispatchEvent(new CustomEvent('auth:unauthorized'));
     }
     return Promise.reject(error);
   },
 );
 
-// Auth
+// Auth (Supabase-backed server helpers)
 export const authMe = () => api.get('/auth/me').then(r => r.data);
-export const authExchangeSession = (session_id) => api.post('/auth/session', { session_id }).then(r => r.data);
-export const authLogout = () => api.post('/auth/logout').then(r => r.data);
 export const authSwitchWorkspace = (workspace_id) => api.post('/auth/workspaces/switch', { workspace_id }).then(r => r.data);
 export const authCreateWorkspace = (name) => api.post('/auth/workspaces', { name }).then(r => r.data);
 

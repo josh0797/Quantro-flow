@@ -31,8 +31,8 @@
   - Live Mode → real workspace dataset only (`is_simulation != True`)
   - **Zero mixing** and **zero ambiguity** about which dataset is visible.
 - **Ship SaaS foundation with strict tenant isolation**:
-  - Google OAuth (Emergent Managed Google Auth)
-  - Multi-workspace per user
+  - **Supabase Auth** (shared project with https://quantro.technology landing)
+  - Multi-workspace per user (MongoDB-backed)
   - Workspace-scoped data model across all operational and configuration collections
   - Audit logging foundation for trust and compliance
 
@@ -47,8 +47,17 @@
 - ✅ **Brand rename shipped:** **Quantro One → Quantro Flow**.
 - ✅ **Simulation Mode UX shipped:** persistent toggle in Sidebar + Settings, localized, confirmation modal on Simulation→Live, localStorage mirroring.
 - ✅ **Phase 6.10 complete:** Simulation/Live Data Wiring Hardening (**strict dataset isolation + E2E verification complete**).
-- ✅ **Phase 7a complete:** Auth + Workspace creation + Workspace-scoped DB (**backend 100%, frontend 100%**).
-- ⏭️ Next: **Phase 7b** (multi-workspace UX + invitations + RBAC enforcement) and **Phase 7c** (audit logs UI + export).
+- ✅ **Plan y Uso + Automation Policies CRUD shipped and frontend-tested (100% pass)** (`iteration_10.json`).
+- ✅ **Phase 7a-sup complete (new): Supabase Auth + Workspace scoping**
+  - Auth source of truth migrated from Emergent sessions → **Supabase sessions**.
+  - Frontend uses `@supabase/supabase-js` and validates session via `supabase.auth.getSession()`.
+  - Backend verifies Supabase JWTs locally using **dual path**:
+    - JWKS-based verification for **current ECC (P-256) signing key**
+    - HS256 shared-secret verification for **legacy tokens**
+  - Backend upserts Mongo users keyed by **Supabase UUID** (`sub`) and ensures workspace membership/claiming.
+  - **Plan y Uso** now reads **real data** from Supabase (`profiles` + `ai_usage`) and no longer uses `/api/usage`.
+- ⏳ **Pending validation:** Sign-in with an existing Supabase user from the landing to confirm end-to-end in production.
+- ⏭️ Next: **Phase 7b** (RBAC + invitations + multi-workspace UX) and **Phase 7c** (audit logs UI + export).
 
 ---
 
@@ -184,61 +193,70 @@ into:
 
 ### Phase 7 — SaaS Foundation (Auth + Multi-tenant + RBAC + Audit Logs)
 
-#### Phase 7a — Auth + Workspace Creation + Strict Workspace Scoping
-**Status: ✅ Completed (stable; verified)**
+#### Phase 7a-sup — Supabase Auth + Workspace Creation + Strict Workspace Scoping
+**Status: ✅ Completed (code shipped) / ⏳ pending end-to-end validation with real user session**
 
 **User-approved configuration (implemented)**
-- Auth provider: **Emergent Managed Google Auth**
-- Tenancy model: **multi-workspace per user**
-- First-time onboarding: **auto-create/claim personal workspace**
-  - First authenticated user claims legacy `workspace_id="default"` workspace (no data loss)
-  - Subsequent users get a fresh personal workspace
+- Auth provider: **Supabase Auth** (shared project with https://quantro.technology)
+- Login method: **Email + Password** (matches landing)
+- Tenancy model: **multi-workspace per user** (MongoDB)
+- Operational data: **MongoDB remains** (inbox/CRM/etc)
+- Billing/plan/usage/account data:
+  - Supabase **`profiles`** = plan source of truth
+  - Supabase **`ai_usage`** = monthly AI consumption source of truth
 
 **What was implemented (delivered)**
-1) **Auth endpoints (backend)**
-- `POST /api/auth/session` (session_id exchange)
-- `GET /api/auth/me`
-- `POST /api/auth/logout`
-- `POST /api/auth/workspaces` (create workspace)
-- `POST /api/auth/workspaces/switch` (switch current workspace)
+1) **Frontend Supabase integration**
+- Added `@supabase/supabase-js`.
+- New singleton client: `/app/frontend/src/lib/supabaseClient.js` using:
+  - `REACT_APP_SUPABASE_URL`
+  - `REACT_APP_SUPABASE_ANON_KEY`
+- Auth hydration:
+  - `supabase.auth.getSession()` on boot
+  - `supabase.auth.onAuthStateChange()` subscription
+- Login UI:
+  - `LoginPage.js` replaced Google/Emergent flow with email+password.
+  - `AuthCallback.js` updated to handle Supabase redirect-based confirmation.
+- Token propagation:
+  - `authFetch.js` and axios interceptor now attach Supabase `access_token` as Bearer.
 
-2) **Auth model (backend)**
-- Collections:
-  - `users`, `user_sessions`, `workspaces`, `workspace_members`
+2) **Backend JWT verification + identity mapping**
+- Backend now verifies Supabase JWTs locally:
+  - JWKS verification for ECC (P-256) tokens
+  - HS256 legacy secret verification fallback
+- `users` Mongo collection now uses **Supabase UUID** as `user_id`.
+- Automatic user upsert and workspace ensure-on-first-request.
+- Legacy migration safety net:
+  - If an Emergent-era Mongo user exists by email, memberships/ownership are migrated to the Supabase UUID.
 
-3) **Workspace scoping (backend)**
-- Added `workspace_id` across **all operational + config** collections.
-- Startup backfill: `backfill_workspace_scoping()` tags all legacy docs as `workspace_id="default"`.
-- Read/write endpoints now scope by active workspace via `get_current_workspace_id()`.
+3) **Workspace endpoints (still MongoDB-backed)**
+- `/api/auth/me` returns:
+  - user identity (from JWT)
+  - workspace memberships from MongoDB
+- `/api/auth/workspaces` create
+- `/api/auth/workspaces/switch` switch active workspace
 
-4) **Simulation isolation preserved per workspace (backend)**
-- `get_mode_filter(workspace_id)` returns `{workspace_id, is_simulation: ...}`.
-- `dashboard/metrics` includes `simulation_mode` for the **current workspace**.
+4) **Plan y Uso now reads real Supabase data**
+- `PlanAndUsage.js` now queries Supabase directly:
+  - `profiles` for plan fields
+  - `ai_usage` filtered by `user_id` and current `month`, aggregated by `type`
+- `/api/usage` is no longer used by the Plan y Uso UI (kept only as legacy endpoint).
 
-5) **Audit logging foundation (backend)**
-- `audit_log` collection + `log_audit()` helper.
-- Events captured at minimum for auth + integrations connect/disconnect.
+**Known constraints / open items**
+- **Supabase sign-up currently fails** with: `Database error saving new user`.
+  - Likely due to a Supabase-side trigger/policy (e.g., auto-profile creation) in the existing project.
+  - Not a Quantro Flow code bug.
+  - **Sign-in with existing landing accounts should work** and is the required validation step.
 
-6) **Frontend auth (delivered)**
-- `AuthContext` + `AuthProvider`
-- `ProtectedRoute`
-- `LoginPage` + `AuthCallback`
-- Sidebar user menu (name/workspace + logout)
-
-**Important production constraint handled**
-- Due to ingress forcing `Access-Control-Allow-Origin: *` (cookie credentials blocked),
-  the frontend uses **Bearer session tokens** stored in `localStorage` (`quantro_session_token`).
-
-**Testing (completed)**
-- ✅ Backend Phase 7a suite: **100% pass** (`/app/test_reports/iteration_8.json`).
-- ✅ Frontend Phase 7a suite: **100% pass** (`/app/test_reports/iteration_9.json`).
-
-**Exit criteria (met)**
-- ✅ User can sign in via Google (Emergent-managed flow)
-- ✅ Workspace is auto-created/claimed
-- ✅ Legacy default data is preserved and associated with the claimed workspace
-- ✅ All reads/writes are strictly workspace-scoped
-- ✅ Simulation vs Live isolation remains strict inside each workspace
+**Exit criteria**
+- ✅ Quantro Flow connects directly to the existing Supabase project (no new DB).
+- ✅ Session is validated in Quantro Flow via Supabase.
+- ✅ Plan y Uso reads real data from `profiles` + `ai_usage`.
+- ⏳ Confirm end-to-end:
+  - Sign in with an existing user from the landing
+  - Verify `/api/auth/me` returns workspaces
+  - Verify Smart Inbox/CRM/etc operate normally via Mongo (using Supabase identity)
+  - Verify sign-out calls `supabase.auth.signOut()` and redirects to /login
 
 ---
 
@@ -291,19 +309,29 @@ into:
 
 ## 3. Next Actions
 
-**Immediate (P0/P1):**
-1) **Hold for user approval** on whether to start:
-   - **Phase 7b** (multi-workspace UX + invitations + RBAC enforcement)
-   - OR **Phase 7c** (audit logs UI + export)
-2) Phase 7a polish (optional):
-   - Workspace switcher UI (if you want this in 7a scope, otherwise defer to 7b)
-   - Remove any remaining legacy references to `profile_id="default"` (keep backward compatibility but prefer workspace_id)
+**Immediate (P0): Validate Supabase auth end-to-end**
+1) Sign in to Quantro Flow with an existing account from https://quantro.technology.
+2) Confirm `/api/auth/me` returns a workspace list.
+3) Confirm core app screens load (Dashboard, Smart Inbox, CRM, Schedule).
+4) Confirm **Plan y Uso** shows:
+   - profile plan (from `profiles.plan`)
+   - monthly usage aggregate (from `ai_usage`)
+5) Confirm logout fully signs out via Supabase and redirects to `/login`.
 
-**Secondary (P2 hardening):**
-3) Refactor oversized modules:
-   - Backend: `server.py`
-   - Frontend: `SmartInbox.js`, `ContentEngine.js`, `Dashboard.js`
-4) Optional: add webhook inbound handler to match displayed endpoint.
+**Immediate (P0): If sign-up must work in Quantro Flow**
+6) Investigate Supabase-side error `Database error saving new user`:
+   - Check landing’s signup trigger/function (profiles insert) and RLS.
+   - Ensure required `profiles` columns have defaults / nullable.
+   - Ensure `profiles` auto-insert trigger handles missing metadata.
+
+**Next (P1): Choose Phase 7b vs 7c**
+7) Start **Phase 7b** (RBAC + invitations + multi-workspace UX) OR
+8) Start **Phase 7c** (audit logs UI + export)
+
+**Secondary (P2 hardening)**
+9) Refactor oversized modules:
+  - Backend: `server.py`
+  - Frontend: `SmartInbox.js`, `ContentEngine.js`, `Dashboard.js`
 
 ---
 
@@ -324,7 +352,7 @@ into:
 - ✅ Settings provides a SaaS-grade control surface.
 - ✅ Integrations seeding is idempotent and self-healing; Integrations UI never blanks.
 - ✅ Self-healing is user-visible as a trust signal.
-- ✅ i18n shipped with full EN/ES coverage + persistence.
+- ✅ i18n shipped with full ES/EN coverage + persistence.
 - ✅ Simulation Mode UX shipped as a first-class control.
 
 **Phase 6.10 Success Criteria (Data Layer Isolation): ✅ ACHIEVED**
@@ -334,14 +362,13 @@ into:
 - ✅ Dashboard metrics + AI suggestions respect the current mode.
 - ✅ Live empty state is intentional, clean, and guides the user to connect integrations or create first records.
 
-**Phase 7a Success Criteria (Auth + Workspace + Migration + Scoping): ✅ ACHIEVED**
-- ✅ User can log in via Google (Emergent Managed Auth).
-- ✅ A workspace is automatically created/claimed.
-- ✅ Existing default data migrated/associated to that workspace.
-- ✅ All queries/writes scoped by `workspace_id`.
-- ✅ App works as before but under authenticated context.
-- ✅ No cross-workspace data leakage.
-- ✅ Simulation vs Live remains strict within each workspace.
+**Phase 7a-sup Success Criteria (Supabase Auth + Workspace + Scoping):**
+- ✅ Quantro Flow uses the same Supabase project as the landing (no new DB).
+- ✅ Frontend validates session via `supabase.auth.getSession()`.
+- ✅ Backend verifies Supabase JWTs locally (JWKS + legacy secret).
+- ✅ MongoDB operational data remains workspace-scoped.
+- ✅ Plan y Uso reads plan + usage from Supabase (`profiles`, `ai_usage`).
+- ⏳ End-to-end user validation pending: existing landing user can sign in and operate normally.
 
 **Phase 7 Success Criteria (SaaS Foundation):**
 - Phase 7b:

@@ -1,17 +1,27 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
+import { Loader2 } from 'lucide-react';
+import { supabase } from '../lib/supabaseClient';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
 
 /**
- * AuthCallback — receives `#session_id=<id>` from Emergent Auth
- * after the Google consent screen, exchanges it with our backend
- * and redirects to the dashboard.
+ * AuthCallback — handles any redirect from Supabase Auth.
+ *
+ * Common cases handled:
+ *   1. Email confirmation link (type=signup)  → lands here with tokens
+ *      already exchanged by supabase-js (detectSessionInUrl = true).
+ *   2. OAuth callback (future: Google/Apple via Supabase).
+ *   3. Magic link sign-in (future).
+ *
+ * We just wait for the SDK to finalize the session and then navigate to
+ * the dashboard. If no session shows up within a short window we route
+ * the user back to /login with a friendly error.
  */
 export default function AuthCallback() {
   const navigate = useNavigate();
-  const { login } = useAuth();
+  const { refresh } = useAuth();
   const { t } = useLanguage();
   const [error, setError] = useState(null);
 
@@ -19,32 +29,30 @@ export default function AuthCallback() {
     let cancelled = false;
     const run = async () => {
       try {
-        // Emergent returns session_id in the URL fragment (hash)
-        const hash = window.location.hash || '';
-        const params = new URLSearchParams(hash.replace(/^#/, ''));
-        const sessionId = params.get('session_id');
-        if (!sessionId) {
-          throw new Error('Missing session_id');
+        // Give supabase-js a tick to process any tokens in the URL.
+        await new Promise((r) => setTimeout(r, 50));
+        const { data, error: sessionErr } = await supabase.auth.getSession();
+        if (sessionErr) throw sessionErr;
+        if (!data?.session) {
+          throw new Error('No session');
         }
-        await login(sessionId);
-        // Clean the URL & route to dashboard
+        await refresh();
         if (!cancelled) {
           window.history.replaceState({}, document.title, window.location.pathname);
-          toast.success(t('auth.welcome_back', { name: '' }).replace(/,\s*$/, ''));
+          toast.success(t('auth.account_confirmed'));
           navigate('/', { replace: true });
         }
       } catch (err) {
-        console.error('Auth callback failed:', err);
         if (!cancelled) {
           setError(err?.message || 'unknown');
           toast.error(t('auth.login_failed_title'), { description: t('auth.login_failed_desc') });
-          setTimeout(() => navigate('/login', { replace: true }), 2000);
+          setTimeout(() => navigate('/login', { replace: true }), 1500);
         }
       }
     };
     run();
     return () => { cancelled = true; };
-  }, [login, navigate, t]);
+  }, [navigate, refresh, t]);
 
   return (
     <div
@@ -52,7 +60,7 @@ export default function AuthCallback() {
       className="min-h-screen flex items-center justify-center bg-background text-foreground"
     >
       <div className="text-center space-y-3">
-        <div className="inline-block w-8 h-8 border-2 border-[hsl(var(--primary))] border-t-transparent rounded-full animate-spin" />
+        <Loader2 size={28} className="animate-spin mx-auto text-[hsl(var(--primary))]" />
         <p className="text-sm text-muted-foreground">
           {error ? t('auth.login_failed_title') : t('auth.signing_in')}
         </p>
