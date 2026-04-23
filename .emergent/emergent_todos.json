@@ -52,7 +52,7 @@
     "status": "completed"
   },
   {
-    "content": "Test: Sign in with existing Supabase account from quantro.technology to verify end-to-end flow",
-    "status": "in_progress"
+    "content": "Test: Sign in with existing Supabase account → VALIDATED by user end-to-end",
+    "status": "completed"
   }
 ]
