@@ -1,0 +1,23 @@
+<!--
+  Quantro Flow favicon — matches exactly the one used by the marketing
+  landing (https://www.quantro.technology) so the brand identity is
+  consistent across tab icons, PWA install prompts and OG cards.
+
+  The gradient + logomark come straight from the landing's inline SVG so
+  we avoid any drift between sites.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="g" x1="8" y1="8" x2="56" y2="56">
+      <stop offset="0%" stop-color="#00E5FF"/>
+      <stop offset="100%" stop-color="#00FFA3"/>
+    </linearGradient>
+    <linearGradient id="b" x1="0" y1="0" x2="64" y2="64">
+      <stop offset="0%" stop-color="#0F172A"/>
+      <stop offset="100%" stop-color="#030712"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#b)" stroke="url(#g)" stroke-width="1.5" stroke-opacity="0.6"/>
+  <circle cx="32" cy="31" r="11" stroke="url(#g)" stroke-width="3.5" fill="none"/>
+  <path d="M39 38.5 L47 47" stroke="url(#g)" stroke-width="3.5" stroke-linecap="round"/>
+</svg>

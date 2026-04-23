@@ -13,7 +13,7 @@ import { INDUSTRIES } from '../config/industryConfig';
 import { toast } from 'sonner';
 import IntegrationsPanel from '../components/IntegrationsPanel';
 import LanguageSwitcher from '../components/LanguageSwitcher';
-import SimulationModeToggle from '../components/SimulationModeToggle';
+// SimulationModeToggle removed from Settings (UI cleanup — no longer surfaced)
 import { useLanguage } from '../context/LanguageContext';
 
 export default function Settings() {
@@ -78,11 +78,6 @@ export default function Settings() {
             <h1 className="text-2xl font-semibold text-foreground">{t('settings.title')}</h1>
             <p className="text-sm text-muted-foreground">{t('settings.subtitle')}</p>
           </div>
-        </div>
-
-        {/* Simulation Mode — first visible section before tabs */}
-        <div data-testid="settings-simulation-banner">
-          <SimulationModeToggle variant="banner" />
         </div>
 
         {/* Tabs */}

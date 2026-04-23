@@ -2,11 +2,9 @@ import React from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { LayoutDashboard, Inbox, Calendar, Users, UserPlus, PenTool, ChevronLeft, ChevronRight, Zap, Bot, Settings, LogOut, Receipt, UserCircle } from 'lucide-react';
 import { useState, useEffect } from 'react';
-import { getSystemStatus } from '../lib/api';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../contexts/AuthContext';
 import LanguageSwitcher from './LanguageSwitcher';
-import SimulationModeToggle from './SimulationModeToggle';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -32,7 +30,6 @@ const navItems = [
 
 export default function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
-  const [systemStatus, setSystemStatus] = useState(null);
   const [integrationStatus, setIntegrationStatus] = useState({});
   const location = useLocation();
   const navigate = useNavigate();
@@ -43,25 +40,16 @@ export default function Sidebar() {
     try {
       await logout();
       toast.success(t('auth.signed_out_title'));
-      // Route to login
       window.location.href = '/login';
     } catch (e) {
       toast.error('Logout failed');
     }
   };
 
-  useEffect(() => {
-    const fetchStatus = async () => {
-      try {
-        const status = await getSystemStatus();
-        setSystemStatus(status);
-      } catch (e) { /* ignore */ }
-    };
-    fetchStatus();
-    const interval = setInterval(fetchStatus, 30000);
-    return () => clearInterval(interval);
-  }, []);
-
+  // Integration status is still useful as a trust signal (green dots
+  // next to connected providers) but we no longer show the "Sistema
+  // Operando" / "Modo Simulación" blocks — the sidebar is kept
+  // deliberately quiet so the focus stays on navigation.
   useEffect(() => {
     const fetchIntegrations = async () => {
       try {
@@ -127,31 +115,14 @@ export default function Sidebar() {
         })}
       </nav>
 
-      {/* Language Switcher + Simulation Toggle + System Status */}
+      {/* Footer: language switcher + integrations + user menu. No system
+          status / simulation toggle — removed per cleanup spec. */}
       <div className="px-3 pb-4 space-y-2">
         {!collapsed && (
           <div data-testid="sidebar-language-footer" className="px-1">
             <LanguageSwitcher variant="compact" />
           </div>
         )}
-
-        {!collapsed && (
-          <div data-testid="sidebar-simulation-toggle">
-            <SimulationModeToggle variant="compact" />
-          </div>
-        )}
-
-        <div data-testid="system-status" className="flex items-center gap-2 px-3 py-2.5 rounded-lg bg-[hsl(var(--surface-1))] border border-[hsl(var(--border))]">
-          <span className={`status-dot ${systemStatus?.overall || 'running'} animate-pulse-dot`} />
-          {!collapsed && (
-            <div className="flex flex-col flex-1 min-w-0">
-              <span className="text-xs font-medium text-foreground">{t('sidebar.system_running')}</span>
-              <span data-testid="system-status-last-sync" className="text-[10px] font-mono text-muted-foreground truncate">
-                {systemStatus ? t('sidebar.synced', { time: new Date(systemStatus.timestamp).toLocaleTimeString() }) : t('common.loading')}
-              </span>
-            </div>
-          )}
-        </div>
 
         {/* Integration Status */}
         {!collapsed && (integrationStatus.gmail || integrationStatus.google_calendar || integrationStatus.crm) && (
@@ -179,6 +150,7 @@ export default function Sidebar() {
             </div>
           </div>
         )}
+
         {/* User profile block */}
         {user && !collapsed && (
           <DropdownMenu>
