@@ -15,12 +15,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 from typing import Optional, List
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+from ai_billing import run_ai_request
 
 # ─── Config ────────────────────────────────────────────────────────────
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
 DB_NAME = os.environ.get("DB_NAME", "quantro_os")
-EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
+# AI Billing — every AI request now flows through ai_billing.run_ai_request.
+# EMERGENT_LLM_KEY is intentionally NOT loaded here: Quantro uses
+# OPENAI_API_KEY directly (Quantro credits) or the user's own key
+# (coupon / depleted-credit users). See /app/backend/ai_billing.py.
 
 # ─── Supabase Auth (shared project with the Quantro landing) ──────────
 # The frontend signs users in through Supabase Auth; we simply verify the
@@ -108,6 +111,10 @@ class User(BaseModel):
     name: str
     picture: Optional[str] = None
     current_workspace_id: Optional[str] = None
+    # Supabase access_token forwarded from the request — needed by the
+    # AI billing wrapper to read profiles/usage under RLS without
+    # requiring a service-role key.
+    access_token: Optional[str] = None
 
 
 def _extract_bearer_token(request: Request) -> Optional[str]:
@@ -273,7 +280,12 @@ async def get_current_user(request: Request) -> User:
         raise HTTPException(status_code=401, detail="Not authenticated")
     claims = _verify_supabase_jwt(token)
     user_doc = await _upsert_user_from_claims(claims)
-    return User(**{k: user_doc.get(k) for k in ["user_id", "email", "name", "picture", "current_workspace_id"]})
+    user = User(**{k: user_doc.get(k) for k in ["user_id", "email", "name", "picture", "current_workspace_id"]})
+    # Forward the raw access_token so AI billing can read Supabase under
+    # the user's own RLS context (no service-role key needed for reads
+    # or for the decrement_ai_credits RPC).
+    user.access_token = token
+    return user
 
 
 async def _active_workspace_id(request: Request, user: User) -> str:
@@ -378,7 +390,16 @@ def _lang_directive(language_code):
     name = LANGUAGE_NAMES.get((language_code or "en").lower(), "English")
     return f"Respond in {name}. All textual fields (summary, description, generated copy) must be written in {name}."
 
-async def build_intent_prompt(business_profile=None):
+
+async def _workspace_language(workspace_id: str = DEFAULT_WORKSPACE_ID) -> str:
+    """Return the active business-profile language ('es' | 'en') for a workspace."""
+    try:
+        profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
+        return ((profile or {}).get("language") or "es").lower()
+    except Exception:
+        return "es"
+
+async def build_intent_prompt(business_profile=None, workspace_id: str = DEFAULT_WORKSPACE_ID):
     """Build intent detection prompt with business profile context."""
     if not business_profile:
         profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
@@ -422,7 +443,7 @@ Respond with ONLY valid JSON (no markdown fences):
   }}
 }}"""
 
-async def build_content_prompt(business_profile=None):
+async def build_content_prompt(business_profile=None, workspace_id: str = DEFAULT_WORKSPACE_ID):
     """Build content generation prompt with business profile context."""
     if not business_profile:
         profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
@@ -1519,23 +1540,26 @@ async def get_inbox_item(inbox_id: str, workspace_id: str = Depends(get_current_
     return serialize_doc(item)
 
 @app.post("/api/inbox/{inbox_id}/analyze")
-async def analyze_inbox_item(inbox_id: str, workspace_id: str = Depends(get_current_workspace_id)):
+async def analyze_inbox_item(inbox_id: str, workspace_id: str = Depends(get_current_workspace_id), user: User = Depends(get_current_user)):
     item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
     
     # Get business profile for context-aware prompts
-    intent_prompt = await build_intent_prompt()
-    
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=f"intent-{inbox_id}-{uuid.uuid4().hex[:6]}",
-        system_message=intent_prompt,
-    ).with_model("openai", "gpt-4o")
-    
+    intent_prompt = await build_intent_prompt(workspace_id=workspace_id)
+    language = await _workspace_language(workspace_id)
+
     message_text = f"From: {item['from_name']} ({item['from_email']})\nSubject: {item['subject']}\n\n{item['body']}"
-    response = await chat.send_message(UserMessage(text=message_text))
-    ai_result = await parse_ai_json(response)
+
+    ai_response = await run_ai_request(
+        user_id=user.user_id,
+        email=user.email,
+        access_token=user.access_token,
+        system_prompt=intent_prompt,
+        user_prompt=message_text,
+        language=language,
+    )
+    ai_result = await parse_ai_json(ai_response["text"])
     
     if not ai_result:
         ai_result = {"intent": "needs_review", "confidence": 0.0, "summary": "AI could not parse this message", "entities": {}, "suggested_action": {"type": "flag_review", "description": "Manual review required"}}
@@ -1719,12 +1743,13 @@ async def decline_inbox_action(inbox_id: str, workspace_id: str = Depends(get_cu
 
 # ─── Batch AI Triage ───────────────────────────────────────────────────
 @app.post("/api/inbox/batch-analyze")
-async def batch_analyze_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depends(get_current_workspace_id)):
+async def batch_analyze_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depends(get_current_workspace_id), user: User = Depends(get_current_user)):
     """Process multiple inbox items with AI classification in sequence."""
     results = []
     
     # Get business profile once for all items
-    intent_prompt = await build_intent_prompt()
+    intent_prompt = await build_intent_prompt(workspace_id=workspace_id)
+    language = await _workspace_language(workspace_id)
     
     for inbox_id in req.inbox_ids:
         item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
@@ -1739,15 +1764,16 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
         )
         
         try:
-            chat = LlmChat(
-                api_key=EMERGENT_LLM_KEY,
-                session_id=f"batch-{inbox_id}-{uuid.uuid4().hex[:6]}",
-                system_message=intent_prompt,
-            ).with_model("openai", "gpt-4o")
-            
             message_text = f"From: {item['from_name']} ({item['from_email']})\nSubject: {item['subject']}\n\n{item['body']}"
-            response = await chat.send_message(UserMessage(text=message_text))
-            ai_result = await parse_ai_json(response)
+            ai_response = await run_ai_request(
+                user_id=user.user_id,
+                email=user.email,
+                access_token=user.access_token,
+                system_prompt=intent_prompt,
+                user_prompt=message_text,
+                language=language,
+            )
+            ai_result = await parse_ai_json(ai_response["text"])
             
             if not ai_result:
                 ai_result = {"intent": "needs_review", "confidence": 0.0, "summary": "Could not analyze this message", "entities": {}, "suggested_action": {"type": "flag_review", "description": "Manual review required"}}
@@ -1817,6 +1843,15 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
                 result_data["execution_results"] = execution_results
             results.append(result_data)
             
+        except HTTPException:
+            # AI billing block / provider error → fail fast so the
+            # whole batch surfaces a single 402/503 to the UI instead
+            # of swallowing it as per-item "error".
+            await inbox_col.update_one(
+                {"inbox_id": inbox_id},
+                {"$set": {"status": "new"}}
+            )
+            raise
         except Exception as e:
             await inbox_col.update_one(
                 {"inbox_id": inbox_id},
@@ -2232,18 +2267,20 @@ async def get_content(content_type: Optional[str] = None, workspace_id: str = De
     return [serialize_doc(i) for i in items]
 
 @app.post("/api/content/generate")
-async def generate_content(req: ContentGenerateRequest, workspace_id: str = Depends(get_current_workspace_id)):
+async def generate_content(req: ContentGenerateRequest, workspace_id: str = Depends(get_current_workspace_id), user: User = Depends(get_current_user)):
     # Get business profile for context-aware content generation
-    content_prompt = await build_content_prompt()
-    
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=f"content-{uuid.uuid4().hex[:8]}",
-        system_message=content_prompt,
-    ).with_model("openai", "gpt-4o")
-    
-    response = await chat.send_message(UserMessage(text=req.prompt))
-    ai_result = await parse_ai_json(response)
+    content_prompt = await build_content_prompt(workspace_id=workspace_id)
+    language = await _workspace_language(workspace_id)
+
+    ai_response = await run_ai_request(
+        user_id=user.user_id,
+        email=user.email,
+        access_token=user.access_token,
+        system_prompt=content_prompt,
+        user_prompt=req.prompt,
+        language=language,
+    )
+    ai_result = await parse_ai_json(ai_response["text"])
     
     if not ai_result:
         raise HTTPException(status_code=500, detail="AI failed to generate valid content")
@@ -2546,7 +2583,7 @@ Respond with ONLY valid JSON (no markdown fences):
 Style: Professional, warm, trustworthy. On-brand for {industry_context}."""
 
 @app.post("/api/templates/{template_id}/generate")
-async def generate_from_template(template_id: str, req: GenerateFromTemplateRequest, workspace_id: str = Depends(get_current_workspace_id)):
+async def generate_from_template(template_id: str, req: GenerateFromTemplateRequest, workspace_id: str = Depends(get_current_workspace_id), user: User = Depends(get_current_user)):
     """Generate AI-enhanced content from a template with context variables."""
     template = await templates_col.find_one({"workspace_id": workspace_id, "template_id": template_id})
     if not template:
@@ -2561,17 +2598,19 @@ async def generate_from_template(template_id: str, req: GenerateFromTemplateRequ
     
     # Use AI to enhance with business profile context
     template_prompt = await build_template_prompt(workspace_id=workspace_id)
-    
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=f"template-{template_id}-{uuid.uuid4().hex[:6]}",
-        system_message=template_prompt,
-    ).with_model("openai", "gpt-4o")
-    
+    language = await _workspace_language(workspace_id)
+
     prompt = f"Template category: {template['category']}\nTemplate name: {template['name']}\n\nSubject (if email): {subject}\n\nBody:\n{body}\n\nContext: {json.dumps(req.context)}\n\nPlease enhance this content while keeping the overall structure and intent."
-    
-    response = await chat.send_message(UserMessage(text=prompt))
-    ai_result = await parse_ai_json(response)
+
+    ai_response = await run_ai_request(
+        user_id=user.user_id,
+        email=user.email,
+        access_token=user.access_token,
+        system_prompt=template_prompt,
+        user_prompt=prompt,
+        language=language,
+    )
+    ai_result = await parse_ai_json(ai_response["text"])
     
     if not ai_result:
         # Fallback to manual fill

@@ -1,34 +1,26 @@
 [
   {
-    "content": "Remove Estado del Sistema block from Dashboard",
+    "content": "Refactor ai_billing.py: add httpx-based Supabase REST helpers + run_ai_request wrapper using OpenAI SDK",
     "status": "completed"
   },
   {
-    "content": "Save OPENAI_API_KEY in backend/.env",
+    "content": "Update server.py: add access_token to User model & get_current_user dependency",
     "status": "completed"
   },
   {
-    "content": "Replace call-limit with USD-credit system in billing.js",
+    "content": "Replace 4 LlmChat call sites in server.py with run_ai_request (analyze, batch, content, template)",
     "status": "completed"
   },
   {
-    "content": "Mirror credit system in /app/backend/ai_billing.py",
+    "content": "Add supabase service-role key support for ai_credit_usage logging (best-effort)",
     "status": "completed"
   },
   {
-    "content": "Update PlanAndUsage to show credits in USD with progress + low-balance warning + 'use your own API key' fallback hint",
+    "content": "Lint backend + restart + smoke test wrapper end-to-end via curl",
     "status": "completed"
   },
   {
-    "content": "Update Stripe webhook reference: reset ai_credits_total on plan activation/change",
-    "status": "completed"
-  },
-  {
-    "content": "Provide SQL migration script + i18n keys + lint",
-    "status": "completed"
-  },
-  {
-    "content": "User: apply SQL migration + redeploy stripe-webhook + integrate ai_billing.py into AI endpoints",
-    "status": "pending"
+    "content": "Run backend testing agent for AI billing wrapper integration",
+    "status": "in_progress"
   }
 ]

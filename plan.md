@@ -15,7 +15,7 @@
 - **Expose the self-healing layer as a user-facing trust signal** (Apple/Stripe-style):
   - “System Status: Healthy / Auto‑Repaired / Degraded”
   - “Quantro Flow detects and fixes issues before you notice them.”
-  - Surface integrity checks + repair explanations.
+  - Surface integrity checks + repair explanations
 - **Ship a robust multilingual system (i18n) as an OS-level capability**, not a simple UI translation layer:
   - UI text + dashboard labels
   - Settings and integrations control center
@@ -35,6 +35,11 @@
   - Multi-workspace per user (MongoDB-backed)
   - Workspace-scoped data model across all operational and configuration collections
   - Audit logging foundation for trust and compliance
+- **Enforce AI cost controls (no free AI bleeding)**:
+  - Replace Emergent LLM key usage with an internal **USD-based AI Credits** system
+  - Block trial/coupon users from Quantro credits and require their own OpenAI key
+  - Force **`gpt-4o-mini`** when using Quantro credits
+  - Log per-request usage and debit credits after successful generations
 
 **Current status (as of this update):**
 - ✅ **Phases 1–5 complete** (Core app + workflow engine + policies/escalations + templates + auto-execution).
@@ -48,15 +53,21 @@
 - ✅ **Simulation Mode UX shipped:** persistent toggle in Sidebar + Settings, localized, confirmation modal on Simulation→Live, localStorage mirroring.
 - ✅ **Phase 6.10 complete:** Simulation/Live Data Wiring Hardening (**strict dataset isolation + E2E verification complete**).
 - ✅ **Plan y Uso + Automation Policies CRUD shipped and frontend-tested (100% pass)** (`iteration_10.json`).
-- ✅ **Phase 7a-sup complete (new): Supabase Auth + Workspace scoping**
+- ✅ **Phase 7a-sup complete:** Supabase Auth + Workspace scoping
   - Auth source of truth migrated from Emergent sessions → **Supabase sessions**.
   - Frontend uses `@supabase/supabase-js` and validates session via `supabase.auth.getSession()`.
   - Backend verifies Supabase JWTs locally using **dual path**:
     - JWKS-based verification for **current ECC (P-256) signing key**
     - HS256 shared-secret verification for **legacy tokens**
   - Backend upserts Mongo users keyed by **Supabase UUID** (`sub`) and ensures workspace membership/claiming.
-  - **Plan y Uso** now reads **real data** from Supabase (`profiles` + `ai_usage`) and no longer uses `/api/usage`.
+  - **Plan y Uso** reads **real data** from Supabase (`profiles` + `ai_usage`) and no longer uses `/api/usage`.
+- ✅ **Phase 7d-pre (new): AI Credits Wrapper landed (P0 complete)**
+  - Implemented centralized `run_ai_request(...)` wrapper with USD-cost accounting.
+  - Removed `EMERGENT_LLM_KEY` and `emergentintegrations.LlmChat` usage.
+  - Migrated all backend AI endpoints to the wrapper (inbox analyze, batch analyze, content generate, template generate).
+  - Fixed latent NameError bug: `build_intent_prompt`/`build_content_prompt` now accept `workspace_id`.
 - ⏳ **Pending validation:** Sign-in with an existing Supabase user from the landing to confirm end-to-end in production.
+- ⏳ **Pending validation:** End-to-end test that AI calls debit credits and/or log usage in Supabase in the deployed environment.
 - ⏭️ Next: **Phase 7b** (RBAC + invitations + multi-workspace UX) and **Phase 7c** (audit logs UI + export).
 
 ---
@@ -73,7 +84,7 @@
 4. Safe fallback behavior for ambiguous messages (`needs_review`).
 5. Content generation produces social + email drafts.
 
-**What was implemented**
+**What was implemented (historical)**
 - OpenAI GPT-4o integration using **Emergent LLM Key**.
 - Robust prompts enforcing **JSON-only** outputs for:
   - Inbox intent detection + suggested action
@@ -218,16 +229,16 @@ into:
   - `LoginPage.js` replaced Google/Emergent flow with email+password.
   - `AuthCallback.js` updated to handle Supabase redirect-based confirmation.
 - Token propagation:
-  - `authFetch.js` and axios interceptor now attach Supabase `access_token` as Bearer.
+  - `authFetch.js` and axios interceptor attach Supabase `access_token` as Bearer.
 
 2) **Backend JWT verification + identity mapping**
-- Backend now verifies Supabase JWTs locally:
+- Backend verifies Supabase JWTs locally:
   - JWKS verification for ECC (P-256) tokens
   - HS256 legacy secret verification fallback
-- `users` Mongo collection now uses **Supabase UUID** as `user_id`.
+- `users` Mongo collection uses **Supabase UUID** as `user_id`.
 - Automatic user upsert and workspace ensure-on-first-request.
 - Legacy migration safety net:
-  - If an Emergent-era Mongo user exists by email, memberships/ownership are migrated to the Supabase UUID.
+  - If an Emergent-era Mongo user exists by email, memberships/ownership migrated to Supabase UUID.
 
 3) **Workspace endpoints (still MongoDB-backed)**
 - `/api/auth/me` returns:
@@ -236,27 +247,89 @@ into:
 - `/api/auth/workspaces` create
 - `/api/auth/workspaces/switch` switch active workspace
 
-4) **Plan y Uso now reads real Supabase data**
-- `PlanAndUsage.js` now queries Supabase directly:
+4) **Plan y Uso reads real Supabase data**
+- `PlanAndUsage.js` queries Supabase directly:
   - `profiles` for plan fields
   - `ai_usage` filtered by `user_id` and current `month`, aggregated by `type`
-- `/api/usage` is no longer used by the Plan y Uso UI (kept only as legacy endpoint).
+- `/api/usage` no longer used by UI (kept only as legacy endpoint).
 
 **Known constraints / open items**
-- **Supabase sign-up currently fails** with: `Database error saving new user`.
-  - Likely due to a Supabase-side trigger/policy (e.g., auto-profile creation) in the existing project.
+- **Supabase sign-up fails** with: `Database error saving new user`.
+  - Likely Supabase-side trigger/policy (e.g., auto-profile creation) in existing project.
   - Not a Quantro Flow code bug.
   - **Sign-in with existing landing accounts should work** and is the required validation step.
 
 **Exit criteria**
 - ✅ Quantro Flow connects directly to the existing Supabase project (no new DB).
-- ✅ Session is validated in Quantro Flow via Supabase.
-- ✅ Plan y Uso reads real data from `profiles` + `ai_usage`.
+- ✅ Session validated in Quantro Flow via Supabase.
+- ✅ Plan y Uso reads plan + usage from Supabase (`profiles`, `ai_usage`).
 - ⏳ Confirm end-to-end:
   - Sign in with an existing user from the landing
   - Verify `/api/auth/me` returns workspaces
   - Verify Smart Inbox/CRM/etc operate normally via Mongo (using Supabase identity)
-  - Verify sign-out calls `supabase.auth.signOut()` and redirects to /login
+  - Verify sign-out calls `supabase.auth.signOut()` and redirects to `/login`
+
+---
+
+#### Phase 7d-pre — AI Credits System + Backend Wrapper Enforcement (Cost Control)
+**Status: ✅ Implemented / ⏳ pending deployed E2E verification**
+
+**Goals (delivered)**
+- Stop unmetered AI usage by enforcing a single AI request wrapper.
+- Debit real USD costs (token-based) from `profiles.ai_credits_*`.
+- Block coupon/trial users from Quantro credits.
+- Force `gpt-4o-mini` whenever Quantro credits are used.
+- Allow fallback to user-provided OpenAI API key (encryption/decryption pending).
+
+**What was implemented (delivered)**
+- `/app/backend/ai_billing.py`
+  - Added httpx-based Supabase REST helpers:
+    - `fetch_profile(...)` (reads via user JWT under RLS)
+    - `rpc_decrement_credits(...)` (calls `decrement_ai_credits` RPC using user JWT)
+    - `insert_credit_usage(...)` (prefers `SUPABASE_SERVICE_ROLE_KEY`, best-effort fallback)
+  - Added `run_ai_request(...)` wrapper that:
+    - resolves credit state (coupon/trial vs. paid vs. depleted)
+    - forces model to `gpt-4o-mini` when using Quantro credits
+    - calls OpenAI via `openai.AsyncOpenAI`
+    - calculates USD cost from token usage
+    - decrements credits (best-effort)
+    - logs usage to `ai_credit_usage` (best-effort)
+  - Note: `get_user_api_key(...)` is still a stub until encryption strategy is chosen.
+- `/app/backend/server.py`
+  - Removed `emergentintegrations.LlmChat` and all `EMERGENT_LLM_KEY` usage.
+  - Extended `User` model to include `access_token`.
+  - `get_current_user` now forwards the Supabase access token to downstream handlers.
+  - Migrated all AI endpoints to `run_ai_request(...)`:
+    - `POST /api/inbox/{id}/analyze`
+    - `POST /api/inbox/batch-analyze` (re-raises HTTPException so UI sees a single 402)
+    - `POST /api/content/generate`
+    - `POST /api/templates/{id}/generate`
+  - Fixed latent NameError: `build_intent_prompt` and `build_content_prompt` now accept `workspace_id`.
+
+**Schema dependencies**
+- Supabase migration: `/app/supabase/migrations/20260425_ai_credits_schema.sql`
+  - Adds `profiles` credit columns
+  - Creates `ai_credit_usage`
+  - Adds `decrement_ai_credits` RPC
+- If migration is not applied: wrapper still functions, but debiting/logging becomes best-effort and may no-op.
+
+**Testing (completed locally)**
+- Smoke-tested credit-state branches:
+  - pro user w/ credits
+  - coupon user w/o key (blocked)
+  - coupon user w/ key (allowed, user_api)
+  - depleted credits (blocked)
+  - test user (20 credits)
+- Verified real OpenAI call returns tokens and cost; decrement/logging mocks called once.
+- Verified blocked paths return HTTP 402 with reasons:
+  - `coupon_no_user_key`
+  - `no_credits_no_user_key`
+
+**Exit criteria (pending)**
+- Confirm deployed environment:
+  1) Credits decrement updates `profiles.ai_credits_used/remaining`
+  2) Usage logs appear in `ai_credit_usage` (requires service-role key for inserts)
+  3) Coupon/trial users receive 402 and UI renders the Spanish message
 
 ---
 
@@ -295,6 +368,7 @@ into:
   - integrations connect/disconnect
   - automation actions executed
   - self-healing repair events
+  - (new) AI billing/credit block events (optional)
 
 **Deliverables (planned)**
 - Backend:
@@ -318,20 +392,34 @@ into:
    - monthly usage aggregate (from `ai_usage`)
 5) Confirm logout fully signs out via Supabase and redirects to `/login`.
 
+**Immediate (P0): Validate AI Credits wrapper end-to-end on Supabase**
+6) Ensure migration is applied: `20260425_ai_credits_schema.sql`.
+7) (Recommended) Set `SUPABASE_SERVICE_ROLE_KEY` in backend environment so `ai_credit_usage` inserts succeed under RLS.
+8) Use the app or curl to trigger:
+   - `POST /api/inbox/{id}/analyze`
+   - `POST /api/inbox/batch-analyze`
+   - `POST /api/content/generate`
+   - `POST /api/templates/{id}/generate`
+9) Verify in Supabase:
+   - `profiles.ai_credits_used` increments
+   - `profiles.ai_credits_remaining` decrements
+   - `ai_credit_usage` rows are inserted with `source` correct
+10) Verify coupon user gets HTTP 402 and no Quantro credits are consumed.
+
 **Immediate (P0): If sign-up must work in Quantro Flow**
-6) Investigate Supabase-side error `Database error saving new user`:
+11) Investigate Supabase-side error `Database error saving new user`:
    - Check landing’s signup trigger/function (profiles insert) and RLS.
    - Ensure required `profiles` columns have defaults / nullable.
    - Ensure `profiles` auto-insert trigger handles missing metadata.
 
 **Next (P1): Choose Phase 7b vs 7c**
-7) Start **Phase 7b** (RBAC + invitations + multi-workspace UX) OR
-8) Start **Phase 7c** (audit logs UI + export)
+12) Start **Phase 7b** (RBAC + invitations + multi-workspace UX) OR
+13) Start **Phase 7c** (audit logs UI + export)
 
 **Secondary (P2 hardening)**
-9) Refactor oversized modules:
+14) Refactor oversized modules:
   - Backend: `server.py`
-  - Frontend: `SmartInbox.js`, `ContentEngine.js`, `Dashboard.js`
+  - Frontend: `SmartInbox.js`, `ContentEngine.js`, `Dashboard.js`, `PlanAndUsage.js`
 
 ---
 
@@ -370,10 +458,17 @@ into:
 - ✅ Plan y Uso reads plan + usage from Supabase (`profiles`, `ai_usage`).
 - ⏳ End-to-end user validation pending: existing landing user can sign in and operate normally.
 
+**Phase 7d-pre Success Criteria (AI Credits enforcement):**
+- ✅ All backend AI endpoints are routed through `run_ai_request`.
+- ✅ Quantro-credit usage forces `gpt-4o-mini`.
+- ✅ Trial/coupon users cannot consume Quantro credits.
+- ⏳ Credits are decremented in Supabase after each successful AI request (requires schema + RPC).
+- ⏳ Per-request usage logs are written to `ai_credit_usage` (requires service-role key for inserts).
+
 **Phase 7 Success Criteria (SaaS Foundation):**
 - Phase 7b:
   - Multi-workspace UX + invitation links
   - RBAC enforced across API + UI
 - Phase 7c:
   - Audit logs user-visible, filterable, and exportable (CSV + JSON)
-  - Audit coverage includes Simulation toggles, integrations connect/disconnect, automation executions, and self-healing events
+  - Audit coverage includes Simulation toggles, integrations connect/disconnect, automation executions, self-healing events, and (optional) AI credit block events
