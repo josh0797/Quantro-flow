@@ -30,6 +30,13 @@ const PRICE_TO_PLAN: Record<string, 'essential' | 'pro' | 'enterprise'> = {
   price_1TL9HOLJrc96wcWHxt5fDHWe: 'enterprise',
 };
 
+// Per-plan monthly AI credits in USD (lock-step with backend ai_billing.py).
+const PLAN_CREDITS: Record<'essential' | 'pro' | 'enterprise', number> = {
+  essential: 5,
+  pro: 10,
+  enterprise: 20,
+};
+
 serve(async (req: Request): Promise<Response> => {
   const signature = req.headers.get('stripe-signature');
   if (!signature) return new Response('Missing signature', { status: 400 });
@@ -83,7 +90,18 @@ serve(async (req: Request): Promise<Response> => {
           has_coupon: hasCoupon,
           coupon_id: couponId,
         };
-        if (plan) update.plan = plan;
+        if (plan) {
+          update.plan = plan;
+          // Reset AI credits whenever the plan is set/changed. We don't
+          // carry over unused credits between cycles (per spec).
+          // For trial/active, refill to the plan's full bag.
+          if (sub.status === 'active' || sub.status === 'trialing') {
+            const credits = PLAN_CREDITS[plan];
+            update.ai_credits_total = credits;
+            update.ai_credits_used = 0;
+            update.ai_credits_remaining = credits;
+          }
+        }
         if (userId) {
           await supabase.from('profiles').update(update).eq('id', userId);
         } else {

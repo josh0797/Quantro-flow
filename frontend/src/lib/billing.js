@@ -2,51 +2,90 @@ import { supabase } from './supabaseClient';
 
 /**
  * Billing configuration — single source of truth for prices, Stripe price
- * IDs and AI usage limits across Quantro Flow.
+ * IDs, AI usage limits AND AI credits across Quantro Flow.
  *
  * Source-of-truth principles:
- *   • The numbers below MIRROR exactly what Stripe charges (no math).
- *     If Stripe says $2090/year, this file says $2090/year.
- *   • Limits below MIRROR what the backend enforces (see
- *     /app/backend/billing_limits.py). Keep both files in lock-step.
+ *   • Numbers below MIRROR exactly what Stripe charges (no math).
+ *   • Credits + pricing constants are kept in lock-step with the backend
+ *     (/app/backend/ai_billing.py and /app/backend/billing_limits.py).
  */
 
 // ---------- Plan-level pricing (exact Stripe values) ----------
 export const PLAN_PRICES = {
-  essential: {
-    monthly: 59,
-    annualTotal: 590,            // exact Stripe annual price
-    annualMonthlyDisplay: 49,    // for the "$49 / mo" headline on annual
-  },
-  pro: {
-    monthly: 209,
-    annualTotal: 2090,
-    annualMonthlyDisplay: 174,
-  },
-  enterprise: {
-    monthly: 499,
-    annualTotal: 4990,
-    annualMonthlyDisplay: 416,
-  },
+  essential: { monthly: 59,  annualTotal: 590,  annualMonthlyDisplay: 49 },
+  pro:       { monthly: 209, annualTotal: 2090, annualMonthlyDisplay: 174 },
+  enterprise:{ monthly: 499, annualTotal: 4990, annualMonthlyDisplay: 416 },
 };
 
-// ---------- AI usage limits (kept in sync with backend) ----------
+// ---------- Legacy AI call limits (still used as fallback) ----------
 export const PLAN_LIMITS = {
   essential: 1000,
   pro: 3000,
   enterprise: 15000,
 };
-
-// Hard-coded fallback used when no plan applies and the user is not paying.
 export const INACTIVE_LIMIT = 0;
-// Reduced limit applied when the customer redeemed a coupon / discount.
 export const COUPON_LIMIT = 500;
-// Internal QA accounts always get the top tier regardless of subscription.
 export const TEST_USERS = [
   'josias.martin@hotmail.com',
   'josias.martin90@hotmail.com',
 ];
 export const TEST_USER_LIMIT = 15000;
+
+// ---------- AI CREDITS (USD-based, real cost per request) ----------
+// Each plan ships with a fixed monthly bag of "credits" measured in USD.
+// Every request consumes its real Stripe-grade cost based on the model's
+// per-token pricing. When the user's bag hits 0 we fall back to the
+// user-supplied OpenAI API key (if configured); otherwise smart features
+// are blocked.
+export const PLAN_CREDITS = {
+  essential: 5,    // $5 USD / month
+  pro: 10,         // $10 USD / month
+  enterprise: 20,  // $20 USD / month
+};
+
+// Internal QA accounts always get the top tier in credits + calls.
+export const TEST_USER_CREDITS = 20;
+
+// Per-1M-tokens pricing for every model we route through Quantro's key.
+// When the user runs on Quantro credits we ALWAYS force gpt-4o-mini so
+// costs stay predictable. The other entries exist only so the helper
+// can also be reused for the user's own key when we let them pick a
+// model in the future.
+export const MODEL_PRICING = {
+  'gpt-4o-mini':   { inputPer1M: 0.15, outputPer1M: 0.60 },
+  // For visibility — not used while consuming Quantro credits.
+  'gpt-4o':        { inputPer1M: 2.50, outputPer1M: 10.00 },
+  'gpt-4.1-mini':  { inputPer1M: 0.40, outputPer1M: 1.60 },
+};
+
+// The model the backend forces when using Quantro's API key.
+export const QUANTRO_FORCED_MODEL = 'gpt-4o-mini';
+
+/**
+ * Compute the real USD cost of an OpenAI request from its token usage.
+ * Throws on unknown models so we never silently under-charge a customer.
+ */
+export function calculateOpenAICost({ model, inputTokens, outputTokens }) {
+  const pricing = MODEL_PRICING[model];
+  if (!pricing) {
+    throw new Error(`Modelo no soportado para billing: ${model}`);
+  }
+  return (
+    (Number(inputTokens || 0) / 1_000_000) * pricing.inputPer1M +
+    (Number(outputTokens || 0) / 1_000_000) * pricing.outputPer1M
+  );
+}
+
+/**
+ * Format a (potentially fractional) USD amount for the UI. We keep more
+ * precision when the value is below $1 so users can see the cents being
+ * consumed by individual requests.
+ */
+export function formatUsd(amount) {
+  const n = Number(amount || 0);
+  if (Math.abs(n) < 1) return `$${n.toFixed(4)}`;
+  return `$${n.toFixed(2)}`;
+}
 
 // ---------- Plans (consumed by PlanSelectorDialog) ----------
 export const PLANS = [
@@ -68,6 +107,7 @@ export const PLANS = [
       'CRM + Inbox con ejecución automática',
       'AI Coach (limitado)',
       'Automatizaciones básicas',
+      `$${PLAN_CREDITS.essential} USD en créditos IA / mes`,
       'Contabilidad básica',
       'CFDI 4.0',
     ],
@@ -91,6 +131,7 @@ export const PLANS = [
       'Decisiones + plan de acción',
       'Automatizaciones avanzadas',
       'Multiusuario (3 asientos)',
+      `$${PLAN_CREDITS.pro} USD en créditos IA / mes`,
       'Contabilidad avanzada',
     ],
     seats: 3,
@@ -110,6 +151,7 @@ export const PLANS = [
       'Multiusuario (10 asientos)',
       'Lean Management completo',
       'Quantro Revenue',
+      `$${PLAN_CREDITS.enterprise} USD en créditos IA / mes`,
       'Onboarding dedicado',
       'Soporte prioritario',
       'Agentes personalizados (próximamente)',
@@ -124,11 +166,6 @@ export function getPlanByKey(key) {
   return PLANS.find((p) => p.key === String(key).toLowerCase()) || null;
 }
 
-/**
- * Returns the per-plan price card data merged with the requested billing
- * period. The values come straight from PLAN_PRICES so the UI never
- * computes percentages on its own.
- */
 export function getPriceForPlan(planKey, period = 'monthly') {
   const k = String(planKey || '').toLowerCase();
   const plan = PLANS.find((p) => p.key === k);
@@ -145,15 +182,6 @@ export function getPriceForPlan(planKey, period = 'monthly') {
   };
 }
 
-/**
- * Subscription state derived purely from the profiles row in Supabase.
- * Drives the CTA wording on PlanAndUsage and the badge colours.
- *
- *   - "active"   : has plan + active stripe subscription
- *   - "trial"    : has plan, no subscription id (post-signup grace period)
- *   - "none"     : brand-new account, no plan
- *   - "past_due" : Stripe webhook flagged the subscription as past_due
- */
 export function deriveSubscriptionState(profile) {
   if (!profile) return 'none';
   if (profile.subscription_status === 'past_due') return 'past_due';
@@ -167,18 +195,9 @@ export function deriveSubscriptionState(profile) {
 }
 
 /**
- * Centralised AI usage limit resolver. Mirrors the backend implementation
- * at /app/backend/billing_limits.py exactly so the UI never advertises a
- * different cap than what the API enforces.
- *
- * Priority (top wins):
- *   1. Email is in TEST_USERS                     → TEST_USER_LIMIT (15000)
- *   2. Subscription not active and not trialing   → INACTIVE_LIMIT (0)
- *   3. profiles.has_coupon === true               → COUPON_LIMIT (500)
- *   4. PLAN_LIMITS[profiles.plan]                 → plan default
- *
- * Returns:
- *   { limit: number, reason: string, blocked: boolean }
+ * Resolve the AI usage limit (call-count based — legacy). Kept for
+ * backwards compatibility with the existing PlanAndUsage call card while
+ * we migrate the UI to USD credits.
  */
 export function getOpenAIUsageLimit({ email, profile }) {
   const lcEmail = String(email || '').toLowerCase();
@@ -188,10 +207,7 @@ export function getOpenAIUsageLimit({ email, profile }) {
   const status = profile?.subscription_status;
   const hasActiveStatus = status === 'active' || status === 'trialing';
   const planKey = (profile?.plan || '').toLowerCase();
-  // Treat "plan present + no status info yet" as trial-like to avoid
-  // accidentally blocking users while Stripe webhook is propagating.
   const planLooksActive = !!planKey && (hasActiveStatus || (!status && !!profile?.stripe_customer_id));
-
   if (!planLooksActive && !hasActiveStatus) {
     return { limit: INACTIVE_LIMIT, reason: 'no_active_subscription', blocked: true };
   }
@@ -204,24 +220,67 @@ export function getOpenAIUsageLimit({ email, profile }) {
   return { limit: PLAN_LIMITS.essential, reason: 'fallback_essential', blocked: false };
 }
 
+/**
+ * Resolve the user's AI credit state based on profiles + email overrides.
+ *
+ * Returns:
+ *   {
+ *     total: number,        // monthly bag in USD
+ *     used: number,         // consumed so far this cycle
+ *     remaining: number,    // total - used (server is the authority)
+ *     percent: 0..100,      // for the Progress bar
+ *     hasOwnApiKey: bool,   // whether the user has supplied their own key
+ *     source: 'quantro' | 'user_api' | 'blocked',
+ *     blocked: bool,        // true ⇒ cannot use smart features
+ *     reason: string,
+ *   }
+ */
+export function getCreditsState({ email, profile }) {
+  const lcEmail = String(email || '').toLowerCase();
+  const isTestUser = lcEmail && TEST_USERS.includes(lcEmail);
+  const planKey = (profile?.plan || '').toLowerCase();
+  const baseTotal = isTestUser
+    ? TEST_USER_CREDITS
+    : (planKey in PLAN_CREDITS ? PLAN_CREDITS[planKey] : 0);
+
+  // Source-of-truth values from the profiles row (kept in sync by Stripe webhook).
+  const total = Number(profile?.ai_credits_total ?? baseTotal) || 0;
+  const used = Math.max(0, Number(profile?.ai_credits_used ?? 0));
+  const remainingRaw = profile?.ai_credits_remaining;
+  const remaining = Math.max(0, Number(remainingRaw ?? (total - used)) || 0);
+  const percent = total > 0 ? Math.min(100, Math.round((used / total) * 1000) / 10) : 0;
+  const hasOwnApiKey = !!profile?.user_openai_api_key_encrypted || !!profile?.has_user_api_key;
+
+  let source;
+  let blocked = false;
+  let reason;
+  if (remaining > 0) {
+    source = 'quantro';
+    reason = 'using_quantro_credits';
+  } else if (hasOwnApiKey) {
+    source = 'user_api';
+    reason = 'using_user_api_key';
+  } else {
+    source = 'blocked';
+    blocked = true;
+    reason = 'no_credits_no_user_key';
+  }
+
+  return { total, used, remaining, percent, hasOwnApiKey, source, blocked, reason };
+}
+
 // ---------- Edge Function helpers ----------
 
 export async function startCheckout({ priceId, planKey, period = 'monthly' }) {
   if (!priceId) throw new Error('Missing priceId');
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
-  // Send the parameters in BOTH camelCase and snake_case so we work with
-  // whichever convention the deployed Edge Function uses.
   const payload = {
-    priceId,
-    planKey,
-    billingCycle: period,
+    priceId, planKey, billingCycle: period,
     successUrl: `${origin}/plan?checkout=success&plan=${planKey}`,
-    cancelUrl: `${origin}/plan?checkout=cancelled`,
-    price_id: priceId,
-    plan_key: planKey,
-    billing_period: period,
+    cancelUrl:  `${origin}/plan?checkout=cancelled`,
+    price_id: priceId, plan_key: planKey, billing_period: period,
     success_url: `${origin}/plan?checkout=success&plan=${planKey}`,
-    cancel_url: `${origin}/plan?checkout=cancelled`,
+    cancel_url:  `${origin}/plan?checkout=cancelled`,
     mode: 'subscription',
   };
   // eslint-disable-next-line no-console
@@ -241,10 +300,7 @@ export async function startCheckout({ priceId, planKey, period = 'monthly' }) {
 export async function openCustomerPortal() {
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
   const { data, error } = await supabase.functions.invoke('create-customer-portal-session', {
-    body: {
-      returnUrl: `${origin}/plan`,
-      return_url: `${origin}/plan`,
-    },
+    body: { returnUrl: `${origin}/plan`, return_url: `${origin}/plan` },
   });
   if (error) {
     const detail = await readEdgeFnError(error);

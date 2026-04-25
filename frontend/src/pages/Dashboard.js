@@ -13,7 +13,7 @@ import { format, parseISO, isToday, isTomorrow } from 'date-fns';
 import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 import { getIndustryConfig, getEntityLabel } from '../config/industryConfig';
 import { useLanguage } from '../context/LanguageContext';
-import SystemHealthCard from '../components/SystemHealthCard';
+// SystemHealthCard removed from Dashboard (UX cleanup) — the live "Datos en Vivo" indicator at the top already covers this signal.
 import { authFetch } from '../lib/authFetch';
 
 const eventTypeIcons = {
@@ -230,10 +230,8 @@ export default function Dashboard() {
         </Card>
       </div>
 
-      {/* System Health — self-healing surface */}
-      <div className="mb-6">
-        <SystemHealthCard />
-      </div>
+      {/* System Health card removed per UX cleanup — the green “Datos en Vivo”
+          dot at the top of the page already conveys that the platform is up. */}
 
       {/* Integration Status Banner (if any connected) */}
       {connectedIntegrations.length > 0 && (

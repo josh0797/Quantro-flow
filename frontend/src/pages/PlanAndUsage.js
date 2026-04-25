@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
+  Sparkles,
   CreditCard,
   Zap,
   Receipt,
@@ -15,6 +16,7 @@ import {
   RefreshCw,
   ExternalLink,
   Loader2,
+  Key,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -32,6 +34,8 @@ import {
   deriveSubscriptionState,
   openCustomerPortal,
   getOpenAIUsageLimit,
+  getCreditsState,
+  formatUsd,
 } from '../lib/billing';
 
 /**
@@ -358,7 +362,106 @@ export default function PlanAndUsage() {
         </CardContent>
       </Card>
 
-      {/* 2. Uso de API */}
+      {/* 2. Cr\u00e9ditos IA (USD-based) */}
+      {(() => {
+        const credits = getCreditsState({ email: user?.email, profile });
+        return (
+          <Card data-testid="credits-card" className="bg-[hsl(var(--surface-1))] border-[hsl(var(--border))]">
+            <CardHeader className="flex flex-row items-center justify-between gap-3 pb-3">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-[hsl(var(--primary)/0.12)] text-[hsl(var(--primary))] flex items-center justify-center">
+                  <Sparkles size={18} />
+                </div>
+                <div>
+                  <CardTitle className="text-sm font-medium text-muted-foreground">{t('plan_usage.ai_credits')}</CardTitle>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">{t('plan_usage.ai_credits_subtitle')}</p>
+                </div>
+              </div>
+              <Badge
+                data-testid="credits-source-badge"
+                className={`text-[10px] uppercase tracking-wide font-medium border ${
+                  credits.source === 'quantro'
+                    ? 'bg-[hsl(var(--primary)/0.12)] text-[hsl(var(--primary))] border-[hsl(var(--primary)/0.3)]'
+                    : credits.source === 'user_api'
+                      ? 'bg-[hsl(var(--success)/0.12)] text-[hsl(var(--success))] border-[hsl(var(--success)/0.3)]'
+                      : 'bg-[hsl(var(--destructive)/0.12)] text-[hsl(var(--destructive))] border-[hsl(var(--destructive)/0.3)]'
+                }`}
+              >
+                {credits.source === 'quantro' && t('plan_usage.credits_source_quantro')}
+                {credits.source === 'user_api' && t('plan_usage.credits_source_user')}
+                {credits.source === 'blocked' && t('plan_usage.credits_source_blocked')}
+              </Badge>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-end justify-between gap-4">
+                <div>
+                  <div className="text-2xl font-semibold text-foreground tabular-nums">
+                    <span data-testid="credits-remaining">{formatUsd(credits.remaining)}</span>
+                    <span className="text-sm text-muted-foreground font-normal">
+                      {' '}/ <span data-testid="credits-total">{formatUsd(credits.total)}</span> {t('plan_usage.credits_unit')}
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    {t('plan_usage.credits_used', { used: formatUsd(credits.used) })}
+                  </p>
+                </div>
+                <div className="text-right">
+                  <div data-testid="credits-percent" className="text-sm font-semibold text-foreground">
+                    {credits.percent}%
+                  </div>
+                  <div className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                    {t('plan_usage.credits_consumed')}
+                  </div>
+                </div>
+              </div>
+              <Progress data-testid="credits-progress" value={credits.percent} className="h-2 bg-[hsl(var(--surface-2))]" />
+
+              {credits.source === 'quantro' && credits.remaining > 0 && credits.remaining < credits.total * 0.2 && (
+                <div data-testid="credits-low-warning" className="text-xs text-[hsl(var(--warning))] bg-[hsl(var(--warning)/0.08)] border border-[hsl(var(--warning)/0.2)] rounded-md px-3 py-2">
+                  {t('plan_usage.credits_low_warning')}
+                </div>
+              )}
+              {credits.source === 'user_api' && (
+                <div data-testid="credits-fallback" className="flex items-center gap-2 text-xs text-[hsl(var(--success))] bg-[hsl(var(--success)/0.08)] border border-[hsl(var(--success)/0.2)] rounded-md px-3 py-2">
+                  <Key size={12} />
+                  <span>{t('plan_usage.credits_fallback_user_key')}</span>
+                </div>
+              )}
+              {credits.source === 'blocked' && (
+                <div data-testid="credits-blocked" className="space-y-2 text-xs text-[hsl(var(--destructive))] bg-[hsl(var(--destructive)/0.08)] border border-[hsl(var(--destructive)/0.2)] rounded-md px-3 py-2">
+                  <p>{t('plan_usage.credits_blocked_message')}</p>
+                  <div className="flex gap-2">
+                    <Button
+                      data-testid="credits-add-key-btn"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => navigate('/settings')}
+                      className="border-[hsl(var(--border))] h-8 text-xs"
+                    >
+                      <Key size={12} className="mr-1.5" />
+                      {t('plan_usage.add_own_api_key')}
+                    </Button>
+                    <Button
+                      data-testid="credits-upgrade-btn"
+                      size="sm"
+                      onClick={handleUpgradeClick}
+                      className="bg-[hsl(var(--primary))] hover:bg-[hsl(var(--primary)/0.9)] text-[hsl(var(--primary-foreground))] h-8 text-xs"
+                    >
+                      {t('billing.upgrade_plan')}
+                    </Button>
+                  </div>
+                </div>
+              )}
+
+              <div className="text-[10px] text-muted-foreground pt-1 border-t border-[hsl(var(--border))]">
+                {t('plan_usage.credits_pricing_hint')}
+              </div>
+            </CardContent>
+          </Card>
+        );
+      })()}
+
+      {/* 3. Uso de API (legacy call counts \u2014 still useful for visibility) */}
       <Card data-testid="usage-card" className="bg-[hsl(var(--surface-1))] border-[hsl(var(--border))]">
         <CardHeader className="flex flex-row items-center justify-between gap-3 pb-3">
           <div className="flex items-center gap-3">

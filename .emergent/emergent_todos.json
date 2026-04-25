@@ -1,30 +1,34 @@
 [
   {
-    "content": "Update billing.js with exact Stripe annual prices (590/2090/4990) + new PLAN_LIMITS (1000/3000/15000)",
+    "content": "Remove Estado del Sistema block from Dashboard",
     "status": "completed"
   },
   {
-    "content": "Add getOpenAIUsageLimit() helper with priority order",
+    "content": "Save OPENAI_API_KEY in backend/.env",
     "status": "completed"
   },
   {
-    "content": "Update PlanSelectorDialog: \"2 meses gratis\" microcopy + correct prices",
+    "content": "Replace call-limit with USD-credit system in billing.js",
     "status": "completed"
   },
   {
-    "content": "Update PlanAndUsage to use centralized limit helper + show reason hints",
+    "content": "Mirror credit system in /app/backend/ai_billing.py",
     "status": "completed"
   },
   {
-    "content": "Create backend /app/backend/billing_limits.py for Python parity",
+    "content": "Update PlanAndUsage to show credits in USD with progress + low-balance warning + 'use your own API key' fallback hint",
     "status": "completed"
   },
   {
-    "content": "Update Stripe webhook reference to write has_coupon + coupon_id + subscription_status",
+    "content": "Update Stripe webhook reference: reset ai_credits_total on plan activation/change",
     "status": "completed"
   },
   {
-    "content": "Add i18n keys + lint + verify",
+    "content": "Provide SQL migration script + i18n keys + lint",
     "status": "completed"
+  },
+  {
+    "content": "User: apply SQL migration + redeploy stripe-webhook + integrate ai_billing.py into AI endpoints",
+    "status": "pending"
   }
 ]
