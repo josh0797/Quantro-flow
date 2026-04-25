@@ -68,6 +68,24 @@ export const authMe = () => api.get('/auth/me').then(r => r.data);
 export const authSwitchWorkspace = (workspace_id) => api.post('/auth/workspaces/switch', { workspace_id }).then(r => r.data);
 export const authCreateWorkspace = (name) => api.post('/auth/workspaces', { name }).then(r => r.data);
 
+// Members & RBAC (Phase 7b)
+export const listMembers = (workspace_id) =>
+  api.get(`/workspaces/${workspace_id}/members`).then(r => r.data);
+export const updateMemberRole = (workspace_id, user_id, role) =>
+  api.patch(`/workspaces/${workspace_id}/members/${user_id}`, { role }).then(r => r.data);
+export const removeMember = (workspace_id, user_id) =>
+  api.delete(`/workspaces/${workspace_id}/members/${user_id}`).then(r => r.data);
+
+// Workspace invites
+export const listInvites = (workspace_id) =>
+  api.get(`/workspaces/${workspace_id}/invites`).then(r => r.data);
+export const createInvite = (workspace_id, payload) =>
+  api.post(`/workspaces/${workspace_id}/invites`, payload).then(r => r.data);
+export const revokeInvite = (workspace_id, invite_id) =>
+  api.delete(`/workspaces/${workspace_id}/invites/${invite_id}`).then(r => r.data);
+export const peekInvite = (token) => api.get(`/invites/${token}`).then(r => r.data);
+export const acceptInvite = (token) => api.post(`/invites/${token}/accept`).then(r => r.data);
+
 // Dashboard
 export const getDashboardMetrics = () => api.get('/dashboard/metrics').then(r => r.data);
 export const getAISuggestions = () => api.get('/dashboard/suggestions').then(r => r.data);

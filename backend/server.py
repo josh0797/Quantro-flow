@@ -1310,6 +1310,444 @@ async def switch_workspace(req: SwitchWorkspaceRequest, user: User = Depends(get
     return {"success": True, "workspace_id": req.workspace_id}
 
 
+# ─── RBAC (Phase 7b) ──────────────────────────────────────────────────
+# Role hierarchy (highest → lowest privilege):
+#   owner     — Full control. One per workspace. Can transfer ownership and
+#               promote others to admin/owner.
+#   admin     — Manage members, integrations, business profile, simulation
+#               mode. Cannot transfer ownership.
+#   manager   — Edit automation policies, escalation rules, content
+#               templates. Cannot manage members or settings.
+#   operator  — Day-to-day workspace usage: inbox actions, CRM/Schedule
+#               writes, content generation. Cannot edit governance.
+#   agent     — Read-only on most modules. Cannot write.
+#
+# Helpers:
+#   ROLE_RANK[role] -> int
+#   require_role(min_role) -> FastAPI dependency that 403s when the
+#       caller's role in the active workspace is below `min_role`.
+ROLE_RANK = {"agent": 1, "operator": 2, "manager": 3, "admin": 4, "owner": 5}
+VALID_ROLES = list(ROLE_RANK.keys())
+
+# Workspace invites: each invite is a single document (no email needed).
+# A workspace admin generates an invite, gets a shareable URL, and any
+# authenticated user that hits /api/invites/{token}/accept gets added to
+# the workspace with the role specified on the invite.
+invites_col = db["workspace_invites"]
+
+
+def role_rank(role: Optional[str]) -> int:
+    return ROLE_RANK.get((role or "").lower(), 0)
+
+
+async def _membership_for(user_id: str, workspace_id: str) -> Optional[dict]:
+    return await workspace_members_col.find_one(
+        {"user_id": user_id, "workspace_id": workspace_id}, {"_id": 0}
+    )
+
+
+def require_role(min_role: str):
+    """Build a FastAPI dependency that asserts the caller's role in the
+    *active* workspace is at least ``min_role``. The active workspace is
+    resolved by ``get_current_workspace_id`` (header → user.current →
+    first membership), so this dep also doubles as a membership guard.
+
+    Usage::
+
+        @app.put("/api/business-profile")
+        async def update_profile(
+            req: BusinessProfileRequest,
+            workspace_id: str = Depends(get_current_workspace_id),
+            membership: dict = Depends(require_role("admin")),
+        ):
+            ...
+    """
+    if min_role not in VALID_ROLES:
+        raise ValueError(f"Unknown role: {min_role}")
+
+    async def _dep(
+        user: User = Depends(get_current_user),
+        workspace_id: str = Depends(get_current_workspace_id),
+    ) -> dict:
+        member = await _membership_for(user.user_id, workspace_id)
+        if not member:
+            raise HTTPException(status_code=403, detail="Not a workspace member")
+        if role_rank(member.get("role")) < role_rank(min_role):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "rbac_forbidden",
+                    "required_role": min_role,
+                    "your_role": member.get("role"),
+                },
+            )
+        return member
+
+    return _dep
+
+
+# ─── Workspace members + invites endpoints ────────────────────────────
+class UpdateMemberRoleRequest(BaseModel):
+    role: str
+
+
+class CreateInviteRequest(BaseModel):
+    role: str = "operator"
+    max_uses: Optional[int] = 1
+    expires_in_days: Optional[int] = 7
+
+
+def _serialize_member(member_doc: dict, user_doc: Optional[dict]) -> dict:
+    return {
+        "user_id": member_doc.get("user_id"),
+        "role": member_doc.get("role", "agent"),
+        "joined_at": (
+            member_doc.get("joined_at").isoformat()
+            if isinstance(member_doc.get("joined_at"), datetime)
+            else member_doc.get("joined_at")
+        ),
+        "email": (user_doc or {}).get("email"),
+        "name": (user_doc or {}).get("name"),
+        "picture": (user_doc or {}).get("picture"),
+    }
+
+
+def _serialize_invite(invite: dict, *, base_url: Optional[str] = None) -> dict:
+    token = invite.get("token")
+    return {
+        "invite_id": invite.get("invite_id"),
+        "workspace_id": invite.get("workspace_id"),
+        "role": invite.get("role"),
+        "token": token,
+        "url": f"{base_url}/join/{token}" if base_url and token else None,
+        "max_uses": invite.get("max_uses"),
+        "used_count": invite.get("used_count", 0),
+        "expires_at": (
+            invite.get("expires_at").isoformat()
+            if isinstance(invite.get("expires_at"), datetime)
+            else invite.get("expires_at")
+        ),
+        "created_by": invite.get("created_by"),
+        "created_at": (
+            invite.get("created_at").isoformat()
+            if isinstance(invite.get("created_at"), datetime)
+            else invite.get("created_at")
+        ),
+        "revoked": bool(invite.get("revoked", False)),
+    }
+
+
+@app.get("/api/workspaces/{workspace_id}/members")
+async def list_members(
+    workspace_id: str,
+    user: User = Depends(get_current_user),
+):
+    """List all members of a workspace. Any member can view the roster
+    (it surfaces ownership/role boundaries, not sensitive data)."""
+    me = await _membership_for(user.user_id, workspace_id)
+    if not me:
+        raise HTTPException(status_code=403, detail="Not a workspace member")
+    members = await workspace_members_col.find(
+        {"workspace_id": workspace_id}, {"_id": 0}
+    ).to_list(200)
+    user_ids = [m["user_id"] for m in members]
+    user_rows = await users_col.find(
+        {"user_id": {"$in": user_ids}},
+        {"_id": 0, "user_id": 1, "email": 1, "name": 1, "picture": 1},
+    ).to_list(200)
+    by_id = {u["user_id"]: u for u in user_rows}
+    return {
+        "workspace_id": workspace_id,
+        "your_role": me.get("role"),
+        "members": [_serialize_member(m, by_id.get(m["user_id"])) for m in members],
+    }
+
+
+@app.patch("/api/workspaces/{workspace_id}/members/{target_user_id}")
+async def update_member_role(
+    workspace_id: str,
+    target_user_id: str,
+    req: UpdateMemberRoleRequest,
+    user: User = Depends(get_current_user),
+):
+    """Change a member's role. Rules:
+      • Only Owner can promote to admin or owner (transfer ownership).
+      • Admin can demote/promote anyone among agent/operator/manager.
+      • Cannot demote yourself if you're the sole Owner.
+    """
+    new_role = (req.role or "").lower()
+    if new_role not in VALID_ROLES:
+        raise HTTPException(status_code=400, detail=f"Invalid role. Allowed: {VALID_ROLES}")
+
+    me = await _membership_for(user.user_id, workspace_id)
+    if not me:
+        raise HTTPException(status_code=403, detail="Not a workspace member")
+    if role_rank(me.get("role")) < role_rank("admin"):
+        raise HTTPException(status_code=403, detail="Requires admin role")
+
+    target = await _membership_for(target_user_id, workspace_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    target_role = (target.get("role") or "agent").lower()
+
+    # Only Owner can touch admin/owner roles (either side of the change).
+    is_privileged_change = new_role in {"admin", "owner"} or target_role in {"admin", "owner"}
+    if is_privileged_change and me.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Only the Owner can manage admin/owner roles")
+
+    # Ownership transfer: demote previous owner to admin so workspace
+    # always has exactly one Owner.
+    if new_role == "owner":
+        if user.user_id == target_user_id:
+            raise HTTPException(status_code=400, detail="You're already the owner")
+        await workspace_members_col.update_one(
+            {"user_id": user.user_id, "workspace_id": workspace_id},
+            {"$set": {"role": "admin"}},
+        )
+        await workspaces_col.update_one(
+            {"workspace_id": workspace_id},
+            {"$set": {"owner_user_id": target_user_id}},
+        )
+
+    await workspace_members_col.update_one(
+        {"user_id": target_user_id, "workspace_id": workspace_id},
+        {"$set": {"role": new_role, "role_updated_at": datetime.now(timezone.utc)}},
+    )
+    await log_audit(
+        "members.role_changed",
+        f"{user.email} changed role of {target_user_id} to {new_role}",
+        user_id=user.user_id, workspace_id=workspace_id,
+        metadata={"target_user_id": target_user_id, "new_role": new_role, "previous_role": target_role},
+    )
+    return {"success": True, "user_id": target_user_id, "role": new_role}
+
+
+@app.delete("/api/workspaces/{workspace_id}/members/{target_user_id}")
+async def remove_member(
+    workspace_id: str,
+    target_user_id: str,
+    user: User = Depends(get_current_user),
+):
+    """Remove a member. Owner cannot be removed; admins can only be
+    removed by the Owner. Members can also remove themselves (leave)."""
+    me = await _membership_for(user.user_id, workspace_id)
+    if not me:
+        raise HTTPException(status_code=403, detail="Not a workspace member")
+
+    target = await _membership_for(target_user_id, workspace_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    target_role = (target.get("role") or "agent").lower()
+    is_self = user.user_id == target_user_id
+
+    if target_role == "owner":
+        raise HTTPException(status_code=400, detail="Owner cannot be removed. Transfer ownership first.")
+
+    if not is_self:
+        if role_rank(me.get("role")) < role_rank("admin"):
+            raise HTTPException(status_code=403, detail="Requires admin role")
+        if target_role == "admin" and me.get("role") != "owner":
+            raise HTTPException(status_code=403, detail="Only the Owner can remove an admin")
+
+    await workspace_members_col.delete_one(
+        {"user_id": target_user_id, "workspace_id": workspace_id}
+    )
+    # If the user was active in this workspace, clear their pointer so
+    # /api/auth/me re-resolves on next login.
+    await users_col.update_one(
+        {"user_id": target_user_id, "current_workspace_id": workspace_id},
+        {"$unset": {"current_workspace_id": ""}},
+    )
+    await log_audit(
+        "members.removed",
+        f"{user.email} removed {target_user_id} from workspace",
+        user_id=user.user_id, workspace_id=workspace_id,
+        metadata={"target_user_id": target_user_id, "self_leave": is_self, "previous_role": target_role},
+    )
+    return {"success": True}
+
+
+@app.post("/api/workspaces/{workspace_id}/invites")
+async def create_invite(
+    workspace_id: str,
+    req: CreateInviteRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+):
+    """Generate a shareable invite link. Admin+ only."""
+    me = await _membership_for(user.user_id, workspace_id)
+    if not me:
+        raise HTTPException(status_code=403, detail="Not a workspace member")
+    if role_rank(me.get("role")) < role_rank("admin"):
+        raise HTTPException(status_code=403, detail="Requires admin role")
+
+    role = (req.role or "operator").lower()
+    if role not in VALID_ROLES:
+        raise HTTPException(status_code=400, detail=f"Invalid role. Allowed: {VALID_ROLES}")
+    # Only the Owner can mint invites that grant admin/owner.
+    if role in {"admin", "owner"} and me.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Only the Owner can invite admins/owners")
+
+    import secrets
+    token = secrets.token_urlsafe(24)
+    invite_id = f"inv_{uuid.uuid4().hex[:12]}"
+    expires_in_days = max(1, min(int(req.expires_in_days or 7), 90))
+    max_uses = max(1, min(int(req.max_uses or 1), 50))
+    expires_at = datetime.now(timezone.utc) + timedelta(days=expires_in_days)
+
+    invite_doc = {
+        "invite_id": invite_id,
+        "workspace_id": workspace_id,
+        "token": token,
+        "role": role,
+        "max_uses": max_uses,
+        "used_count": 0,
+        "expires_at": expires_at,
+        "revoked": False,
+        "created_by": user.user_id,
+        "created_at": datetime.now(timezone.utc),
+        "accepted_by": [],
+    }
+    await invites_col.insert_one(invite_doc)
+    await log_audit(
+        "invites.created",
+        f"{user.email} created invite for role={role}",
+        user_id=user.user_id, workspace_id=workspace_id,
+        metadata={"invite_id": invite_id, "role": role, "max_uses": max_uses},
+    )
+    base_url = (request.headers.get("origin") or "").rstrip("/")
+    return _serialize_invite(invite_doc, base_url=base_url or None)
+
+
+@app.get("/api/workspaces/{workspace_id}/invites")
+async def list_invites(
+    workspace_id: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+):
+    """List active invites for a workspace. Admin+ only."""
+    me = await _membership_for(user.user_id, workspace_id)
+    if not me:
+        raise HTTPException(status_code=403, detail="Not a workspace member")
+    if role_rank(me.get("role")) < role_rank("admin"):
+        raise HTTPException(status_code=403, detail="Requires admin role")
+    rows = await invites_col.find({"workspace_id": workspace_id}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    base_url = (request.headers.get("origin") or "").rstrip("/")
+    return {"invites": [_serialize_invite(r, base_url=base_url or None) for r in rows]}
+
+
+@app.delete("/api/workspaces/{workspace_id}/invites/{invite_id}")
+async def revoke_invite(
+    workspace_id: str,
+    invite_id: str,
+    user: User = Depends(get_current_user),
+):
+    """Revoke a pending invite. Admin+ only."""
+    me = await _membership_for(user.user_id, workspace_id)
+    if not me:
+        raise HTTPException(status_code=403, detail="Not a workspace member")
+    if role_rank(me.get("role")) < role_rank("admin"):
+        raise HTTPException(status_code=403, detail="Requires admin role")
+    result = await invites_col.update_one(
+        {"workspace_id": workspace_id, "invite_id": invite_id},
+        {"$set": {"revoked": True, "revoked_at": datetime.now(timezone.utc), "revoked_by": user.user_id}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Invite not found")
+    await log_audit(
+        "invites.revoked",
+        f"{user.email} revoked invite {invite_id}",
+        user_id=user.user_id, workspace_id=workspace_id,
+        metadata={"invite_id": invite_id},
+    )
+    return {"success": True}
+
+
+@app.get("/api/invites/{token}")
+async def peek_invite(token: str, user: User = Depends(get_current_user)):  # noqa: ARG001 — auth required
+    """Public-ish endpoint (still requires Supabase auth so abuse is
+    bounded) that shows the receiver what they're about to accept. Used
+    by the /join/:token frontend page."""
+    invite = await invites_col.find_one({"token": token}, {"_id": 0})
+    if not invite:
+        raise HTTPException(status_code=404, detail="Invite not found or expired")
+    if invite.get("revoked"):
+        raise HTTPException(status_code=410, detail="This invite has been revoked")
+    expires_at = invite.get("expires_at")
+    if isinstance(expires_at, datetime) and expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+        raise HTTPException(status_code=410, detail="This invite has expired")
+    if invite.get("used_count", 0) >= invite.get("max_uses", 1):
+        raise HTTPException(status_code=410, detail="This invite has reached its usage limit")
+    workspace = await workspaces_col.find_one({"workspace_id": invite["workspace_id"]}, {"_id": 0})
+    return {
+        "workspace_id": invite["workspace_id"],
+        "workspace_name": (workspace or {}).get("name", "Workspace"),
+        "role": invite.get("role"),
+        "expires_at": expires_at.isoformat() if isinstance(expires_at, datetime) else expires_at,
+    }
+
+
+@app.post("/api/invites/{token}/accept")
+async def accept_invite(token: str, user: User = Depends(get_current_user)):
+    """Accept an invite token. Adds the authenticated user to the
+    workspace with the role specified on the invite. Idempotent: if the
+    user is already a member, the existing membership is preserved
+    (role is NOT downgraded)."""
+    invite = await invites_col.find_one({"token": token}, {"_id": 0})
+    if not invite:
+        raise HTTPException(status_code=404, detail="Invite not found")
+    if invite.get("revoked"):
+        raise HTTPException(status_code=410, detail="This invite has been revoked")
+    expires_at = invite.get("expires_at")
+    if isinstance(expires_at, datetime) and expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+        raise HTTPException(status_code=410, detail="This invite has expired")
+    if invite.get("used_count", 0) >= invite.get("max_uses", 1):
+        raise HTTPException(status_code=410, detail="This invite has reached its usage limit")
+
+    workspace_id = invite["workspace_id"]
+    role = (invite.get("role") or "operator").lower()
+
+    existing = await _membership_for(user.user_id, workspace_id)
+    if existing:
+        # Already a member — don't downgrade. Just point them at the
+        # workspace and consider the invite redeemed.
+        await users_col.update_one(
+            {"user_id": user.user_id},
+            {"$set": {"current_workspace_id": workspace_id}},
+        )
+        return {"success": True, "workspace_id": workspace_id, "role": existing.get("role"), "already_member": True}
+
+    await workspace_members_col.insert_one({
+        "workspace_id": workspace_id,
+        "user_id": user.user_id,
+        "role": role,
+        "joined_at": datetime.now(timezone.utc),
+        "joined_via_invite": invite.get("invite_id"),
+    })
+    await invites_col.update_one(
+        {"token": token},
+        {
+            "$inc": {"used_count": 1},
+            "$push": {"accepted_by": {"user_id": user.user_id, "at": datetime.now(timezone.utc)}},
+        },
+    )
+    await users_col.update_one(
+        {"user_id": user.user_id},
+        {"$set": {"current_workspace_id": workspace_id}},
+    )
+    await log_audit(
+        "invites.accepted",
+        f"{user.email} joined workspace via invite as {role}",
+        user_id=user.user_id, workspace_id=workspace_id,
+        metadata={"invite_id": invite.get("invite_id"), "role": role},
+    )
+    return {"success": True, "workspace_id": workspace_id, "role": role, "already_member": False}
+
+
+
+
 # ─── Health ────────────────────────────────────────────────────────────
 @app.get("/api/health")
 async def health():
@@ -2348,7 +2786,7 @@ async def get_policies(workspace_id: str = Depends(get_current_workspace_id)):
     return [serialize_doc(p) for p in policies]
 
 @app.post("/api/policies")
-async def create_policy(req: AutomationPolicyRequest, workspace_id: str = Depends(get_current_workspace_id)):
+async def create_policy(req: AutomationPolicyRequest, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("manager"))):
     policy = {
         "policy_id": str(uuid.uuid4()),
         "workspace_id": workspace_id,
@@ -2368,7 +2806,7 @@ async def create_policy(req: AutomationPolicyRequest, workspace_id: str = Depend
     return serialize_doc(policy)
 
 @app.delete("/api/policies/{policy_id}")
-async def delete_policy(policy_id: str, workspace_id: str = Depends(get_current_workspace_id)):
+async def delete_policy(policy_id: str, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("manager"))):
     result = await policies_col.delete_one({"workspace_id": workspace_id, "policy_id": policy_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Policy not found")
@@ -2376,7 +2814,7 @@ async def delete_policy(policy_id: str, workspace_id: str = Depends(get_current_
     return {"success": True}
 
 @app.put("/api/policies/{policy_id}")
-async def update_policy(policy_id: str, req: AutomationPolicyRequest, workspace_id: str = Depends(get_current_workspace_id)):
+async def update_policy(policy_id: str, req: AutomationPolicyRequest, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("manager"))):
     update = {
         "intent": req.intent,
         "action": req.action,
@@ -2450,7 +2888,7 @@ async def get_escalation_rules(workspace_id: str = Depends(get_current_workspace
     return [serialize_doc(r) for r in rules]
 
 @app.post("/api/escalation-rules")
-async def create_escalation_rule(req: EscalationRuleRequest, workspace_id: str = Depends(get_current_workspace_id)):
+async def create_escalation_rule(req: EscalationRuleRequest, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("manager"))):
     rule = {
         "rule_id": str(uuid.uuid4()),
         "workspace_id": workspace_id,
@@ -2467,7 +2905,7 @@ async def create_escalation_rule(req: EscalationRuleRequest, workspace_id: str =
     return serialize_doc(rule)
 
 @app.put("/api/escalation-rules/{rule_id}")
-async def update_escalation_rule(rule_id: str, req: EscalationRuleRequest, workspace_id: str = Depends(get_current_workspace_id)):
+async def update_escalation_rule(rule_id: str, req: EscalationRuleRequest, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("manager"))):
     update = {
         "name": req.name,
         "condition_type": req.condition_type,
@@ -2484,7 +2922,7 @@ async def update_escalation_rule(rule_id: str, req: EscalationRuleRequest, works
     return serialize_doc(updated)
 
 @app.delete("/api/escalation-rules/{rule_id}")
-async def delete_escalation_rule(rule_id: str, workspace_id: str = Depends(get_current_workspace_id)):
+async def delete_escalation_rule(rule_id: str, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("manager"))):
     result = await escalation_col.delete_one({"workspace_id": workspace_id, "rule_id": rule_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Rule not found")
@@ -2509,7 +2947,7 @@ async def get_template(template_id: str, workspace_id: str = Depends(get_current
     return serialize_doc(template)
 
 @app.post("/api/templates")
-async def create_template(req: ContentTemplateRequest, workspace_id: str = Depends(get_current_workspace_id)):
+async def create_template(req: ContentTemplateRequest, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("manager"))):
     template = {
         "template_id": str(uuid.uuid4()),
         "workspace_id": workspace_id,
@@ -2529,7 +2967,7 @@ async def create_template(req: ContentTemplateRequest, workspace_id: str = Depen
     return serialize_doc(template)
 
 @app.put("/api/templates/{template_id}")
-async def update_template(template_id: str, req: ContentTemplateRequest, workspace_id: str = Depends(get_current_workspace_id)):
+async def update_template(template_id: str, req: ContentTemplateRequest, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("manager"))):
     update = {
         "name": req.name,
         "category": req.category,
@@ -2547,7 +2985,7 @@ async def update_template(template_id: str, req: ContentTemplateRequest, workspa
     return serialize_doc(updated)
 
 @app.delete("/api/templates/{template_id}")
-async def delete_template(template_id: str, workspace_id: str = Depends(get_current_workspace_id)):
+async def delete_template(template_id: str, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("manager"))):
     result = await templates_col.delete_one({"workspace_id": workspace_id, "template_id": template_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Template not found")
@@ -2695,7 +3133,7 @@ async def get_business_profile(workspace_id: str = Depends(get_current_workspace
     return serialize_doc(profile)
 
 @app.put("/api/business-profile")
-async def update_business_profile(req: BusinessProfileUpdate, workspace_id: str = Depends(get_current_workspace_id)):
+async def update_business_profile(req: BusinessProfileUpdate, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("admin"))):
     """Update the business profile configuration."""
     # Get current profile to check if we need to generate simulation data
     current_profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
@@ -2766,7 +3204,7 @@ async def get_integration(provider: str, workspace_id: str = Depends(get_current
     return serialize_doc(integration)
 
 @app.put("/api/integrations/{provider}")
-async def update_integration(provider: str, req: IntegrationUpdate, workspace_id: str = Depends(get_current_workspace_id)):
+async def update_integration(provider: str, req: IntegrationUpdate, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("admin"))):
     """Update an integration configuration."""
     update_data = {
         "status": req.status,
@@ -2792,7 +3230,7 @@ async def update_integration(provider: str, req: IntegrationUpdate, workspace_id
     return serialize_doc(updated)
 
 @app.post("/api/integrations/{provider}/test")
-async def test_integration(provider: str, workspace_id: str = Depends(get_current_workspace_id)):
+async def test_integration(provider: str, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("admin"))):
     """Test an integration connection (simulated)."""
     integration = await integrations_config_col.find_one({"workspace_id": workspace_id, "provider": provider}, {"_id": 0})
     if not integration:
@@ -3015,7 +3453,7 @@ async def generate_simulation_data(industry: str):
 
 
 @app.post("/api/simulation/generate")
-async def generate_simulation(workspace_id: str = Depends(get_current_workspace_id)):
+async def generate_simulation(workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("admin"))):
     """Generate simulation data for the current industry."""
     profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
     if not profile:
@@ -3033,7 +3471,7 @@ async def generate_simulation(workspace_id: str = Depends(get_current_workspace_
 
 
 @app.post("/api/simulation/clear")
-async def clear_simulation(workspace_id: str = Depends(get_current_workspace_id)):
+async def clear_simulation(workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("admin"))):
     """Clear all simulation data."""
     deleted_counts = {
         "contacts": (await contacts_col.delete_many({"is_simulation": True})).deleted_count,

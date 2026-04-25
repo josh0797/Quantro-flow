@@ -1,6 +1,6 @@
 import React from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Inbox, Calendar, Users, UserPlus, PenTool, ChevronLeft, ChevronRight, Zap, Bot, Settings, LogOut, Receipt, UserCircle } from 'lucide-react';
+import { LayoutDashboard, Inbox, Calendar, Users, UserPlus, PenTool, ChevronLeft, ChevronRight, Zap, Bot, Settings, LogOut, Receipt, UserCircle, Building2, Plus, Check, Shield } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../contexts/AuthContext';
@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { toast } from 'sonner';
 import { authFetch } from '../lib/authFetch';
+import { authCreateWorkspace } from '../lib/api';
 
 const navItems = [
   { to: '/dashboard', icon: LayoutDashboard, labelKey: 'sidebar.dashboard', testId: 'nav-dashboard' },
@@ -24,6 +25,7 @@ const navItems = [
   { to: '/onboarding', icon: UserPlus, labelKey: 'sidebar.onboarding', testId: 'nav-onboarding' },
   { to: '/content', icon: PenTool, labelKey: 'sidebar.content_engine', testId: 'nav-content-engine' },
   { to: '/automation', icon: Bot, labelKey: 'sidebar.automation', testId: 'nav-automation' },
+  { to: '/members', icon: Shield, labelKey: 'sidebar.members', testId: 'nav-members' },
   { to: '/plan', icon: Receipt, labelKey: 'plan_usage.nav_label', testId: 'nav-plan-usage' },
   { to: '/settings', icon: Settings, labelKey: 'sidebar.settings', testId: 'nav-settings' },
 ];
@@ -31,10 +33,43 @@ const navItems = [
 export default function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
   const [integrationStatus, setIntegrationStatus] = useState({});
+  const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
   const { t } = useLanguage();
-  const { user, workspaces, logout } = useAuth();
+  const { user, workspaces, logout, switchWorkspace, refresh } = useAuth();
+
+  const currentWorkspace = workspaces?.find((w) => w.is_current) || workspaces?.[0];
+
+  const handleSwitchWorkspace = async (workspaceId) => {
+    if (!workspaceId || workspaceId === currentWorkspace?.workspace_id) return;
+    try {
+      await switchWorkspace(workspaceId);
+      // switchWorkspace already triggers a hard reload — but as a
+      // belt-and-braces fallback we toast in case the reload is slow.
+      toast.success(t('auth.switch_workspace'));
+    } catch (e) {
+      toast.error('Switch failed');
+    }
+  };
+
+  const handleCreateWorkspace = async () => {
+    const name = window.prompt(t('auth.new_workspace'));
+    if (!name) return;
+    setCreatingWorkspace(true);
+    try {
+      const res = await authCreateWorkspace(name);
+      toast.success(t('auth.new_workspace'));
+      await refresh();
+      if (res?.workspace_id) {
+        await switchWorkspace(res.workspace_id);
+      }
+    } catch (e) {
+      toast.error('Could not create workspace');
+    } finally {
+      setCreatingWorkspace(false);
+    }
+  };
 
   const handleLogout = async () => {
     try {
@@ -176,7 +211,7 @@ export default function Sidebar() {
                 </div>
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent side="top" align="start" className="w-60" data-testid="sidebar-user-menu">
+            <DropdownMenuContent side="top" align="start" className="w-72" data-testid="sidebar-user-menu">
               <DropdownMenuLabel>
                 <div className="flex flex-col">
                   <span className="text-xs font-medium truncate">{user.name}</span>
@@ -184,6 +219,54 @@ export default function Sidebar() {
                 </div>
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
+
+              {/* Workspace switcher */}
+              {workspaces && workspaces.length > 0 && (
+                <>
+                  <DropdownMenuLabel className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold">
+                    <span className="flex items-center gap-1.5">
+                      <Building2 size={11} />
+                      {t('auth.active_workspace')}
+                    </span>
+                  </DropdownMenuLabel>
+                  {workspaces.map((ws) => (
+                    <DropdownMenuItem
+                      key={ws.workspace_id}
+                      data-testid={`workspace-switch-${ws.workspace_id}`}
+                      onClick={() => handleSwitchWorkspace(ws.workspace_id)}
+                      className="flex items-center justify-between"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="w-5 h-5 rounded bg-[hsl(var(--primary)/0.15)] text-[hsl(var(--primary))] flex items-center justify-center text-[10px] font-semibold shrink-0">
+                          {(ws.name || 'W').slice(0, 1).toUpperCase()}
+                        </div>
+                        <div className="flex flex-col min-w-0">
+                          <span className="text-xs truncate">{ws.name}</span>
+                          <span className="text-[9px] text-muted-foreground capitalize">{ws.role}</span>
+                        </div>
+                      </div>
+                      {ws.is_current && <Check size={12} className="text-[hsl(var(--primary))] shrink-0" />}
+                    </DropdownMenuItem>
+                  ))}
+                  <DropdownMenuItem
+                    data-testid="workspace-create-new"
+                    onClick={handleCreateWorkspace}
+                    disabled={creatingWorkspace}
+                  >
+                    <Plus size={14} className="mr-2" />
+                    {t('auth.new_workspace')}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    data-testid="workspace-manage-members"
+                    onClick={() => navigate('/members')}
+                  >
+                    <Shield size={14} className="mr-2" />
+                    {t('members.title')}
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                </>
+              )}
+
               <DropdownMenuItem
                 data-testid="sidebar-menu-view-account"
                 onClick={() => navigate('/plan')}

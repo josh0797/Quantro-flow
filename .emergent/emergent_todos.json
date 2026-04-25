@@ -1,26 +1,38 @@
 [
   {
-    "content": "Refactor ai_billing.py: add httpx-based Supabase REST helpers + run_ai_request wrapper using OpenAI SDK",
+    "content": "Backend: Define role permission matrix + add `require_role` FastAPI dependency in server.py",
     "status": "completed"
   },
   {
-    "content": "Update server.py: add access_token to User model & get_current_user dependency",
+    "content": "Backend: Workspace member CRUD endpoints (list/update role/remove member)",
     "status": "completed"
   },
   {
-    "content": "Replace 4 LlmChat call sites in server.py with run_ai_request (analyze, batch, content, template)",
+    "content": "Backend: Invite token endpoints (create/list/revoke/accept) — token-based, email-free",
     "status": "completed"
   },
   {
-    "content": "Add supabase service-role key support for ai_credit_usage logging (best-effort)",
+    "content": "Backend: Apply RBAC checks to existing sensitive endpoints (settings, integrations, business-profile, automation policies, escalation rules)",
     "status": "completed"
   },
   {
-    "content": "Lint backend + restart + smoke test wrapper end-to-end via curl",
+    "content": "Frontend: Workspace switcher UI in Sidebar (dropdown to switch + create new)",
     "status": "completed"
   },
   {
-    "content": "Run backend testing agent for AI billing wrapper integration",
+    "content": "Frontend: Settings → Members tab (member list, role editor, invite link generation, revoke)",
     "status": "completed"
+  },
+  {
+    "content": "Frontend: Public Accept-Invite page (`/join/:token`)",
+    "status": "completed"
+  },
+  {
+    "content": "Frontend: i18n strings for all new RBAC/members UI (ES + EN)",
+    "status": "completed"
+  },
+  {
+    "content": "Lint + restart + smoke test (curl) + run testing agent",
+    "status": "in_progress"
   }
 ]

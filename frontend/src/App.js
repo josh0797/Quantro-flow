@@ -18,6 +18,8 @@ import PlanAndUsage from './pages/PlanAndUsage';
 import LoginPage from './pages/LoginPage';
 import AuthCallback from './pages/AuthCallback';
 import OnboardingLite from './pages/OnboardingLite';
+import Members from './pages/Members';
+import JoinPage from './pages/JoinPage';
 import './App.css';
 
 /**
@@ -44,6 +46,7 @@ function AppShell() {
             <Route path="/automation" element={<AutomationPolicies />} />
             <Route path="/automation-policies" element={<AutomationPolicies />} />
             <Route path="/plan" element={<PlanAndUsage />} />
+            <Route path="/members" element={<Members />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
         </main>
@@ -57,6 +60,16 @@ function AppRoutes() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/auth/callback" element={<AuthCallback />} />
+      {/* Public-ish invite acceptance page. Still requires auth — the
+          page itself redirects unauthenticated users to /login?next=… */}
+      <Route
+        path="/join/:token"
+        element={
+          <ProtectedRoute bypassOnboarding>
+            <JoinPage />
+          </ProtectedRoute>
+        }
+      />
       {/* Onboarding-lite sits OUTSIDE the AppShell (full-screen intake) but
           still behind auth. We pass bypassOnboarding so we don't loop on
           ourselves when ProtectedRoute evaluates the needs_onboarding flag. */}
