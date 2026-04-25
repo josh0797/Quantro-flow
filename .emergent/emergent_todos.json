@@ -1,30 +1,30 @@
 [
   {
-    "content": "Backend `_jwks_client` undefined",
-    "status": "cancelled"
-  },
-  {
-    "content": "Backend `overall` undefined in system_health",
-    "status": "cancelled"
-  },
-  {
-    "content": "Translations.js hardcoded secrets",
-    "status": "cancelled"
-  },
-  {
-    "content": "Fix PlanAndUsage missing hook deps via useCallback",
+    "content": "Update billing.js with exact Stripe annual prices (590/2090/4990) + new PLAN_LIMITS (1000/3000/15000)",
     "status": "completed"
   },
   {
-    "content": "`is`/`is not` identity comparisons",
-    "status": "cancelled"
-  },
-  {
-    "content": "Empty catch blocks (api.js, AuthContext.js, LanguageContext.js)",
+    "content": "Add getOpenAIUsageLimit() helper with priority order",
     "status": "completed"
   },
   {
-    "content": "Lint + verify no regressions",
+    "content": "Update PlanSelectorDialog: \"2 meses gratis\" microcopy + correct prices",
+    "status": "completed"
+  },
+  {
+    "content": "Update PlanAndUsage to use centralized limit helper + show reason hints",
+    "status": "completed"
+  },
+  {
+    "content": "Create backend /app/backend/billing_limits.py for Python parity",
+    "status": "completed"
+  },
+  {
+    "content": "Update Stripe webhook reference to write has_coupon + coupon_id + subscription_status",
+    "status": "completed"
+  },
+  {
+    "content": "Add i18n keys + lint + verify",
     "status": "completed"
   }
 ]

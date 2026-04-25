@@ -66,12 +66,22 @@ serve(async (req: Request): Promise<Response> => {
         const userId = sub.metadata?.supabase_user_id as string | undefined;
         const priceId = sub.items.data[0]?.price?.id;
         const plan = priceId ? PRICE_TO_PLAN[priceId] : undefined;
+
+        // Detect any coupon / discount applied to the subscription. Stripe's
+        // newer API uses `discounts[]` while older accounts still use the
+        // legacy `discount` object \u2014 handle both.
+        const discount = (sub as any).discount || ((sub as any).discounts?.[0]?.discount);
+        const hasCoupon = !!discount?.coupon?.id;
+        const couponId = discount?.coupon?.id || null;
+
         const update: Record<string, any> = {
           stripe_customer_id: String(sub.customer),
           stripe_subscription_id: sub.id,
           subscription_status: sub.status,
           current_period_end: new Date(sub.current_period_end * 1000).toISOString(),
           plan_updated_at: new Date().toISOString(),
+          has_coupon: hasCoupon,
+          coupon_id: couponId,
         };
         if (plan) update.plan = plan;
         if (userId) {
@@ -89,6 +99,8 @@ serve(async (req: Request): Promise<Response> => {
           stripe_subscription_id: null,
           subscription_status: 'canceled',
           plan_updated_at: new Date().toISOString(),
+          has_coupon: false,
+          coupon_id: null,
         };
         if (userId) {
           await supabase.from('profiles').update(update).eq('id', userId);

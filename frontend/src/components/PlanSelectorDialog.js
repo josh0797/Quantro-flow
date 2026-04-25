@@ -9,7 +9,7 @@ import {
   DialogDescription,
 } from '@/components/ui/dialog';
 import { useLanguage } from '../context/LanguageContext';
-import { PLANS, startCheckout } from '../lib/billing';
+import { PLANS, PLAN_PRICES, startCheckout } from '../lib/billing';
 
 /**
  * PlanSelectorDialog — the modal that surfaces when the user clicks
@@ -33,8 +33,14 @@ export default function PlanSelectorDialog({ open, onOpenChange, currentPlanKey 
 
   const plans = useMemo(() => {
     return PLANS.map((p) => {
-      const price = period === 'annual' ? p.priceAnnual : p.priceMonthly;
-      return { ...p, displayPrice: price };
+      const prices = PLAN_PRICES[p.key];
+      // Use the EXACT Stripe values \u2014 no math, no rounding. The annual
+      // headline shows the per-month equivalent ($49 / mes) and the
+      // small print shows the real total Stripe will charge ($590).
+      const displayPrice = period === 'annual'
+        ? prices.annualMonthlyDisplay
+        : prices.monthly;
+      return { ...p, displayPrice, prices };
     });
   }, [period]);
 
@@ -104,10 +110,19 @@ export default function PlanSelectorDialog({ open, onOpenChange, currentPlanKey 
             >
               {t('billing.period_annual')}
               <span className="text-[10px] text-[hsl(var(--success))] font-semibold">
-                {period === 'annual' ? t('billing.annual_save') : '−20%'}
+                {t('billing.annual_perk')}
               </span>
             </button>
           </div>
+
+          {period === 'annual' && (
+            <p
+              data-testid="annual-perk-microcopy"
+              className="mt-3 text-xs text-muted-foreground"
+            >
+              {t('billing.annual_perk_microcopy')}
+            </p>
+          )}
         </div>
 
         <div className="px-6 md:px-10 pb-8 pt-2">
@@ -156,7 +171,7 @@ export default function PlanSelectorDialog({ open, onOpenChange, currentPlanKey 
                   </div>
                   {period === 'annual' && (
                     <div className="text-[11px] text-muted-foreground -mt-2">
-                      {t('billing.billed_annually', { total: p.annualTotal })}
+                      {t('billing.billed_annually', { total: p.prices.annualTotal })}
                     </div>
                   )}
 

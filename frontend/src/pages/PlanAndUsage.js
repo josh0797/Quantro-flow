@@ -31,6 +31,7 @@ import {
   getPlanByKey,
   deriveSubscriptionState,
   openCustomerPortal,
+  getOpenAIUsageLimit,
 } from '../lib/billing';
 
 /**
@@ -170,8 +171,10 @@ export default function PlanAndUsage() {
       byType.set(key, (byType.get(key) || 0) + (row.count || 0));
     }
     const total = Array.from(byType.values()).reduce((a, b) => a + b, 0);
-    const planKey = (profile?.plan || 'essential').toLowerCase();
-    const limit = PLAN_LIMITS[planKey] ?? PLAN_LIMITS.essential;
+    // Resolve the limit through the centralized helper so test users,
+    // coupon discounts and inactive subscriptions are reflected here.
+    const limitInfo = getOpenAIUsageLimit({ email: user?.email, profile });
+    const limit = limitInfo.limit || PLAN_LIMITS.essential;
     const percent = limit > 0 ? Math.min(100, Math.round((total / limit) * 1000) / 10) : 0;
     const breakdown = Array.from(byType.entries())
       .map(([type, calls]) => ({
@@ -182,8 +185,16 @@ export default function PlanAndUsage() {
         share: total > 0 ? Math.round((calls / total) * 100) : 0,
       }))
       .sort((a, b) => b.calls - a.calls);
-    return { total, limit, percent, overage: Math.max(0, total - limit), breakdown };
-  }, [usageRows, profile]);
+    return {
+      total,
+      limit,
+      percent,
+      overage: Math.max(0, total - limit),
+      breakdown,
+      limitReason: limitInfo.reason,
+      blocked: limitInfo.blocked,
+    };
+  }, [usageRows, profile, user?.email]);
 
   const planKey = (profile?.plan || '').toLowerCase();
   const planDef = getPlanByKey(planKey);
@@ -395,6 +406,23 @@ export default function PlanAndUsage() {
               </div>
 
               <Progress data-testid="usage-progress" value={usage.percent} className="h-2 bg-[hsl(var(--surface-2))]" />
+
+              {/* Limit reason hints (test user, coupon discount, blocked) */}
+              {usage.blocked && (
+                <div data-testid="usage-blocked-hint" className="text-xs text-[hsl(var(--destructive))] bg-[hsl(var(--destructive)/0.08)] border border-[hsl(var(--destructive)/0.2)] rounded-md px-3 py-2">
+                  {t('plan_usage.limit_blocked')}
+                </div>
+              )}
+              {!usage.blocked && usage.limitReason === 'coupon_applied' && (
+                <div data-testid="usage-coupon-hint" className="text-xs text-[hsl(var(--warning))] bg-[hsl(var(--warning)/0.08)] border border-[hsl(var(--warning)/0.2)] rounded-md px-3 py-2">
+                  {t('plan_usage.limit_coupon')}
+                </div>
+              )}
+              {!usage.blocked && usage.limitReason === 'test_user' && (
+                <div data-testid="usage-testuser-hint" className="text-[11px] text-muted-foreground italic">
+                  {t('plan_usage.limit_test_user')}
+                </div>
+              )}
 
               <div className="pt-3 border-t border-[hsl(var(--border))]">
                 <div className="text-xs uppercase tracking-wider text-muted-foreground mb-3 font-medium">
