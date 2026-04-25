@@ -58,8 +58,15 @@ serve(async (req: Request): Promise<Response> => {
     // 2. Parse body early so we can log what we received.
     const body = await req.json().catch(() => ({}));
     console.log('[create-checkout-session] incoming body:', body);
-    const { price_id, success_url, cancel_url, plan_key, billing_period, mode = 'subscription' } = body || {};
-    if (!price_id) return json({ error: 'price_id is required' }, 400);
+    // Accept BOTH camelCase and snake_case so the function is forward-
+    // and backward-compatible with every Quantro client (landing + app).
+    const price_id = body?.price_id ?? body?.priceId;
+    const plan_key = body?.plan_key ?? body?.planKey;
+    const billing_period = body?.billing_period ?? body?.billingCycle;
+    const success_url = body?.success_url ?? body?.successUrl;
+    const cancel_url = body?.cancel_url ?? body?.cancelUrl;
+    const mode = body?.mode ?? 'subscription';
+    if (!price_id) return json({ error: 'priceId requerido' }, 400);
     if (!success_url || !cancel_url) return json({ error: 'success_url and cancel_url are required' }, 400);
 
     // 3. Authenticate the user via the Supabase JWT in the Authorization header.

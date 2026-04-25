@@ -42,7 +42,7 @@ serve(async (req: Request): Promise<Response> => {
 
   try {
     const body = await req.json().catch(() => ({}));
-    const { return_url } = body || {};
+    const return_url = body?.return_url ?? body?.returnUrl;
 
     const authHeader = req.headers.get('Authorization') || '';
     const jwt = authHeader.replace(/^Bearer\s+/i, '').trim();

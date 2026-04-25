@@ -135,7 +135,17 @@ export function deriveSubscriptionState(profile) {
 export async function startCheckout({ priceId, planKey, period = 'monthly' }) {
   if (!priceId) throw new Error('Missing priceId');
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  // Send the parameters in BOTH camelCase and snake_case so we work with
+  // whichever convention the deployed Edge Function uses. Stripe doesn't
+  // care about the wrapper field names — only the values matter.
   const payload = {
+    // camelCase (what the existing Quantro Edge Function expects)
+    priceId,
+    planKey,
+    billingCycle: period,
+    successUrl: `${origin}/plan?checkout=success&plan=${planKey}`,
+    cancelUrl: `${origin}/plan?checkout=cancelled`,
+    // snake_case (what our hardened reference function expects)
     price_id: priceId,
     plan_key: planKey,
     billing_period: period,
@@ -145,6 +155,8 @@ export async function startCheckout({ priceId, planKey, period = 'monthly' }) {
     cancel_url: `${origin}/plan?checkout=cancelled`,
     mode: 'subscription',
   };
+  // eslint-disable-next-line no-console
+  console.log('[billing] invoking create-checkout-session', payload);
   const { data, error } = await supabase.functions.invoke('create-checkout-session', {
     body: payload,
   });
@@ -174,6 +186,7 @@ export async function openCustomerPortal() {
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
   const { data, error } = await supabase.functions.invoke('create-customer-portal-session', {
     body: {
+      returnUrl: `${origin}/plan`,
       return_url: `${origin}/plan`,
     },
   });
