@@ -41,7 +41,14 @@ api.interceptors.request.use(async (config) => {
       config.headers = config.headers || {};
       config.headers.Authorization = `Bearer ${token}`;
     }
-  } catch (_) { /* ignore */ }
+  } catch (e) {
+    // If we cannot fetch the Supabase session (network blip, SDK crash)
+    // we still want the request to go through unauthenticated so the
+    // server can return a clean 401, rather than throwing client-side.
+    // Surface the cause in dev tools for visibility.
+    // eslint-disable-next-line no-console
+    console.warn('[api] could not attach Supabase Bearer token:', e?.message || e);
+  }
   return config;
 });
 

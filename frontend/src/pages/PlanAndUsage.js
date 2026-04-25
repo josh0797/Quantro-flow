@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   CreditCard,
@@ -94,7 +94,7 @@ export default function PlanAndUsage() {
   const loading = loadingProfile || loadingUsage;
   const currentWs = workspaces?.find((w) => w.is_current);
 
-  const fetchProfile = async () => {
+  const fetchProfile = useCallback(async () => {
     if (!user?.user_id) return;
     setLoadingProfile(true);
     // Use select('*') so we don't crash if optional columns
@@ -108,9 +108,9 @@ export default function PlanAndUsage() {
     if (error && error.code !== 'PGRST116') setErrorMsg(error.message);
     setProfile(data || null);
     setLoadingProfile(false);
-  };
+  }, [user?.user_id]);
 
-  const fetchUsage = async () => {
+  const fetchUsage = useCallback(async () => {
     if (!user?.user_id) return;
     setLoadingUsage(true);
     const { data, error } = await supabase
@@ -125,16 +125,17 @@ export default function PlanAndUsage() {
       setUsageRows(Array.isArray(data) ? data : []);
     }
     setLoadingUsage(false);
-  };
+  }, [user?.user_id]);
 
   useEffect(() => {
     if (!user?.user_id) return;
     fetchProfile();
     fetchUsage();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.user_id]);
+  }, [user?.user_id, fetchProfile, fetchUsage]);
 
   // Handle Stripe checkout return via query params.
+  // Intentionally fires only on first mount \u2014 we read latest closures via
+  // refs implicitly through fetchProfile being stable (useCallback above).
   useEffect(() => {
     const status = searchParams.get('checkout');
     if (!status) return;
@@ -142,7 +143,7 @@ export default function PlanAndUsage() {
       toast.success(t('billing.checkout_success_title'), {
         description: t('billing.checkout_success_desc'),
       });
-      // Stripe webhook may take a few seconds to propagate — retry a few
+      // Stripe webhook may take a few seconds to propagate \u2014 retry a few
       // times so the user sees the updated plan as soon as possible.
       let attempts = 0;
       const interval = setInterval(async () => {
@@ -160,8 +161,7 @@ export default function PlanAndUsage() {
     next.delete('checkout');
     next.delete('plan');
     setSearchParams(next, { replace: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [searchParams, setSearchParams, fetchProfile, t]);
 
   const usage = useMemo(() => {
     const byType = new Map();

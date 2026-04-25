@@ -1,34 +1,30 @@
 [
   {
-    "content": "Create /app/frontend/src/lib/billing.js with price IDs config + helpers",
+    "content": "Backend `_jwks_client` undefined",
+    "status": "cancelled"
+  },
+  {
+    "content": "Backend `overall` undefined in system_health",
+    "status": "cancelled"
+  },
+  {
+    "content": "Translations.js hardcoded secrets",
+    "status": "cancelled"
+  },
+  {
+    "content": "Fix PlanAndUsage missing hook deps via useCallback",
     "status": "completed"
   },
   {
-    "content": "Create PlanSelectorDialog.js (modal with 3 plan cards + monthly/annual toggle)",
+    "content": "`is`/`is not` identity comparisons",
+    "status": "cancelled"
+  },
+  {
+    "content": "Empty catch blocks (api.js, AuthContext.js, LanguageContext.js)",
     "status": "completed"
   },
   {
-    "content": "Rewrite PlanAndUsage.js: dynamic CTAs based on subscription state",
+    "content": "Lint + verify no regressions",
     "status": "completed"
-  },
-  {
-    "content": "Handle ?checkout=success|cancelled return from Stripe (toast + profile refresh)",
-    "status": "completed"
-  },
-  {
-    "content": "Add i18n translations (ES/EN) for billing flow",
-    "status": "completed"
-  },
-  {
-    "content": "Generate Supabase Edge Function source code deliverables (/app/supabase/functions/)",
-    "status": "completed"
-  },
-  {
-    "content": "Verify build + screenshot test",
-    "status": "completed"
-  },
-  {
-    "content": "User deploys Supabase Edge Functions + configures Stripe webhook → end-to-end test",
-    "status": "pending"
   }
 ]

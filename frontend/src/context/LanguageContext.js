@@ -100,8 +100,11 @@ export function LanguageProvider({ children }) {
             writeLocalLang(remote);
           }
         }
-      } catch {
-        /* silent — offline fallback to local/default */
+      } catch (e) {
+        // Backend hydration is best-effort. Offline / 401 / network blip
+        // all fall back to localStorage; surface the cause for dev tools.
+        // eslint-disable-next-line no-console
+        console.warn('[language] backend hydration failed:', e?.message || e);
       } finally {
         if (!cancelled) setHydrated(true);
       }
@@ -128,8 +131,10 @@ export function LanguageProvider({ children }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-    } catch {
-      /* silent — local storage still persists the choice */
+    } catch (e) {
+      // Local storage already keeps the choice; just log for visibility.
+      // eslint-disable-next-line no-console
+      console.warn('[language] could not persist remote language preference:', e?.message || e);
     }
   }, []);
 

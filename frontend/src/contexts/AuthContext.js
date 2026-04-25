@@ -119,7 +119,12 @@ export function AuthProvider({ children }) {
 
     return () => {
       active = false;
-      try { sub?.subscription?.unsubscribe?.(); } catch (_) { /* ignore */ }
+      try {
+        sub?.subscription?.unsubscribe?.();
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn('[auth] could not unsubscribe from auth state changes:', e?.message || e);
+      }
     };
   }, [hydrateFromSession]);
 
@@ -160,7 +165,14 @@ export function AuthProvider({ children }) {
   }, [hydrateFromSession]);
 
   const signOut = useCallback(async () => {
-    try { await supabase.auth.signOut(); } catch (_) { /* ignore */ }
+    try {
+      await supabase.auth.signOut();
+    } catch (e) {
+      // Even if the network call fails we still want to wipe local state
+      // so the user is no longer treated as authenticated by the SPA.
+      // eslint-disable-next-line no-console
+      console.warn('[auth] supabase.auth.signOut() failed:', e?.message || e);
+    }
     setSession(null);
     setSupaUser(null);
     setWorkspaces([]);
