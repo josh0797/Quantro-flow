@@ -132,6 +132,7 @@ export const translations = {
       checkout_cancelled_desc: 'No realizamos ningún cargo.',
       microcopy: 'Gestiona tu suscripción, método de pago y facturación desde un solo lugar.',
       secured_by_stripe: 'Pagos procesados de forma segura por Stripe',
+      error_hint: 'Abre la consola del navegador (F12 → Console) para ver el detalle completo. También revisa los logs de la Edge Function en Supabase Dashboard → Edge Functions → create-checkout-session → Logs.',
     },
     // Automation Policies (new interactive copy)
     automation_policies: {
@@ -954,6 +955,7 @@ export const translations = {
       checkout_cancelled_desc: 'No charges were made.',
       microcopy: 'Manage your subscription, payment method and invoices in one place.',
       secured_by_stripe: 'Payments processed securely by Stripe',
+      error_hint: 'Open your browser console (F12 → Console) for the full error. Also check Supabase Dashboard → Edge Functions → create-checkout-session → Logs.',
     },
     automation_policies: {
       page_title: 'Automation Policies',

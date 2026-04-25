@@ -1,87 +1,115 @@
-// create-checkout-session Edge Function
+// create-checkout-session Edge Function — HARDENED v2
 //
-// Deno runtime. Creates a Stripe Checkout session for the authenticated
-// Supabase user and returns { url } for the browser to redirect to.
+// Creates a Stripe Checkout session for the authenticated Supabase user
+// and returns { url } so the browser can redirect to it.
 //
-// Expected body:
-//   {
-//     price_id: string,              // Stripe Price id
-//     plan_key?: 'essential'|'pro'|'enterprise',
-//     billing_period?: 'monthly'|'annual',
-//     success_url: string,
-//     cancel_url: string,
-//     mode?: 'subscription'|'payment', // default: subscription
-//   }
+// Hardening vs. v1:
+//   • Verbose logging at every step so failures are visible in
+//     `supabase functions logs create-checkout-session`.
+//   • Explicit env var validation (fails fast with a helpful message).
+//   • Defensive profiles lookup that never crashes on missing columns.
+//   • CORS headers on every response, including errors.
+//   • Uses Stripe account default API version (no hard-coded version).
+//   • Never returns 500 with an empty body — always JSON with `error`.
 
-// @ts-ignore — deno std imports resolved at runtime
+// @ts-ignore — Deno std
 import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 // @ts-ignore
 import Stripe from 'https://esm.sh/stripe@17.5.0?target=deno';
 // @ts-ignore
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.4';
 
-const corsHeaders = {
+const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...CORS, 'Content-Type': 'application/json' },
+  });
+}
+
+function env(key: string): string | undefined {
+  // @ts-ignore Deno.env
+  return Deno.env.get(key);
+}
+
 serve(async (req: Request): Promise<Response> => {
-  if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders });
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS });
+  if (req.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
+
+  // 1. Env var validation — surface missing secrets loudly.
+  const stripeKey = env('STRIPE_SECRET_KEY');
+  const supabaseUrl = env('SUPABASE_URL');
+  const serviceRole = env('SUPABASE_SERVICE_ROLE_KEY');
+  const missing: string[] = [];
+  if (!stripeKey) missing.push('STRIPE_SECRET_KEY');
+  if (!supabaseUrl) missing.push('SUPABASE_URL');
+  if (!serviceRole) missing.push('SUPABASE_SERVICE_ROLE_KEY');
+  if (missing.length) {
+    console.error('[create-checkout-session] missing env:', missing);
+    return json({ error: `Edge Function env missing: ${missing.join(', ')}` }, 500);
   }
 
   try {
-    // @ts-ignore Deno.env
-    const stripeKey = Deno.env.get('STRIPE_SECRET_KEY')!;
-    // @ts-ignore
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
-    // @ts-ignore
-    const serviceRole = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-    const stripe = new Stripe(stripeKey, { apiVersion: '2024-11-20.acacia' });
+    // 2. Parse body early so we can log what we received.
+    const body = await req.json().catch(() => ({}));
+    console.log('[create-checkout-session] incoming body:', body);
+    const { price_id, success_url, cancel_url, plan_key, billing_period, mode = 'subscription' } = body || {};
+    if (!price_id) return json({ error: 'price_id is required' }, 400);
+    if (!success_url || !cancel_url) return json({ error: 'success_url and cancel_url are required' }, 400);
 
-    // Identify the user from the JWT in the Authorization header.
+    // 3. Authenticate the user via the Supabase JWT in the Authorization header.
     const authHeader = req.headers.get('Authorization') || '';
-    const jwt = authHeader.replace(/^Bearer\s+/i, '');
-    if (!jwt) return json({ error: 'Not authenticated' }, 401);
+    const jwt = authHeader.replace(/^Bearer\s+/i, '').trim();
+    if (!jwt) return json({ error: 'Not authenticated (missing Authorization header)' }, 401);
+    console.log('[create-checkout-session] got JWT (len):', jwt.length);
 
-    const supabase = createClient(supabaseUrl, serviceRole, {
-      global: { headers: { Authorization: `Bearer ${jwt}` } },
-    });
+    const supabase = createClient(supabaseUrl!, serviceRole!);
     const { data: userData, error: userErr } = await supabase.auth.getUser(jwt);
     if (userErr || !userData?.user) {
-      return json({ error: 'Invalid token' }, 401);
+      console.error('[create-checkout-session] getUser error', userErr);
+      return json({ error: `Invalid token: ${userErr?.message || 'no user'}` }, 401);
     }
     const user = userData.user;
+    console.log('[create-checkout-session] user:', user.id, user.email);
 
-    const body = await req.json();
-    const { price_id, success_url, cancel_url, plan_key, billing_period, mode = 'subscription' } = body;
-    if (!price_id || !success_url || !cancel_url) {
-      return json({ error: 'price_id, success_url and cancel_url are required' }, 400);
+    // 4. Fetch existing profile (best-effort: don't break if columns differ).
+    let profile: Record<string, any> | null = null;
+    try {
+      const { data, error } = await supabase.from('profiles').select('*').eq('id', user.id).maybeSingle();
+      if (error) console.warn('[create-checkout-session] profiles select warning', error);
+      profile = data || null;
+    } catch (e) {
+      console.warn('[create-checkout-session] profiles select failed', e);
     }
 
-    // Look up or create a Stripe Customer, persisted on profiles.
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('id, email, stripe_customer_id, full_name')
-      .eq('id', user.id)
-      .maybeSingle();
-
-    let customerId: string | null = profile?.stripe_customer_id ?? null;
+    // 5. Resolve or create Stripe customer, persist customer_id on profile.
+    const stripe = new Stripe(stripeKey!);
+    let customerId: string | null = (profile?.stripe_customer_id as string) || null;
     if (!customerId) {
+      console.log('[create-checkout-session] creating new Stripe customer for', user.email);
       const customer = await stripe.customers.create({
         email: user.email,
-        name: profile?.full_name || user.user_metadata?.full_name || undefined,
+        name: (profile?.full_name as string) || (user.user_metadata?.full_name as string) || undefined,
         metadata: { supabase_user_id: user.id },
       });
       customerId = customer.id;
-      await supabase.from('profiles').upsert({
-        id: user.id,
-        email: user.email,
-        stripe_customer_id: customerId,
-      }, { onConflict: 'id' });
+      try {
+        await supabase.from('profiles').upsert(
+          { id: user.id, stripe_customer_id: customerId },
+          { onConflict: 'id' },
+        );
+      } catch (e) {
+        console.warn('[create-checkout-session] could not persist stripe_customer_id', e);
+      }
     }
+    console.log('[create-checkout-session] using stripe customer', customerId);
 
+    // 6. Create the Checkout Session.
     const session = await stripe.checkout.sessions.create({
       mode,
       customer: customerId,
@@ -104,16 +132,19 @@ serve(async (req: Request): Promise<Response> => {
       },
     });
 
-    return json({ url: session.url });
-  } catch (err) {
-    console.error('[create-checkout-session]', err);
-    return json({ error: err?.message || 'Unknown error' }, 500);
+    console.log('[create-checkout-session] created session', session.id);
+    return json({ url: session.url, session_id: session.id });
+  } catch (err: any) {
+    // Stripe errors carry a .message + .type + .code — log all of them.
+    const safe = {
+      name: err?.name,
+      type: err?.type,
+      code: err?.code,
+      statusCode: err?.statusCode,
+      message: err?.message,
+      raw: err?.raw?.message,
+    };
+    console.error('[create-checkout-session] CAUGHT:', safe);
+    return json({ error: err?.message || 'Unknown error', detail: safe }, 500);
   }
 });
-
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-  });
-}

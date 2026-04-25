@@ -191,8 +191,14 @@ export default function PlanSelectorDialog({ open, onOpenChange, currentPlanKey 
           </div>
 
           {error && (
-            <div data-testid="plan-selector-error" className="mt-4 text-sm text-[hsl(var(--destructive))] bg-[hsl(var(--destructive)/0.08)] border border-[hsl(var(--destructive)/0.2)] rounded-md px-3 py-2">
-              {error}
+            <div data-testid="plan-selector-error" className="mt-4 text-sm text-[hsl(var(--destructive))] bg-[hsl(var(--destructive)/0.08)] border border-[hsl(var(--destructive)/0.2)] rounded-md px-3 py-2 space-y-1">
+              <div className="flex items-start gap-2">
+                <span className="font-medium shrink-0">Error:</span>
+                <span className="font-mono text-xs break-all">{error}</span>
+              </div>
+              <div className="text-[10px] text-muted-foreground pt-1 border-t border-[hsl(var(--destructive)/0.15)]">
+                {t('billing.error_hint')}
+              </div>
             </div>
           )}
 

@@ -149,7 +149,13 @@ export async function startCheckout({ priceId, planKey, period = 'monthly' }) {
     body: payload,
   });
   if (error) {
-    throw new Error(error.message || 'No se pudo iniciar el checkout.');
+    // supabase-js wraps non-2xx responses into a generic FunctionsHttpError
+    // whose .message is just "Edge Function returned a non-2xx status code".
+    // Read the real body so the UI + console show the actual cause.
+    const detail = await readEdgeFnError(error);
+    // eslint-disable-next-line no-console
+    console.error('[startCheckout] edge function error', { error, detail, payload });
+    throw new Error(detail || error.message || 'No se pudo iniciar el checkout.');
   }
   const url = data?.url || data?.checkout_url;
   if (!url) {
@@ -172,11 +178,38 @@ export async function openCustomerPortal() {
     },
   });
   if (error) {
-    throw new Error(error.message || 'No se pudo abrir el portal de cliente.');
+    const detail = await readEdgeFnError(error);
+    // eslint-disable-next-line no-console
+    console.error('[openCustomerPortal] edge function error', { error, detail });
+    throw new Error(detail || error.message || 'No se pudo abrir el portal de cliente.');
   }
   const url = data?.url || data?.portal_url;
   if (!url) {
     throw new Error('Respuesta inválida del servidor de billing.');
   }
   window.location.assign(url);
+}
+
+/**
+ * Read the real response body from a FunctionsHttpError. supabase-js v2
+ * exposes the original Response object under error.context, so we clone
+ * it (the original body may already be consumed) and try JSON first,
+ * falling back to plain text.
+ */
+async function readEdgeFnError(error) {
+  try {
+    const resp = error?.context?.response || error?.response || error?.context;
+    if (!resp || typeof resp.clone !== 'function') return null;
+    const cloned = resp.clone();
+    const text = await cloned.text();
+    if (!text) return null;
+    try {
+      const parsed = JSON.parse(text);
+      return parsed?.error || parsed?.message || parsed?.detail || text;
+    } catch (_) {
+      return text;
+    }
+  } catch (_) {
+    return null;
+  }
 }
