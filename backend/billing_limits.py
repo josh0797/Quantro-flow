@@ -87,7 +87,7 @@ def resolve_openai_limit(
         return UsageLimit(limit=INACTIVE_LIMIT, reason="no_active_subscription", blocked=True)
 
     # 3. Coupon override.
-    if profile.get("has_coupon") is True:
+    if profile.get("has_coupon"):
         return UsageLimit(limit=COUPON_LIMIT, reason="coupon_applied", blocked=False)
 
     # 4. Plan-based limit.

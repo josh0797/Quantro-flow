@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
@@ -50,9 +50,13 @@ export default function Dashboard() {
   const { profile, loading: profileLoading } = useBusinessProfile();
   const { t } = useLanguage();
 
-  // Get industry-specific config
+  // Get industry-specific config.
+  // Memoised because `getIndustryConfig` returns a fresh object on every
+  // call — without memoisation `fetchData`'s useCallback would be
+  // re-created on every render, causing the 15s polling effect to
+  // re-subscribe and triggering a request flood.
   const industry = profile?.industry || 'other';
-  const industryConfig = getIndustryConfig(industry);
+  const industryConfig = useMemo(() => getIndustryConfig(industry), [industry]);
   const customLabels = profile?.entity_labels || {};
 
   const fetchData = useCallback(async () => {
@@ -380,8 +384,9 @@ export default function Dashboard() {
                     const priorityColor = suggestion.priority === 'high' ? 'text-[hsl(var(--critical))]' : 
                                          suggestion.priority === 'medium' ? 'text-[hsl(var(--warning))]' : 
                                          'text-[hsl(var(--info))]';
+                    const suggestionKey = suggestion.id || suggestion.text || `suggestion-${idx}`;
                     return (
-                      <div key={idx} className="flex items-start gap-3 p-3 rounded-lg bg-[hsl(var(--surface-1))] hover:bg-[hsl(var(--surface-2))] transition-colors cursor-pointer group">
+                      <div key={suggestionKey} className="flex items-start gap-3 p-3 rounded-lg bg-[hsl(var(--surface-1))] hover:bg-[hsl(var(--surface-2))] transition-colors cursor-pointer group">
                         <CheckCircle2 size={14} className={`mt-0.5 shrink-0 ${priorityColor}`} />
                         <div className="flex-1 min-w-0">
                           <p className="text-sm text-foreground group-hover:text-[hsl(var(--primary))] transition-colors">
@@ -464,7 +469,7 @@ export default function Dashboard() {
                   <Badge variant="outline" className="text-[10px] bg-[hsl(var(--success)/0.15)] text-[hsl(var(--success))]">{t('dashboard.active')}</Badge>
                 </div>
                 {connectedIntegrations.map((integration, idx) => (
-                  <div key={idx} className="flex items-center justify-between">
+                  <div key={integration.integration_id || integration.provider || `integration-${idx}`} className="flex items-center justify-between">
                     <span className="text-xs text-muted-foreground capitalize">
                       {integration.provider === 'google_calendar' ? t('integrations.calendar.name') : integration.provider === 'gmail' ? t('integrations.gmail.name') : integration.provider}
                     </span>

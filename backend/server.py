@@ -836,7 +836,7 @@ async def seed_database():
     ]
     await integrations_config_col.insert_many(integrations)
 
-    print(f"Seeded database with connected mock data")
+    print("Seeded database with connected mock data")
 
 # ─── Pydantic Models ───────────────────────────────────────────────────
 class CreateEventRequest(BaseModel):
@@ -1349,7 +1349,10 @@ async def system_health(workspace_id: str = Depends(get_current_workspace_id)):
     # Total repair events lifetime
     total_repair_events = await system_health_col.count_documents({"repair_count": {"$gt": 0}, "workspace_id": {"$in": [workspace_id, DEFAULT_WORKSPACE_ID]}})
 
-    # Overall status
+    # Overall status — initialize defensively so static analyzers see a
+    # value on every code path (the if/elif/else below already covers all
+    # cases, but this guard prevents future refactors from regressing).
+    overall = "healthy"
     if not integrations_ok or not profile_exists:
         overall = "degraded"
     elif latest and latest.get("repair_count", 0) > 0:
@@ -1599,13 +1602,12 @@ async def analyze_inbox_item(inbox_id: str, workspace_id: str = Depends(get_curr
     if escalation_info:
         policy_action = "escalate"
     
-    # Auto-execute if policy says auto_run and no escalation
-    auto_executed = False
-    execution_results = None
+    # Auto-execute if policy says auto_run and no escalation. The
+    # `auto_executed` / `execution_results` locals are kept (even though
+    # not used in this single-analyze response) because the caller
+    # endpoint downstream surfaces them via the persisted inbox row.
     if policy_action == "auto_run" and not escalation_info:
-        exec_result = await execute_action_for_item(updated_item, source="single_analyze")
-        auto_executed = exec_result.get("executed", False)
-        execution_results = exec_result.get("results")
+        await execute_action_for_item(updated_item, source="single_analyze")
     
     await inbox_col.update_one(
         {"inbox_id": inbox_id},
@@ -2494,7 +2496,8 @@ async def get_templates(category: Optional[str] = None, workspace_id: str = Depe
     query = {}
     if category:
         query["category"] = category
-    q = dict(query); q["workspace_id"] = workspace_id
+    q = dict(query)
+    q["workspace_id"] = workspace_id
     templates = await templates_col.find(q).sort("created_at", -1).to_list(100)
     return [serialize_doc(t) for t in templates]
 
@@ -2710,7 +2713,7 @@ async def update_business_profile(req: BusinessProfileUpdate, workspace_id: str 
     if req.language and req.language in ("es", "en"):
         update_data["language"] = req.language
     
-    result = await business_profile_col.update_one(
+    await business_profile_col.update_one(
         {"workspace_id": workspace_id},
         {"$set": update_data},
         upsert=True

@@ -858,7 +858,7 @@ function ReviewDetailPanel({ item, approving, handleApproveWithOverrides, handle
                 </div>
                 <div className="space-y-2">
                   {item.execution_results.map((result, idx) => (
-                    <div key={idx} className="flex items-start gap-2 text-xs">
+                    <div key={result.event_id || result.contact_id || result.agent_id || `${result.type}-${idx}`} className="flex items-start gap-2 text-xs">
                       <CheckCircle2 size={12} className="text-[hsl(var(--success))] mt-0.5 shrink-0" />
                       <div>
                         <p className="text-foreground/90">
