@@ -33,6 +33,6 @@
   },
   {
     "content": "Lint + restart + smoke test (curl) + run testing agent",
-    "status": "in_progress"
+    "status": "completed"
   }
 ]
