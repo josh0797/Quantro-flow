@@ -97,9 +97,12 @@ export default function PlanAndUsage() {
   const fetchProfile = async () => {
     if (!user?.user_id) return;
     setLoadingProfile(true);
+    // Use select('*') so we don't crash if optional columns
+    // (subscription_status, current_period_end, etc.) haven't been added
+    // to the profiles table yet. Supabase returns whatever exists.
     const { data, error } = await supabase
       .from('profiles')
-      .select('id, plan, plan_updated_at, stripe_customer_id, stripe_subscription_id, paypal_subscription_id, subscription_status, current_period_end')
+      .select('*')
       .eq('id', user.user_id)
       .maybeSingle();
     if (error && error.code !== 'PGRST116') setErrorMsg(error.message);

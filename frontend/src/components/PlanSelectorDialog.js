@@ -41,6 +41,13 @@ export default function PlanSelectorDialog({ open, onOpenChange, currentPlanKey 
   const handleSelect = async (plan) => {
     setError('');
     setSelecting(plan.key);
+    // Log the exact request payload so the user can paste it for debugging.
+    // eslint-disable-next-line no-console
+    console.log('[billing] selected', {
+      plan: plan.key,
+      billingCycle: period,
+      price_id: plan.priceIds[period],
+    });
     try {
       await startCheckout({
         priceId: plan.priceIds[period],
@@ -49,7 +56,8 @@ export default function PlanSelectorDialog({ open, onOpenChange, currentPlanKey 
       });
       // Browser is redirected before we get here; no-op.
     } catch (e) {
-      setError(e?.message || t('billing.checkout_failed'));
+      const msg = e?.message || t('billing.checkout_failed');
+      setError(msg);
       setSelecting(null);
     }
   };
