@@ -1,30 +1,34 @@
 [
   {
-    "content": "Add full_name input (User icon + isValidFullName validation) to LoginPage signup mode",
+    "content": "Create /app/frontend/src/lib/billing.js with price IDs config + helpers",
     "status": "completed"
   },
   {
-    "content": "Update AuthContext.signUp to pass full_name metadata + mark needs_onboarding=true",
+    "content": "Create PlanSelectorDialog.js (modal with 3 plan cards + monthly/annual toggle)",
     "status": "completed"
   },
   {
-    "content": "Create OnboardingLite.js page with 3 questions (country, industry, company_name)",
+    "content": "Rewrite PlanAndUsage.js: dynamic CTAs based on subscription state",
     "status": "completed"
   },
   {
-    "content": "Add /onboarding-lite route and gate ProtectedRoute on needs_onboarding flag",
+    "content": "Handle ?checkout=success|cancelled return from Stripe (toast + profile refresh)",
     "status": "completed"
   },
   {
-    "content": "Persist answers to user_metadata + best-effort upsert to profiles (full_name, country, industry, company_name)",
+    "content": "Add i18n translations (ES/EN) for billing flow",
     "status": "completed"
   },
   {
-    "content": "Add i18n translations (ES/EN) for onboarding-lite",
+    "content": "Generate Supabase Edge Function source code deliverables (/app/supabase/functions/)",
     "status": "completed"
   },
   {
     "content": "Verify build + screenshot test",
     "status": "completed"
+  },
+  {
+    "content": "User deploys Supabase Edge Functions + configures Stripe webhook → end-to-end test",
+    "status": "pending"
   }
 ]
