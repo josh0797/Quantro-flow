@@ -27,18 +27,18 @@ import {
   listInvites, createInvite, revokeInvite,
 } from '../lib/api';
 
-const ROLE_RANK = { agent: 1, operator: 2, manager: 3, admin: 4, owner: 5 };
-const ROLE_OPTIONS = ['agent', 'operator', 'manager', 'admin', 'owner'];
+const ROLE_RANK = { viewer: 1, member: 2, accountant: 3, leader: 4, owner: 5 };
+const ROLE_OPTIONS = ['viewer', 'member', 'accountant', 'leader', 'owner'];
 
 function roleBadgeClass(role) {
   switch (role) {
     case 'owner':
       return 'bg-[hsl(var(--primary)/0.15)] text-[hsl(var(--primary))]';
-    case 'admin':
+    case 'leader':
       return 'bg-[hsl(var(--accent)/0.15)] text-[hsl(var(--accent))]';
-    case 'manager':
+    case 'accountant':
       return 'bg-[hsl(var(--info)/0.15)] text-[hsl(var(--info))]';
-    case 'operator':
+    case 'member':
       return 'bg-[hsl(var(--success)/0.15)] text-[hsl(var(--success))]';
     default:
       return 'bg-[hsl(var(--muted-foreground)/0.15)] text-[hsl(var(--muted-foreground))]';
@@ -48,17 +48,17 @@ function roleBadgeClass(role) {
 export default function Members() {
   const { t } = useLanguage();
   const { user, currentWorkspaceId } = useAuth();
-  const [data, setData] = useState({ members: [], your_role: 'agent' });
+  const [data, setData] = useState({ members: [], your_role: 'viewer' });
   const [invites, setInvites] = useState([]);
   const [loading, setLoading] = useState(true);
   const [creatingInvite, setCreatingInvite] = useState(false);
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
-  const [inviteForm, setInviteForm] = useState({ role: 'operator', max_uses: 1, expires_in_days: 7 });
+  const [inviteForm, setInviteForm] = useState({ role: 'member', max_uses: 1, expires_in_days: 7 });
   const [pendingRemoval, setPendingRemoval] = useState(null);
   const [pendingRevoke, setPendingRevoke] = useState(null);
 
   const myRoleRank = ROLE_RANK[data.your_role] || 0;
-  const isAdmin = myRoleRank >= ROLE_RANK.admin;
+  const isAdmin = myRoleRank >= ROLE_RANK.leader;
   const isOwner = data.your_role === 'owner';
 
   const fetchData = useCallback(async () => {
@@ -87,7 +87,7 @@ export default function Members() {
 
   const handleRoleChange = async (member, newRole) => {
     if (newRole === member.role) return;
-    if (['admin', 'owner'].includes(newRole) && !isOwner) {
+    if (['leader', 'owner'].includes(newRole) && !isOwner) {
       toast.error(t('members.not_owner_promotion'));
       return;
     }
@@ -216,8 +216,8 @@ export default function Members() {
                 const memberRoleRank = ROLE_RANK[m.role] || 0;
                 // Allow editing only if I'm admin+, target isn't me-as-owner,
                 // and (target is below admin OR I am owner).
-                const canEdit = isAdmin && !(isMe && m.role === 'owner') && (memberRoleRank < ROLE_RANK.admin || isOwner);
-                const canRemove = (isMe && m.role !== 'owner') || (isAdmin && memberRoleRank < ROLE_RANK.owner && (memberRoleRank < ROLE_RANK.admin || isOwner));
+                const canEdit = isAdmin && !(isMe && m.role === 'owner') && (memberRoleRank < ROLE_RANK.leader || isOwner);
+                const canRemove = (isMe && m.role !== 'owner') || (isAdmin && memberRoleRank < ROLE_RANK.owner && (memberRoleRank < ROLE_RANK.leader || isOwner));
 
                 return (
                   <div
@@ -250,7 +250,7 @@ export default function Members() {
                           </SelectTrigger>
                           <SelectContent>
                             {ROLE_OPTIONS.map((r) => (
-                              <SelectItem key={r} value={r} disabled={['admin', 'owner'].includes(r) && !isOwner}>
+                              <SelectItem key={r} value={r} disabled={['leader', 'owner'].includes(r) && !isOwner}>
                                 {t(`members.role_${r}`)}
                               </SelectItem>
                             ))}
@@ -371,7 +371,7 @@ export default function Members() {
                 <SelectTrigger data-testid="invite-role-select"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {ROLE_OPTIONS.filter((r) => r !== 'owner').map((r) => (
-                    <SelectItem key={r} value={r} disabled={r === 'admin' && !isOwner}>
+                    <SelectItem key={r} value={r} disabled={r === 'leader' && !isOwner}>
                       {t(`members.role_${r}`)} — <span className="text-muted-foreground">{t(`members.role_${r}_desc`)}</span>
                     </SelectItem>
                   ))}
