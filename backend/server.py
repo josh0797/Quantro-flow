@@ -16,6 +16,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from ai_billing import run_ai_request
+import supabase_admin
 
 # ─── Config ────────────────────────────────────────────────────────────
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
@@ -329,8 +330,15 @@ async def log_audit(
 ):
     """Append an audit log event. Non-fatal on error.
 
+    Phase 7c: every event is also shadow-written to the Supabase
+    ``org_audit_logs`` table whenever a workspace→org mapping exists.
+    The Supabase action vocabulary is constrained (see migration), so
+    we map our internal event types onto its CHECK constraint values
+    and drop events that don't fit (auth + workspace lifecycle which
+    aren't in the Supabase schema yet).
+
     The audit row mirrors the shape we'll eventually use in Supabase
-    (`people_audit_logs`): actor (`user_id`), target (`target_member_id`),
+    (`org_audit_logs`): actor (`user_id`), target (`target_user_id`),
     workspace context (`workspace_id`), action (`event_type`), and a
     free-form `metadata` jsonb-like dict.
     """
@@ -347,6 +355,51 @@ async def log_audit(
         })
     except Exception:
         pass
+
+    # Shadow-write to Supabase (best-effort).
+    try:
+        if not workspace_id or not target_member_id:
+            return
+        if not supabase_admin.is_dual_write_enabled():
+            return
+        org_id = await workspace_to_org_id(workspace_id)
+        if not org_id:
+            return
+        action = _map_audit_event_to_supabase(event_type)
+        if not action:
+            return
+        meta = dict(metadata or {})
+        meta.setdefault("event_type", event_type)
+        meta.setdefault("description", description)
+        await supabase_admin.insert_audit_log(
+            org_id=org_id,
+            action=action,
+            target_user_id=target_member_id,
+            actor_user_id=user_id,
+            access_token=None,  # service-role only in this path; user JWT not always available here
+            old_role=meta.get("previous_role") or meta.get("old_role"),
+            new_role=meta.get("new_role"),
+            metadata=meta,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# Mapping from internal event_type → Supabase org_audit_logs.action
+# (constrained by CHECK). Anything not in this map skips the shadow.
+_AUDIT_EVENT_MAP: Dict[str, str] = {
+    "members.role_changed": "role_changed",
+    "members.removed": "access_revoked",
+    "invites.created": "invitation_created",
+    "invites.revoked": "access_revoked",
+    "invites.accepted": "invitation_accepted",
+    "onboarding.completed": "onboarding_completed",
+    "onboarding.step_updated": "permissions_modified",
+}
+
+
+def _map_audit_event_to_supabase(event_type: str) -> Optional[str]:
+    return _AUDIT_EVENT_MAP.get(event_type)
 
 
 # ─── Simulation Mode Helpers (Strict Data Isolation) ──────────────────
@@ -1391,6 +1444,36 @@ ROLE_ALIASES = {
 def _normalize_role(role: Optional[str]) -> str:
     return ROLE_ALIASES.get((role or "").lower().strip(), "viewer")
 
+
+# ─── Workspace ↔ Supabase Org mapping ───────────────────────────────
+# Phase 7c is migrating Members/Invites/Onboarding/Audit to Supabase
+# where the unit is `organizations.id` (uuid). MongoDB still uses the
+# legacy `workspace_id` strings. This resolver translates between the
+# two so we can dual-write without exposing the mapping to callers.
+async def workspace_to_org_id(workspace_id: str) -> Optional[str]:
+    """Translate a Mongo workspace_id to a Supabase organisation uuid.
+
+    Lookup order:
+      1. workspaces_col[workspace_id].org_id (per-workspace override)
+      2. QUANTRO_DEFAULT_ORG_ID env var (only for the legacy
+         DEFAULT_WORKSPACE_ID — every other workspace must opt-in)
+    Returns ``None`` if no mapping is known, in which case the caller
+    falls back to Mongo-only behavior.
+    """
+    if not workspace_id:
+        return None
+    try:
+        ws = await workspaces_col.find_one(
+            {"workspace_id": workspace_id}, {"_id": 0, "org_id": 1}
+        )
+        if ws and ws.get("org_id"):
+            return str(ws["org_id"])
+    except Exception:  # noqa: BLE001
+        pass
+    if workspace_id == DEFAULT_WORKSPACE_ID:
+        return supabase_admin.resolve_default_org_id()
+    return None
+
 # Workspace invites: each invite is a single document (no email needed).
 # A workspace admin generates an invite, gets a shareable URL, and any
 # authenticated user that hits /api/invites/{token}/accept gets added to
@@ -1462,6 +1545,12 @@ class CreateInviteRequest(BaseModel):
     role: str = "member"
     max_uses: Optional[int] = 1
     expires_in_days: Optional[int] = 7
+    # Phase 7c: optional metadata for Supabase `invitations` parity.
+    # `email` is required by the Supabase table; if blank we generate a
+    # placeholder so legacy email-free links keep working.
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    job_title: Optional[str] = None
 
 
 def _serialize_member(member_doc: dict, user_doc: Optional[dict]) -> dict:
@@ -1510,10 +1599,45 @@ async def list_members(
     user: User = Depends(get_current_user),
 ):
     """List all members of a workspace. Any member can view the roster
-    (it surfaces ownership/role boundaries, not sensitive data)."""
+    (it surfaces ownership/role boundaries, not sensitive data).
+
+    Phase 7c dual-read: when ``QUANTRO_DB_PRIMARY=supabase`` we read
+    from the Supabase ``org_members`` table first. Otherwise we read
+    from Mongo and silently shadow-validate against Supabase.
+    """
     me = await _membership_for(user.user_id, workspace_id)
     if not me:
         raise HTTPException(status_code=403, detail="Not a workspace member")
+
+    org_id = await workspace_to_org_id(workspace_id)
+    use_supabase = supabase_admin.is_supabase_primary() and bool(org_id)
+
+    if use_supabase:
+        rows = await supabase_admin.list_org_members(org_id, user.access_token or "")
+        # If Supabase fails or returns empty for what should be a
+        # populated workspace, fall back to Mongo so we never serve a
+        # blank Members tab during the migration.
+        if rows:
+            user_ids = [r["user_id"] for r in rows if r.get("user_id")]
+            user_rows = await users_col.find(
+                {"user_id": {"$in": user_ids}},
+                {"_id": 0, "user_id": 1, "email": 1, "name": 1, "picture": 1},
+            ).to_list(200) if user_ids else []
+            by_id = {u["user_id"]: u for u in user_rows}
+            return {
+                "workspace_id": workspace_id,
+                "org_id": org_id,
+                "source": "supabase",
+                "your_role": _normalize_role(me.get("role")),
+                "members": [
+                    _serialize_member(
+                        {"user_id": r.get("user_id"), "role": r.get("role"), "joined_at": r.get("joined_at")},
+                        by_id.get(r.get("user_id")),
+                    )
+                    for r in rows
+                ],
+            }
+
     members = await workspace_members_col.find(
         {"workspace_id": workspace_id}, {"_id": 0}
     ).to_list(200)
@@ -1525,7 +1649,9 @@ async def list_members(
     by_id = {u["user_id"]: u for u in user_rows}
     return {
         "workspace_id": workspace_id,
-        "your_role": me.get("role"),
+        "org_id": org_id,
+        "source": "mongo",
+        "your_role": _normalize_role(me.get("role")),
         "members": [_serialize_member(m, by_id.get(m["user_id"])) for m in members],
     }
 
@@ -1581,12 +1707,31 @@ async def update_member_role(
         {"user_id": target_user_id, "workspace_id": workspace_id},
         {"$set": {"role": new_role, "role_updated_at": datetime.now(timezone.utc)}},
     )
+
+    # Phase 7c shadow-write: keep org_members in sync.
+    org_id = await workspace_to_org_id(workspace_id)
+    if org_id and supabase_admin.is_dual_write_enabled():
+        try:
+            await supabase_admin.update_member_role(
+                org_id=org_id,
+                member_user_id=target_user_id,
+                new_role=new_role,
+                access_token=user.access_token or "",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     await log_audit(
         "members.role_changed",
         f"{user.email} changed role of {target_user_id} to {new_role}",
         user_id=user.user_id, workspace_id=workspace_id,
         target_member_id=target_user_id,
-        metadata={"target_user_id": target_user_id, "new_role": new_role, "previous_role": target_role},
+        metadata={
+            "target_user_id": target_user_id,
+            "new_role": new_role,
+            "previous_role": target_role,
+            "old_role": target_role,
+        },
     )
     return {"success": True, "user_id": target_user_id, "role": new_role}
 
@@ -1628,12 +1773,30 @@ async def remove_member(
         {"user_id": target_user_id, "current_workspace_id": workspace_id},
         {"$unset": {"current_workspace_id": ""}},
     )
+
+    # Phase 7c shadow-write: also remove from Supabase.
+    org_id = await workspace_to_org_id(workspace_id)
+    if org_id and supabase_admin.is_dual_write_enabled():
+        try:
+            await supabase_admin.delete_member(
+                org_id=org_id,
+                member_user_id=target_user_id,
+                access_token=user.access_token or "",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     await log_audit(
         "members.removed",
         f"{user.email} removed {target_user_id} from workspace",
         user_id=user.user_id, workspace_id=workspace_id,
         target_member_id=target_user_id,
-        metadata={"target_user_id": target_user_id, "self_leave": is_self, "previous_role": target_role},
+        metadata={
+            "target_user_id": target_user_id,
+            "self_leave": is_self,
+            "previous_role": target_role,
+            "old_role": target_role,
+        },
     )
     return {"success": True}
 
@@ -1678,13 +1841,52 @@ async def create_invite(
         "created_by": user.user_id,
         "created_at": datetime.now(timezone.utc),
         "accepted_by": [],
+        "email": (req.email or None),
+        "full_name": (req.full_name or None),
     }
     await workspace_invites_col.insert_one(invite_doc)
+
+    # Phase 7c shadow-write: also create the invite in Supabase so the
+    # rest of the org tooling (and the eventual primary read switch)
+    # stays in sync. Best-effort — failures don't bubble up.
+    org_id = await workspace_to_org_id(workspace_id)
+    supabase_invite_id = None
+    if org_id and supabase_admin.is_dual_write_enabled():
+        try:
+            sb_invite = await supabase_admin.insert_invitation(
+                org_id=org_id,
+                role=role,
+                invited_by=user.user_id,
+                access_token=user.access_token or "",
+                email=req.email,
+                full_name=req.full_name,
+                job_title=req.job_title,
+                expires_at=expires_at.isoformat(),
+            )
+            if sb_invite and sb_invite.get("id"):
+                supabase_invite_id = sb_invite["id"]
+                # Cross-link Mongo row → Supabase row id for later
+                # revoke/accept dual-writes.
+                await workspace_invites_col.update_one(
+                    {"invite_id": invite_id},
+                    {"$set": {
+                        "supabase_invite_id": supabase_invite_id,
+                        "supabase_token": sb_invite.get("token"),
+                    }},
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
     await log_audit(
         "invites.created",
         f"{user.email} created invite for role={role}",
         user_id=user.user_id, workspace_id=workspace_id,
-        metadata={"invite_id": invite_id, "role": role, "max_uses": max_uses},
+        metadata={
+            "invite_id": invite_id,
+            "role": role,
+            "max_uses": max_uses,
+            "supabase_invite_id": supabase_invite_id,
+        },
     )
     base_url = (request.headers.get("origin") or "").rstrip("/")
     return _serialize_invite(invite_doc, base_url=base_url or None)
@@ -1696,15 +1898,47 @@ async def list_invites(
     request: Request,
     user: User = Depends(get_current_user),
 ):
-    """List active invites for a workspace. Leader+ only."""
+    """List active invites for a workspace. Leader+ only.
+
+    Phase 7c: when QUANTRO_DB_PRIMARY=supabase, reads from the
+    Supabase ``invitations`` table; otherwise reads Mongo and the
+    Supabase rows are kept in sync via shadow-writes from
+    ``create_invite`` / ``revoke_invite``."""
     me = await _membership_for(user.user_id, workspace_id)
     if not me:
         raise HTTPException(status_code=403, detail="Not a workspace member")
     if role_rank(me.get("role")) < role_rank("leader"):
         raise HTTPException(status_code=403, detail="Requires leader role")
-    rows = await workspace_invites_col.find({"workspace_id": workspace_id}, {"_id": 0}).sort("created_at", -1).to_list(100)
+
+    org_id = await workspace_to_org_id(workspace_id)
     base_url = (request.headers.get("origin") or "").rstrip("/")
-    return {"invites": [_serialize_invite(r, base_url=base_url or None) for r in rows]}
+
+    if supabase_admin.is_supabase_primary() and org_id:
+        sb_rows = await supabase_admin.list_invitations(org_id, user.access_token or "")
+        if sb_rows is not None:
+            invites = []
+            for r in sb_rows:
+                token = r.get("token")
+                invites.append({
+                    "invite_id": r.get("id"),
+                    "workspace_id": workspace_id,
+                    "role": _normalize_role(r.get("role")),
+                    "token": token,
+                    "url": f"{base_url}/join/{token}" if base_url and token else None,
+                    "max_uses": 1,
+                    "used_count": 1 if r.get("accepted") else 0,
+                    "expires_at": r.get("expires_at"),
+                    "created_by": r.get("invited_by"),
+                    "created_at": r.get("created_at"),
+                    "revoked": False,
+                    "email": r.get("email"),
+                    "full_name": r.get("full_name"),
+                    "source": "supabase",
+                })
+            return {"invites": invites, "source": "supabase"}
+
+    rows = await workspace_invites_col.find({"workspace_id": workspace_id}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    return {"invites": [_serialize_invite(r, base_url=base_url or None) for r in rows], "source": "mongo"}
 
 
 @app.delete("/api/workspaces/{workspace_id}/invites/{invite_id}")
@@ -1719,17 +1953,39 @@ async def revoke_invite(
         raise HTTPException(status_code=403, detail="Not a workspace member")
     if role_rank(me.get("role")) < role_rank("leader"):
         raise HTTPException(status_code=403, detail="Requires leader role")
+    # Look up the row first so we have the supabase_invite_id (if any)
+    # before flipping the revoked flag.
+    invite_row = await workspace_invites_col.find_one(
+        {"workspace_id": workspace_id, "invite_id": invite_id}, {"_id": 0}
+    )
     result = await workspace_invites_col.update_one(
         {"workspace_id": workspace_id, "invite_id": invite_id},
         {"$set": {"revoked": True, "revoked_at": datetime.now(timezone.utc), "revoked_by": user.user_id}},
     )
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Invite not found")
+
+    # Phase 7c shadow-write: revoke in Supabase too. There's no
+    # "revoked" column on `invitations`; we mark accepted=true so the
+    # invite stops being valid (keeps schema clean even if it's not
+    # the most semantic mapping). The Mongo row is still the source of
+    # truth for the revoked-vs-used distinction during the migration.
+    if invite_row and invite_row.get("supabase_invite_id") and supabase_admin.is_dual_write_enabled():
+        try:
+            await supabase_admin.update_invitation(
+                invite_row["supabase_invite_id"],
+                {"accepted": True},
+                user.access_token or "",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     await log_audit(
         "invites.revoked",
         f"{user.email} revoked invite {invite_id}",
         user_id=user.user_id, workspace_id=workspace_id,
-        metadata={"invite_id": invite_id},
+        target_member_id=invite_row.get("created_by") if invite_row else None,
+        metadata={"invite_id": invite_id, "supabase_invite_id": (invite_row or {}).get("supabase_invite_id")},
     )
     return {"success": True}
 
@@ -1852,6 +2108,7 @@ async def _hydrate_member_onboarding(
     user_doc: Optional[dict],
     invite_for_member: Optional[dict] = None,
     business_profile: Optional[dict] = None,
+    supabase_persisted: Optional[Dict[str, dict]] = None,
 ) -> dict:
     """Build the per-member onboarding payload by merging persisted
     `people_onboarding_steps` rows with derived signals from the rest of
@@ -1862,6 +2119,14 @@ async def _hydrate_member_onboarding(
         {"_id": 0},
     ).to_list(20)
     persisted = {r["step_key"]: r for r in persisted_rows}
+    # Layer Supabase persisted on top — its rows are authoritative
+    # once Phase 7c is rolled forward.
+    if supabase_persisted:
+        for k, v in supabase_persisted.items():
+            persisted.setdefault(k, v)
+            # If both exist, prefer the most recently completed.
+            if k in persisted and v.get("status") == "completed" and persisted[k].get("status") != "completed":
+                persisted[k] = v
 
     derived: Dict[str, dict] = {}
 
@@ -1999,6 +2264,21 @@ async def get_onboarding(workspace_id: str, user: User = Depends(get_current_use
         {"workspace_id": workspace_id}, {"_id": 0}
     )
 
+    # Phase 7c: pre-fetch Supabase onboarding steps for the whole org
+    # so the per-member hydrator avoids N+1 round-trips.
+    org_id = await workspace_to_org_id(workspace_id)
+    supabase_steps_by_member: Dict[str, Dict[str, dict]] = {}
+    if org_id and supabase_admin.is_dual_write_enabled():
+        try:
+            sb_rows = await supabase_admin.list_onboarding_steps(org_id, user.access_token or "")
+            for r in sb_rows:
+                mid = r.get("member_id")
+                if not mid:
+                    continue
+                supabase_steps_by_member.setdefault(mid, {})[r["step_key"]] = r
+        except Exception:  # noqa: BLE001
+            pass
+
     cards = []
     for m in members:
         # Ensure role is canonical for downstream consumers.
@@ -2007,6 +2287,7 @@ async def get_onboarding(workspace_id: str, user: User = Depends(get_current_use
             workspace_id, m, by_user.get(m["user_id"]),
             invite_for_member=invite_by_user.get(m["user_id"]),
             business_profile=business_profile,
+            supabase_persisted=supabase_steps_by_member.get(m["user_id"]),
         ))
 
     overall_completed = sum(1 for c in cards if c["status"] == "completed")
@@ -2073,6 +2354,23 @@ async def upsert_onboarding_step(
         {"$set": update_doc, "$setOnInsert": {"created_at": now}},
         upsert=True,
     )
+
+    # Phase 7c shadow-write to Supabase people_onboarding_steps.
+    org_id = await workspace_to_org_id(workspace_id)
+    if org_id and supabase_admin.is_dual_write_enabled():
+        try:
+            await supabase_admin.upsert_onboarding_step(
+                org_id=org_id,
+                member_id=member_user_id,
+                step_key=step_key,
+                status=new_status,
+                metadata=req.metadata or {},
+                access_token=user.access_token or "",
+                completed_at_iso=now.isoformat() if new_status == "completed" else None,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     await log_audit(
         "onboarding.step_updated",
         f"{user.email} marked {step_key}={new_status} for {member_user_id}",
@@ -2134,18 +2432,69 @@ async def list_audit(
     member_user_id: Optional[str] = None,
 ):
     """Workspace audit timeline. Leader+ only. Returns rows newest-first,
-    hydrated with actor + target user metadata."""
+    hydrated with actor + target user metadata.
+
+    Phase 7c: when QUANTRO_DB_PRIMARY=supabase and a workspace→org
+    mapping exists, reads from Supabase ``org_audit_logs``; otherwise
+    reads from Mongo's ``audit_log`` collection.
+    """
     me = await _membership_for(user.user_id, workspace_id)
     if not me:
         raise HTTPException(status_code=403, detail="Not a workspace member")
     if role_rank(me.get("role")) < role_rank("leader"):
         raise HTTPException(status_code=403, detail="Requires leader role")
 
+    capped_limit = max(1, min(int(limit or 100), 500))
+    org_id = await workspace_to_org_id(workspace_id)
+
+    # Try Supabase first if it's the primary read source.
+    if supabase_admin.is_supabase_primary() and org_id:
+        sb_rows = await supabase_admin.list_audit_logs(
+            org_id, user.access_token or "",
+            limit=capped_limit,
+            target_user_id=member_user_id,
+        )
+        if sb_rows:
+            user_ids = list({r.get("actor_user_id") for r in sb_rows if r.get("actor_user_id")} |
+                            {r.get("target_user_id") for r in sb_rows if r.get("target_user_id")})
+            user_rows = await users_col.find(
+                {"user_id": {"$in": user_ids}},
+                {"_id": 0, "user_id": 1, "email": 1, "name": 1, "picture": 1},
+            ).to_list(500) if user_ids else []
+            by_id = {u["user_id"]: u for u in user_rows}
+            events = []
+            for r in sb_rows:
+                actor = by_id.get(r.get("actor_user_id")) or {}
+                target = by_id.get(r.get("target_user_id")) or {}
+                events.append({
+                    "event_id": r.get("id"),
+                    "action": r.get("action"),
+                    "description": (r.get("metadata") or {}).get("description"),
+                    "timestamp": r.get("created_at"),
+                    "actor": {
+                        "user_id": r.get("actor_user_id"),
+                        "email": actor.get("email"),
+                        "name": actor.get("name"),
+                        "picture": actor.get("picture"),
+                    } if r.get("actor_user_id") else None,
+                    "target": {
+                        "user_id": r.get("target_user_id"),
+                        "email": target.get("email"),
+                        "name": target.get("name"),
+                        "picture": target.get("picture"),
+                    } if r.get("target_user_id") else None,
+                    "metadata": {
+                        **(r.get("metadata") or {}),
+                        "old_role": r.get("old_role"),
+                        "new_role": r.get("new_role"),
+                    },
+                })
+            return {"workspace_id": workspace_id, "events": events, "total": len(events), "source": "supabase"}
+
     query: Dict[str, Any] = {"workspace_id": workspace_id}
     if member_user_id:
         query["target_member_id"] = member_user_id
 
-    capped_limit = max(1, min(int(limit or 100), 500))
     rows = await audit_log_col.find(query, {"_id": 0}).sort("timestamp", -1).limit(capped_limit).to_list(capped_limit)
 
     actor_ids = list({r.get("user_id") for r in rows if r.get("user_id")})
@@ -2184,7 +2533,7 @@ async def list_audit(
             } if r.get("target_member_id") else None,
             "metadata": r.get("metadata") or {},
         })
-    return {"workspace_id": workspace_id, "events": events, "total": len(events)}
+    return {"workspace_id": workspace_id, "events": events, "total": len(events), "source": "mongo"}
 
 
 

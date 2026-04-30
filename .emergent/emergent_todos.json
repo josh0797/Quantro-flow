@@ -1,38 +1,38 @@
 [
   {
-    "content": "Backend: Migrar taxonomía de roles + script de migración on-startup",
+    "content": "SQL migration v2 — reescrita para usar org_id + get_my_org_role",
     "status": "completed"
   },
   {
-    "content": "Backend: log_audit con target_member_id + auditar invites/members con target",
+    "content": "Backend: módulo `supabase_admin.py` con httpx helpers",
     "status": "completed"
   },
   {
-    "content": "Backend: GET /api/workspaces/{id}/onboarding (5 pasos calculados)",
+    "content": "Backend: helper workspace_id ↔ org_id (env QUANTRO_DEFAULT_ORG_ID + override en workspaces_col)",
     "status": "completed"
   },
   {
-    "content": "Backend: Quick-actions — step upsert + complete-all",
+    "content": "Backend: feature flag QUANTRO_DB_PRIMARY (mongo|supabase) en .env",
     "status": "completed"
   },
   {
-    "content": "Backend: GET /api/workspaces/{id}/audit (timeline)",
+    "content": "Backend: dual-read en list_members / list_invites / list_audit / get_onboarding",
     "status": "completed"
   },
   {
-    "content": "Supabase: Migration SQL `20260426_people_onboarding_audit.sql`",
+    "content": "Backend: dual-write en create_invite, revoke_invite, member role change, member remove, onboarding step upsert",
     "status": "completed"
   },
   {
-    "content": "Frontend: api.js helpers + i18n strings ES/EN para onboarding+audit",
+    "content": "Backend: shadow `log_audit()` a org_audit_logs",
     "status": "completed"
   },
   {
-    "content": "Frontend: Members.js — dos tabs nuevos con OnboardingCard + AuditTimeline inline",
-    "status": "completed"
+    "content": "Frontend: agregar campo email opcional al dialog de crear invite",
+    "status": "in_progress"
   },
   {
-    "content": "Lint + esbuild + restart + smoke test + testing agent",
-    "status": "completed"
+    "content": "Lint + restart + smoke test + testing agent",
+    "status": "pending"
   }
 ]

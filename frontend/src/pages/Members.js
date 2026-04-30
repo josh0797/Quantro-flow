@@ -58,7 +58,7 @@ export default function Members() {
   const [loading, setLoading] = useState(true);
   const [creatingInvite, setCreatingInvite] = useState(false);
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
-  const [inviteForm, setInviteForm] = useState({ role: 'member', max_uses: 1, expires_in_days: 7 });
+  const [inviteForm, setInviteForm] = useState({ role: 'member', max_uses: 1, expires_in_days: 7, email: '', full_name: '' });
   const [pendingRemoval, setPendingRemoval] = useState(null);
   const [pendingRevoke, setPendingRevoke] = useState(null);
   const [pendingComplete, setPendingComplete] = useState(null);
@@ -543,6 +543,27 @@ export default function Members() {
                   value={inviteForm.expires_in_days}
                   onChange={(e) => setInviteForm({ ...inviteForm, expires_in_days: parseInt(e.target.value, 10) || 7 })}
                   data-testid="invite-expires"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label className="text-xs text-muted-foreground">{t('members.invite_email_optional')}</Label>
+                <Input
+                  type="email"
+                  placeholder="alice@empresa.com"
+                  value={inviteForm.email}
+                  onChange={(e) => setInviteForm({ ...inviteForm, email: e.target.value })}
+                  data-testid="invite-email"
+                />
+              </div>
+              <div>
+                <Label className="text-xs text-muted-foreground">{t('members.invite_full_name_optional')}</Label>
+                <Input
+                  placeholder="Alice Silva"
+                  value={inviteForm.full_name}
+                  onChange={(e) => setInviteForm({ ...inviteForm, full_name: e.target.value })}
+                  data-testid="invite-full-name"
                 />
               </div>
             </div>
