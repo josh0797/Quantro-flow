@@ -77,6 +77,21 @@ SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 DEFAULT_ORG_ID = os.environ.get("QUANTRO_DEFAULT_ORG_ID", "")
 DEFAULT_WORKSPACE_ID = "default_workspace"
 
+# Phase 7c — Option A consolidation:
+# When a workspace has no explicit mapping on `workspaces.org_id`, fall back
+# to QUANTRO_DEFAULT_ORG_ID for rows whose user_id is a real Supabase UUID.
+# Legacy test seeds (`user_test_*`) still fall through `skip:bad_uuid`.
+FALLBACK_TO_DEFAULT_ORG = True
+
+# Per-user role overrides applied AFTER `normalize_role`. Keys are Supabase
+# auth user IDs. Use sparingly — this is the manual knob for the one-shot
+# consolidation, not a long-term policy.
+ROLE_OVERRIDES: Dict[str, str] = {
+    # Josias Mont — demoted from "owner" to "leader" (admin) in the
+    # consolidated default org, per the Phase 7c migration decision.
+    "2c6c39bc-7a3f-41f1-be32-3e81904a8de1": "leader",
+}
+
 UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
@@ -219,6 +234,10 @@ async def migrate_members(
     print("\n--- workspace_members → org_members ---")
     cursor = db["workspace_members"].find({}, {"_id": 0})
     seen = 0
+    # Local dedup so dry-run numbers reflect what a real run would write.
+    # Keys are `(org_id, user_id)` tuples already "would-be" inserted in
+    # this invocation.
+    dry_seen: set[Tuple[str, str]] = set()
     async for row in cursor:
         if limit and seen >= limit:
             break
@@ -226,8 +245,20 @@ async def migrate_members(
         wid = row.get("workspace_id")
         uid = row.get("user_id")
         role = normalize_role(row.get("role"))
+        # Manual override (e.g. Josias Mont → leader in default org).
+        if uid in ROLE_OVERRIDES:
+            role = ROLE_OVERRIDES[uid]
 
         org_id = ws_org.get(wid)
+        if not org_id and FALLBACK_TO_DEFAULT_ORG and DEFAULT_ORG_ID and is_uuid(uid):
+            # Option A consolidation — no per-workspace org exists yet, so
+            # every real user ends up in the default org. Legacy test seeds
+            # (non-UUID user_id) skip out via `bad_uuid` below.
+            org_id = DEFAULT_ORG_ID
+            # Note: intentionally NOT bumping a counter here — this is an
+            # intermediate resolution, not a terminal status. The row will
+            # still end up reported as `dry:would_insert`, `skip:duplicate`
+            # or `skip:duplicate_in_run` below.
         if not org_id:
             print(f"  [skip:no_mapping] ws={wid} user={uid} (add it to workspaces.org_id or QUANTRO_DEFAULT_ORG_ID)")
             reporter.bump("members", "skip:no_mapping")
@@ -237,7 +268,7 @@ async def migrate_members(
             reporter.bump("members", "skip:bad_uuid")
             continue
 
-        # Dedup
+        # Dedup — first against Supabase, then against this run's own plan.
         status, body = await sb.get(
             "/rest/v1/org_members",
             {"org_id": f"eq.{org_id}", "user_id": f"eq.{uid}", "select": "id", "limit": "1"},
@@ -245,6 +276,10 @@ async def migrate_members(
         if status == 200 and isinstance(body, list) and body:
             print(f"  [skip:duplicate] org={org_id} user={uid}")
             reporter.bump("members", "skip:duplicate")
+            continue
+        if (org_id, uid) in dry_seen:
+            print(f"  [skip:duplicate_in_run] org={org_id} user={uid}")
+            reporter.bump("members", "skip:duplicate_in_run")
             continue
 
         payload = {
@@ -259,12 +294,14 @@ async def migrate_members(
         if not execute:
             print(f"  [dry] would insert org={org_id} user={uid} role={role}")
             reporter.bump("members", "dry:would_insert")
+            dry_seen.add((org_id, uid))
             continue
 
         status, body = await sb.post("/rest/v1/org_members", payload)
         if status < 400:
-            print(f"  [ok] inserted user={uid}")
+            print(f"  [ok] inserted user={uid} role={role}")
             reporter.bump("members", "inserted")
+            dry_seen.add((org_id, uid))
         else:
             print(f"  [error:{status}] user={uid} body={str(body)[:160]}")
             reporter.bump("members", f"error:{status}")
