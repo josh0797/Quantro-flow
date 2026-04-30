@@ -131,6 +131,34 @@ async def list_org_members(org_id: str, access_token: str) -> List[Dict[str, Any
     return resp.json() or []
 
 
+async def list_orgs_for_user(user_id: str) -> List[Dict[str, Any]]:
+    """Return every ``org_members`` row for ``user_id``.
+
+    Uses the service-role key to bypass RLS, so it can be safely called
+    from the login hook *before* we have a user JWT for RLS context. If
+    the service-role key isn't configured, this silently returns ``[]``
+    — callers must fall back to Mongo-only behaviour.
+
+    Shape: ``[{org_id, role, joined_at, id}, ...]``.
+    """
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        return []
+    resp = await _request(
+        "GET",
+        "/rest/v1/org_members",
+        access_token=None,
+        use_service=True,
+        params={
+            "user_id": f"eq.{user_id}",
+            "select": "id,org_id,role,joined_at",
+            "order": "joined_at.asc",
+        },
+    )
+    if resp is None or resp.status_code != 200:
+        return []
+    return resp.json() or []
+
+
 async def list_invitations(org_id: str, access_token: str) -> List[Dict[str, Any]]:
     resp = await _request(
         "GET",

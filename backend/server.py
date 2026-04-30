@@ -263,8 +263,15 @@ async def _upsert_user_from_claims(claims: dict) -> dict:
         existing.update({"email": email, "name": name, "picture": picture})
 
     # Ensure the user has an active workspace.
+    # Phase 7c: reconcile Supabase org memberships first — if this user is
+    # already a member of one or more orgs in Supabase, those memberships
+    # are the source of truth, so mirror them into Mongo *before* we fall
+    # back to creating a personal workspace. This prevents the "everyone
+    # gets their own private workspace on first login" bug that affected
+    # users whose legacy Mongo identity was remapped during auth migration.
+    reconciled_ws = await reconcile_supabase_memberships_to_mongo(existing)
     if not existing.get("current_workspace_id"):
-        ws_id = await claim_or_create_workspace_for_user(existing)
+        ws_id = reconciled_ws or await claim_or_create_workspace_for_user(existing)
         await users_col.update_one(
             {"user_id": user_id},
             {"$set": {"current_workspace_id": ws_id}},
@@ -1268,6 +1275,115 @@ async def claim_or_create_workspace_for_user(user_doc: dict) -> str:
         user_id=user_id, workspace_id=new_ws_id,
     )
     return new_ws_id
+
+
+async def reconcile_supabase_memberships_to_mongo(user_doc: dict) -> Optional[str]:
+    """Phase 7c — Supabase-first workspace resolution.
+
+    On every login, check whether this user already belongs to any org
+    in Supabase ``org_members``. If so, mirror those memberships into
+    the Mongo ``workspace_members`` collection (which is still the DB
+    the runtime reads from by default), and return the primary
+    ``workspace_id`` the user should land in.
+
+    How each org is translated to a workspace_id (lookup order):
+      1. A Mongo ``workspaces`` row already has ``org_id`` pointing at
+         this Supabase org → use that workspace_id.
+      2. The org is the configured default org
+         (``QUANTRO_DEFAULT_ORG_ID``) → promote the ``DEFAULT_WORKSPACE_ID``
+         Mongo row to carry that ``org_id`` and use it.
+      3. No mapping exists → create a fresh Mongo workspace with
+         ``org_id`` already set, then seed config.
+
+    The user's role in Mongo is *always* synced to match Supabase — so
+    role changes made through the Supabase-backed admin UI are reflected
+    even while Mongo is the primary read source. Returns ``None`` if the
+    user has no Supabase memberships (legacy flow continues).
+    """
+    user_id = user_doc.get("user_id")
+    if not user_id:
+        return None
+
+    try:
+        sb_rows = await supabase_admin.list_orgs_for_user(user_id)
+    except Exception:  # noqa: BLE001 — best-effort, never block login
+        sb_rows = []
+    if not sb_rows:
+        return None
+
+    default_org_id = supabase_admin.resolve_default_org_id()
+    primary_ws_id: Optional[str] = None
+
+    for row in sb_rows:
+        org_id = row.get("org_id")
+        role = _normalize_role(row.get("role"))
+        if not org_id:
+            continue
+
+        # 1) Prefer an existing workspaces row that already carries this
+        #    org_id (covers per-workspace overrides + the one-off patch
+        #    we apply to the default workspace).
+        ws = await workspaces_col.find_one(
+            {"org_id": org_id}, {"_id": 0, "workspace_id": 1}
+        )
+
+        # 2) Promote the DEFAULT_WORKSPACE_ID row if it's the default org
+        #    but hasn't been tagged yet (one-time on first reconciliation).
+        if not ws and default_org_id and org_id == default_org_id:
+            await workspaces_col.update_one(
+                {"workspace_id": DEFAULT_WORKSPACE_ID},
+                {"$set": {"org_id": org_id}},
+            )
+            ws = await workspaces_col.find_one(
+                {"workspace_id": DEFAULT_WORKSPACE_ID},
+                {"_id": 0, "workspace_id": 1},
+            )
+
+        # 3) Still nothing → mint a new workspace for this org. Name it
+        #    after the user as a safe default (owner can rename later).
+        if not ws:
+            new_ws_id = f"ws_{uuid.uuid4().hex[:12]}"
+            await workspaces_col.insert_one({
+                "workspace_id": new_ws_id,
+                "name": f"{user_doc.get('name') or 'Workspace'}",
+                "owner_user_id": user_id if role == "owner" else None,
+                "org_id": org_id,
+                "created_at": datetime.now(timezone.utc),
+                "claimed": True,
+                "claimed_at": datetime.now(timezone.utc),
+            })
+            await seed_workspace_config(new_ws_id)
+            ws = {"workspace_id": new_ws_id}
+
+        ws_id = ws["workspace_id"]
+
+        # Upsert the membership in Mongo so the rest of the backend
+        # (which still reads from workspace_members_col) can find it.
+        # We always trust Supabase's role here — this is the whole point
+        # of the reconciliation pass.
+        now = datetime.now(timezone.utc)
+        joined_iso = row.get("joined_at")
+        try:
+            joined_at = (
+                datetime.fromisoformat(str(joined_iso).replace("Z", "+00:00"))
+                if joined_iso
+                else now
+            )
+        except Exception:  # noqa: BLE001
+            joined_at = now
+        await workspace_members_col.update_one(
+            {"workspace_id": ws_id, "user_id": user_id},
+            {
+                "$set": {"role": role, "source": "supabase_sync"},
+                "$setOnInsert": {"joined_at": joined_at},
+            },
+            upsert=True,
+        )
+
+        if primary_ws_id is None:
+            primary_ws_id = ws_id
+
+    return primary_ws_id
 
 
 # ─── Lifespan ──────────────────────────────────────────────────────────
