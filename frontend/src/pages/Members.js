@@ -18,7 +18,11 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader,
   AlertDialogTitle,
 } from '../components/ui/alert-dialog';
-import { Users, UserPlus, Copy, Trash2, Shield, Crown, Loader2, Link2, ClipboardList, History, CheckCircle2, Clock, Mail, UserCheck, Building2, KeyRound, AlertCircle } from 'lucide-react';
+import { Users, UserPlus, Copy, Trash2, Shield, Crown, Loader2, Link2, ClipboardList, History, CheckCircle2, Clock, Mail, UserCheck, Building2, KeyRound, AlertCircle, Download, FileJson, FileSpreadsheet } from 'lucide-react';
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
+  DropdownMenuLabel, DropdownMenuSeparator,
+} from '../components/ui/dropdown-menu';
 import { toast } from 'sonner';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
@@ -26,7 +30,7 @@ import {
   listMembers, updateMemberRole, removeMember,
   listInvites, createInvite, revokeInvite,
   getOnboarding, markOnboardingComplete,
-  getAuditLog,
+  getAuditLog, exportAuditLog,
 } from '../lib/api';
 
 const ROLE_RANK = { viewer: 1, member: 2, accountant: 3, leader: 4, owner: 5 };
@@ -62,6 +66,8 @@ export default function Members() {
   const [pendingRemoval, setPendingRemoval] = useState(null);
   const [pendingRevoke, setPendingRevoke] = useState(null);
   const [pendingComplete, setPendingComplete] = useState(null);
+  const [auditFilters, setAuditFilters] = useState({ start_date: '', end_date: '', action: '' });
+  const [exporting, setExporting] = useState(false);
 
   const myRoleRank = ROLE_RANK[data.your_role] || 0;
   const isAdmin = myRoleRank >= ROLE_RANK.leader;
@@ -123,6 +129,36 @@ export default function Members() {
     })();
     return () => { cancelled = true; };
   }, [activeTab, auditEvents, currentWorkspaceId]);
+
+  // Audit export (CSV/JSON) — triggers a browser download and records the
+  // action in the audit trail itself (via the backend). Applies the same
+  // filters the user has in the UI.
+  const handleExportAudit = useCallback(async (format) => {
+    if (!currentWorkspaceId) return;
+    setExporting(true);
+    try {
+      const params = { format };
+      if (auditFilters.start_date) params.start_date = auditFilters.start_date;
+      if (auditFilters.end_date) params.end_date = auditFilters.end_date;
+      if (auditFilters.action) params.action = auditFilters.action;
+      const { blob, filename } = await exportAuditLog(currentWorkspaceId, params);
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      toast.success(t('audit.export_success', { format: format.toUpperCase() }));
+    } catch (err) {
+      const detail = err?.response?.data?.detail;
+      const msg = typeof detail === 'string' ? detail : detail?.message || err.message;
+      toast.error(t('audit.export_error'), { description: msg });
+    } finally {
+      setExporting(false);
+    }
+  }, [currentWorkspaceId, auditFilters, t]);
 
   const handleMarkOnboardingComplete = async () => {
     if (!pendingComplete) return;
@@ -476,6 +512,100 @@ export default function Members() {
         {/* Audit tab — append-only timeline (leader+ only) */}
         {isAdmin && (
           <TabsContent value="audit" className="mt-4">
+            {/* Toolbar: filters + export. Always visible (even when empty) so
+                compliance users can still export an empty range snapshot. */}
+            <div
+              className="mb-4 flex flex-col gap-3 rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-3 md:flex-row md:items-end md:justify-between"
+              data-testid="audit-toolbar"
+            >
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 md:flex-1">
+                <div className="space-y-1">
+                  <Label htmlFor="audit-start" className="text-xs text-muted-foreground">
+                    {t('audit.filter_start_date')}
+                  </Label>
+                  <Input
+                    id="audit-start"
+                    type="date"
+                    value={auditFilters.start_date}
+                    onChange={(e) => setAuditFilters((f) => ({ ...f, start_date: e.target.value }))}
+                    data-testid="audit-filter-start"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="audit-end" className="text-xs text-muted-foreground">
+                    {t('audit.filter_end_date')}
+                  </Label>
+                  <Input
+                    id="audit-end"
+                    type="date"
+                    value={auditFilters.end_date}
+                    onChange={(e) => setAuditFilters((f) => ({ ...f, end_date: e.target.value }))}
+                    data-testid="audit-filter-end"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="audit-action" className="text-xs text-muted-foreground">
+                    {t('audit.filter_action')}
+                  </Label>
+                  <Select
+                    value={auditFilters.action || 'all'}
+                    onValueChange={(v) => setAuditFilters((f) => ({ ...f, action: v === 'all' ? '' : v }))}
+                  >
+                    <SelectTrigger id="audit-action" data-testid="audit-filter-action">
+                      <SelectValue placeholder={t('audit.filter_action_all')} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">{t('audit.filter_action_all')}</SelectItem>
+                      <SelectItem value="role_changed">{t('audit.action_role_changed')}</SelectItem>
+                      <SelectItem value="invitation_created">{t('audit.action_invitation_created')}</SelectItem>
+                      <SelectItem value="invitation_accepted">{t('audit.action_invitation_accepted')}</SelectItem>
+                      <SelectItem value="access_revoked">{t('audit.action_access_revoked')}</SelectItem>
+                      <SelectItem value="onboarding_completed">{t('audit.action_onboarding_completed')}</SelectItem>
+                      <SelectItem value="added">{t('audit.action_added')}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="default"
+                    disabled={exporting}
+                    className="gap-2 self-start md:self-auto"
+                    data-testid="audit-export-btn"
+                  >
+                    {exporting ? (
+                      <Loader2 size={16} className="animate-spin" />
+                    ) : (
+                      <Download size={16} />
+                    )}
+                    {t('audit.export_button')}
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-48">
+                  <DropdownMenuLabel>{t('audit.export_menu_label')}</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onClick={() => handleExportAudit('csv')}
+                    data-testid="audit-export-csv"
+                    className="cursor-pointer"
+                  >
+                    <FileSpreadsheet size={16} className="mr-2" />
+                    {t('audit.export_csv')}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={() => handleExportAudit('json')}
+                    data-testid="audit-export-json"
+                    className="cursor-pointer"
+                  >
+                    <FileJson size={16} className="mr-2" />
+                    {t('audit.export_json')}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+
             {!auditEvents ? (
               <Card>
                 <CardContent className="py-8">

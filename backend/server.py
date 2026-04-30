@@ -2,6 +2,9 @@ import os
 import uuid
 import json
 import time
+import csv
+import io
+import re
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -11,6 +14,7 @@ import httpx
 import jwt as pyjwt
 from jwt import PyJWKClient, InvalidTokenError, ExpiredSignatureError
 from fastapi import FastAPI, HTTPException, Query, Request, Response, Depends
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
@@ -2650,6 +2654,259 @@ async def list_audit(
             "metadata": r.get("metadata") or {},
         })
     return {"workspace_id": workspace_id, "events": events, "total": len(events), "source": "mongo"}
+
+
+# ─── Audit Export (Phase 7c) ──────────────────────────────────────────
+def _parse_iso_date(raw: Optional[str]) -> Optional[datetime]:
+    """Parse a YYYY-MM-DD or full ISO-8601 string into a timezone-aware
+    datetime. Returns ``None`` on empty/invalid input so callers can
+    treat the filter as "no bound" rather than raising."""
+    if not raw:
+        return None
+    try:
+        # Accept both bare dates ("2026-04-01") and ISO timestamps.
+        if len(raw) == 10:
+            dt = datetime.fromisoformat(raw + "T00:00:00+00:00")
+        else:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _collect_audit_events_for_export(
+    workspace_id: str,
+    access_token: str,
+    *,
+    start_date: Optional[datetime],
+    end_date: Optional[datetime],
+    action: Optional[str],
+) -> tuple[List[Dict[str, Any]], str]:
+    """Shared data-loader for the export endpoint.
+
+    Returns ``(events, source)`` where ``source`` is ``"supabase"`` or
+    ``"mongo"``. Events are the same shape as the list endpoint so the
+    CSV/JSON output stays aligned with what the UI shows.
+    """
+    org_id = await workspace_to_org_id(workspace_id)
+
+    # Try Supabase first when it's the active read source.
+    if supabase_admin.is_supabase_primary() and org_id:
+        # list_audit_logs doesn't accept all our filters — pull a
+        # reasonably large window and filter in Python.
+        sb_rows = await supabase_admin.list_audit_logs(
+            org_id, access_token or "", limit=2000
+        )
+        if sb_rows:
+            user_ids = list(
+                {r.get("actor_user_id") for r in sb_rows if r.get("actor_user_id")}
+                | {r.get("target_user_id") for r in sb_rows if r.get("target_user_id")}
+            )
+            user_rows = await users_col.find(
+                {"user_id": {"$in": user_ids}},
+                {"_id": 0, "user_id": 1, "email": 1, "name": 1},
+            ).to_list(2000) if user_ids else []
+            by_id = {u["user_id"]: u for u in user_rows}
+            events: List[Dict[str, Any]] = []
+            for r in sb_rows:
+                ts_raw = r.get("created_at")
+                ts_dt = _parse_iso_date(ts_raw) if ts_raw else None
+                if start_date and ts_dt and ts_dt < start_date:
+                    continue
+                if end_date and ts_dt and ts_dt > end_date:
+                    continue
+                if action and r.get("action") != action:
+                    continue
+                actor = by_id.get(r.get("actor_user_id")) or {}
+                target = by_id.get(r.get("target_user_id")) or {}
+                events.append({
+                    "event_id": r.get("id"),
+                    "action": r.get("action"),
+                    "description": (r.get("metadata") or {}).get("description"),
+                    "timestamp": ts_raw,
+                    "actor_user_id": r.get("actor_user_id"),
+                    "actor_email": actor.get("email"),
+                    "actor_name": actor.get("name"),
+                    "target_user_id": r.get("target_user_id"),
+                    "target_email": target.get("email"),
+                    "target_name": target.get("name"),
+                    "old_role": r.get("old_role"),
+                    "new_role": r.get("new_role"),
+                    "metadata": r.get("metadata") or {},
+                })
+            return events, "supabase"
+
+    # Mongo fallback / primary.
+    query: Dict[str, Any] = {"workspace_id": workspace_id}
+    if action:
+        query["event_type"] = action
+    if start_date or end_date:
+        ts_q: Dict[str, Any] = {}
+        if start_date:
+            ts_q["$gte"] = start_date
+        if end_date:
+            ts_q["$lte"] = end_date
+        query["timestamp"] = ts_q
+    rows = (
+        await audit_log_col.find(query, {"_id": 0})
+        .sort("timestamp", -1)
+        .limit(2000)
+        .to_list(2000)
+    )
+    actor_ids = {r.get("user_id") for r in rows if r.get("user_id")}
+    target_ids = {r.get("target_member_id") for r in rows if r.get("target_member_id")}
+    all_ids = list(actor_ids | target_ids)
+    user_rows = await users_col.find(
+        {"user_id": {"$in": all_ids}},
+        {"_id": 0, "user_id": 1, "email": 1, "name": 1},
+    ).to_list(2000) if all_ids else []
+    by_id = {u["user_id"]: u for u in user_rows}
+    events = []
+    for r in rows:
+        actor = by_id.get(r.get("user_id")) or {}
+        target = by_id.get(r.get("target_member_id")) or {}
+        events.append({
+            "event_id": r.get("event_id"),
+            "action": r.get("event_type"),
+            "description": r.get("description"),
+            "timestamp": (
+                r["timestamp"].isoformat()
+                if isinstance(r.get("timestamp"), datetime)
+                else r.get("timestamp")
+            ),
+            "actor_user_id": r.get("user_id"),
+            "actor_email": actor.get("email"),
+            "actor_name": actor.get("name"),
+            "target_user_id": r.get("target_member_id"),
+            "target_email": target.get("email"),
+            "target_name": target.get("name"),
+            "old_role": (r.get("metadata") or {}).get("old_role") or (r.get("metadata") or {}).get("previous_role"),
+            "new_role": (r.get("metadata") or {}).get("new_role"),
+            "metadata": r.get("metadata") or {},
+        })
+    return events, "mongo"
+
+
+@app.get("/api/workspaces/{workspace_id}/audit/export")
+async def export_audit(
+    workspace_id: str,
+    format: str = Query("csv", pattern="^(csv|json)$"),
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    action: Optional[str] = None,
+    user: User = Depends(get_current_user),
+):
+    """Download the workspace audit timeline as CSV or JSON.
+
+    Query params:
+      * ``format`` — ``csv`` (default) or ``json``
+      * ``start_date`` — inclusive lower bound. Accepts ``YYYY-MM-DD``
+        or full ISO-8601. Ignored if invalid/missing.
+      * ``end_date`` — inclusive upper bound. Same format rules.
+      * ``action`` — filter by action name (e.g. ``role_changed``,
+        ``invitation_created``). Supports Supabase or Mongo vocabulary
+        depending on which source serves the request.
+
+    Auth: leader+ only. Compliance-ready: filename encodes workspace
+    and timestamp so multiple exports coexist cleanly in a download
+    folder.
+    """
+    me = await _membership_for(user.user_id, workspace_id)
+    if not me:
+        raise HTTPException(status_code=403, detail="Not a workspace member")
+    if role_rank(me.get("role")) < role_rank("leader"):
+        raise HTTPException(status_code=403, detail="Requires leader role")
+
+    start_dt = _parse_iso_date(start_date)
+    end_dt = _parse_iso_date(end_date)
+    # Normalize end_date to end-of-day when caller passed a bare date.
+    if end_dt and end_date and len(end_date) == 10:
+        end_dt = end_dt.replace(hour=23, minute=59, second=59)
+
+    events, source = await _collect_audit_events_for_export(
+        workspace_id,
+        user.access_token or "",
+        start_date=start_dt,
+        end_date=end_dt,
+        action=action or None,
+    )
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
+    safe_ws = re.sub(r"[^A-Za-z0-9._-]+", "_", workspace_id)[:40] or "workspace"
+
+    await log_audit(
+        "audit.exported",
+        f"Exported audit log ({format.upper()}, {len(events)} rows)",
+        user_id=user.user_id,
+        workspace_id=workspace_id,
+        metadata={"format": format, "count": len(events), "source": source},
+    )
+
+    if format == "json":
+        payload = {
+            "workspace_id": workspace_id,
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "exported_by": user.user_id,
+            "source": source,
+            "filters": {
+                "start_date": start_dt.isoformat() if start_dt else None,
+                "end_date": end_dt.isoformat() if end_dt else None,
+                "action": action or None,
+            },
+            "total": len(events),
+            "events": events,
+        }
+        body = json.dumps(payload, indent=2, default=str).encode("utf-8")
+        filename = f"audit_{safe_ws}_{stamp}.json"
+        return Response(
+            content=body,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    # CSV
+    buf = io.StringIO()
+    writer = csv.writer(buf, quoting=csv.QUOTE_MINIMAL)
+    writer.writerow([
+        "event_id",
+        "timestamp",
+        "action",
+        "description",
+        "actor_user_id",
+        "actor_email",
+        "actor_name",
+        "target_user_id",
+        "target_email",
+        "target_name",
+        "old_role",
+        "new_role",
+    ])
+    for ev in events:
+        writer.writerow([
+            ev.get("event_id") or "",
+            ev.get("timestamp") or "",
+            ev.get("action") or "",
+            (ev.get("description") or "").replace("\n", " ").strip(),
+            ev.get("actor_user_id") or "",
+            ev.get("actor_email") or "",
+            ev.get("actor_name") or "",
+            ev.get("target_user_id") or "",
+            ev.get("target_email") or "",
+            ev.get("target_name") or "",
+            ev.get("old_role") or "",
+            ev.get("new_role") or "",
+        ])
+    body_str = buf.getvalue()
+    # Prepend UTF-8 BOM so Excel opens the file with the right encoding.
+    csv_bytes = b"\xef\xbb\xbf" + body_str.encode("utf-8")
+    filename = f"audit_{safe_ws}_{stamp}.csv"
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 

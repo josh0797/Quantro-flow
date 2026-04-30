@@ -67,7 +67,20 @@
   - Identity reconciliation: alias legacy `2c6c39bc-…` → Supabase `0dd8aa94-…` aplicado
   - Script idempotente + service-role seguro (sin exponer la key)
   - Validado via `SELECT` en Supabase: 2 miembros reales (`owner` + `leader`) en el default org
-- ⏭️ Next: **Phase 7c-swap — Flip `QUANTRO_DB_PRIMARY=supabase`** + Audit Logs Export UI (CSV/JSON)
+- ✅ **Phase 7c-resolver fix:** Supabase-aware workspace resolver
+  - Nuevo helper `supabase_admin.list_orgs_for_user(user_id)` (service-role)
+  - Nuevo `reconcile_supabase_memberships_to_mongo(user_doc)` ejecutado en cada login
+  - Sincroniza memberships Supabase → Mongo: resuelve org→workspace, upsert rol, preserva joined_at
+  - One-off patches: `workspaces["default"].org_id` seteado, workspace huérfano de Josias eliminado
+  - Validado con login real de `josias.mont@hotmail.com` → ahora entra al default workspace como Leader ✅
+- ✅ **Phase 7c-export:** Audit Logs exportables (CSV/JSON)
+  - Endpoint `GET /api/workspaces/{id}/audit/export?format=csv|json&start_date=&end_date=&action=`
+  - Lee de Supabase si es primary, con fallback automático a Mongo
+  - UI: toolbar en tab Auditoría con filtros (fecha desde/hasta, acción) + botón Export con dropdown CSV/JSON
+  - Cada export se registra en el propio audit log (`audit.exported`) para compliance
+  - CSV incluye BOM UTF-8 para compatibilidad con Excel
+  - Auth: leader+ only (mismo que list_audit)
+- ⏭️ Next: **Flip `QUANTRO_DB_PRIMARY=supabase`** + Phase 7c post-MVP (limpieza de workspaces duplicados de contacto)
 
 ---
 

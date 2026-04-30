@@ -98,6 +98,25 @@ export const markOnboardingComplete = (workspace_id, member_user_id) =>
 export const getAuditLog = (workspace_id, params = {}) =>
   api.get(`/workspaces/${workspace_id}/audit`, { params }).then(r => r.data);
 
+// Audit export — returns the raw Blob so callers can trigger a download.
+// Accepts { format: 'csv'|'json', start_date, end_date, action }.
+export const exportAuditLog = (workspace_id, params = {}) =>
+  api
+    .get(`/workspaces/${workspace_id}/audit/export`, {
+      params,
+      responseType: 'blob',
+    })
+    .then(r => {
+      // Try to recover the filename the server proposed; fall back to a
+      // sensible default if the header wasn't exposed by CORS.
+      const disposition = r.headers?.['content-disposition'] || '';
+      const match = disposition.match(/filename="?([^"]+)"?/i);
+      const filename =
+        match?.[1] ||
+        `audit_${workspace_id}_${new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 14)}.${params.format || 'csv'}`;
+      return { blob: r.data, filename };
+    });
+
 // Dashboard
 export const getDashboardMetrics = () => api.get('/dashboard/metrics').then(r => r.data);
 export const getAISuggestions = () => api.get('/dashboard/suggestions').then(r => r.data);
