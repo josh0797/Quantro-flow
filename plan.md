@@ -60,7 +60,14 @@
   - Invite edge cases: revoked/expired/max-uses (410), idempotent accept
   - Ownership transfer end-to-end (updates `workspaces.owner_user_id` and demotes previous owner to admin)
   - Real multi-user role matrix verification (manager/operator/agent behavior)
-- ⏭️ Next: **Phase 7c — Audit Logs UI + Export (CSV/JSON)**
+- ✅ **Phase 7c (migration) complete:** MongoDB → Supabase backfill executed
+  - `workspace_members` → `org_members`: 1 insertado (`0dd8aa94-…` como `leader`), 9 deduplicados contra existentes, 4 seeds de test descartados
+  - `workspace_invites` → `invitations`: colección Mongo vacía, nada que migrar
+  - `audit_log` → `org_audit_logs`: 17 filas fuera del vocabulario estricto (`workspace.*`, `auth.*`, `integration.*`), descartadas por diseño
+  - Identity reconciliation: alias legacy `2c6c39bc-…` → Supabase `0dd8aa94-…` aplicado
+  - Script idempotente + service-role seguro (sin exponer la key)
+  - Validado via `SELECT` en Supabase: 2 miembros reales (`owner` + `leader`) en el default org
+- ⏭️ Next: **Phase 7c-swap — Flip `QUANTRO_DB_PRIMARY=supabase`** + Audit Logs Export UI (CSV/JSON)
 
 ---
 

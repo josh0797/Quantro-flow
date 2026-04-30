@@ -83,13 +83,24 @@ DEFAULT_WORKSPACE_ID = "default_workspace"
 # Legacy test seeds (`user_test_*`) still fall through `skip:bad_uuid`.
 FALLBACK_TO_DEFAULT_ORG = True
 
-# Per-user role overrides applied AFTER `normalize_role`. Keys are Supabase
-# auth user IDs. Use sparingly — this is the manual knob for the one-shot
-# consolidation, not a long-term policy.
+# Per-user role overrides applied AFTER `normalize_role` and AFTER alias
+# resolution below. Keys are the *Supabase* auth user IDs (i.e. the IDs
+# actually stored in `profiles.id`), not the legacy Mongo IDs.
 ROLE_OVERRIDES: Dict[str, str] = {
     # Josias Mont — demoted from "owner" to "leader" (admin) in the
     # consolidated default org, per the Phase 7c migration decision.
-    "2c6c39bc-7a3f-41f1-be32-3e81904a8de1": "leader",
+    "0dd8aa94-8cdb-4ff1-817a-87ada81d1c7a": "leader",
+}
+
+# Legacy Mongo user_id → current Supabase auth user_id.
+# During the Emergent Auth → Supabase Auth migration some users were
+# re-provisioned with a new UUID. The Mongo collections still carry the
+# OLD id, but `profiles.id` (and therefore the FK target of
+# `org_members.user_id`) uses the NEW one. Add an entry here every time
+# you detect a human whose identity got split across the two systems.
+USER_ID_ALIASES: Dict[str, str] = {
+    # Josias Mont — legacy Mongo id → Supabase profiles.id
+    "2c6c39bc-7a3f-41f1-be32-3e81904a8de1": "0dd8aa94-8cdb-4ff1-817a-87ada81d1c7a",
 }
 
 UUID_RE = re.compile(
@@ -244,6 +255,13 @@ async def migrate_members(
         seen += 1
         wid = row.get("workspace_id")
         uid = row.get("user_id")
+        # Resolve legacy Mongo id → current Supabase id BEFORE role override,
+        # dedup and FK checks. This is the single place where identity gets
+        # rewritten across systems.
+        if uid in USER_ID_ALIASES:
+            aliased = USER_ID_ALIASES[uid]
+            print(f"  [alias] {uid} → {aliased}")
+            uid = aliased
         role = normalize_role(row.get("role"))
         # Manual override (e.g. Josias Mont → leader in default org).
         if uid in ROLE_OVERRIDES:
