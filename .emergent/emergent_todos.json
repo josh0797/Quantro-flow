@@ -1,38 +1,22 @@
 [
   {
-    "content": "SQL migration v2 — reescrita para usar org_id + get_my_org_role",
+    "content": "Backfill script: estructura base + argparse",
     "status": "completed"
   },
   {
-    "content": "Backend: módulo `supabase_admin.py` con httpx helpers",
+    "content": "Backfill script: workspace_members → org_members con dedup y validación UUID",
     "status": "completed"
   },
   {
-    "content": "Backend: helper workspace_id ↔ org_id",
+    "content": "Backfill script: workspace_invites → invitations con dedup token + email placeholder",
     "status": "completed"
   },
   {
-    "content": "Backend: feature flag QUANTRO_DB_PRIMARY (mongo|supabase)",
+    "content": "Backfill script: audit_log → org_audit_logs con mapeo y skip de no-mapeables",
     "status": "completed"
   },
   {
-    "content": "Backend: dual-read en list_members / list_invites / list_audit / get_onboarding",
-    "status": "completed"
-  },
-  {
-    "content": "Backend: dual-write en create_invite, revoke_invite, member role change/remove, onboarding step upsert",
-    "status": "completed"
-  },
-  {
-    "content": "Backend: shadow `log_audit()` a org_audit_logs",
-    "status": "completed"
-  },
-  {
-    "content": "Frontend: campo email + nombre opcional al dialog de crear invite + i18n",
-    "status": "completed"
-  },
-  {
-    "content": "Lint + restart + smoke test + testing agent",
+    "content": "Backfill script: reporte final + README de uso",
     "status": "completed"
   }
 ]
