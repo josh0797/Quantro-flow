@@ -8,11 +8,11 @@
     "status": "completed"
   },
   {
-    "content": "Backend: helper workspace_id ↔ org_id (env QUANTRO_DEFAULT_ORG_ID + override en workspaces_col)",
+    "content": "Backend: helper workspace_id ↔ org_id",
     "status": "completed"
   },
   {
-    "content": "Backend: feature flag QUANTRO_DB_PRIMARY (mongo|supabase) en .env",
+    "content": "Backend: feature flag QUANTRO_DB_PRIMARY (mongo|supabase)",
     "status": "completed"
   },
   {
@@ -20,7 +20,7 @@
     "status": "completed"
   },
   {
-    "content": "Backend: dual-write en create_invite, revoke_invite, member role change, member remove, onboarding step upsert",
+    "content": "Backend: dual-write en create_invite, revoke_invite, member role change/remove, onboarding step upsert",
     "status": "completed"
   },
   {
@@ -28,11 +28,11 @@
     "status": "completed"
   },
   {
-    "content": "Frontend: agregar campo email opcional al dialog de crear invite",
-    "status": "in_progress"
+    "content": "Frontend: campo email + nombre opcional al dialog de crear invite + i18n",
+    "status": "completed"
   },
   {
     "content": "Lint + restart + smoke test + testing agent",
-    "status": "pending"
+    "status": "completed"
   }
 ]
