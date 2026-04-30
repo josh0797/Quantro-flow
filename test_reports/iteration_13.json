@@ -1,0 +1,139 @@
+{
+  "summary": "Phase 7b-ext backend testing completed. Fixed critical role migration bug. Verified role taxonomy migration, normalization, RBAC structure, onboarding endpoints, and audit endpoints. Auth-gated endpoint tests require live Supabase credentials.",
+  
+  "backend_issues": {
+    "critical_bugs": [
+      {
+        "file": "/app/backend/server.py",
+        "issue": "invites_col was defined AFTER migrate_legacy_role_names() function, causing NameError during migration",
+        "impact": "Role migration from legacy taxonomy (agent/operator/manager/admin) to Quantro taxonomy (viewer/member/accountant/leader) was failing silently",
+        "fix_applied": "Moved workspace_invites_col definition to top of file (line 78) with other collection definitions. Renamed all invites_col references to workspace_invites_col for consistency. Added error logging instead of silent exception swallowing.",
+        "fix_priority": "CRITICAL - FIXED",
+        "verification": "Migration now successfully converts 4 legacy roles. Verified in MongoDB: agent→viewer, operator→member, manager→accountant, admin→leader"
+      }
+    ],
+    "verified_working": [
+      {
+        "feature": "Role migration on startup",
+        "status": "✅ WORKING",
+        "details": "migrate_legacy_role_names() runs on app boot and successfully converts legacy roles to Quantro taxonomy. Idempotent - safe to run multiple times."
+      },
+      {
+        "feature": "Role normalization function",
+        "status": "✅ WORKING",
+        "details": "_normalize_role() correctly translates all legacy role names to canonical Quantro roles. Handles case-insensitivity and whitespace. Returns 'viewer' as default for invalid roles."
+      },
+      {
+        "feature": "RBAC role hierarchy",
+        "status": "✅ WORKING",
+        "details": "ROLE_RANK correctly defines hierarchy: viewer(1) < member(2) < accountant(3) < leader(4) < owner(5). role_rank() function correctly normalizes legacy roles before ranking."
+      },
+      {
+        "feature": "Onboarding steps structure",
+        "status": "✅ WORKING",
+        "details": "ONBOARDING_STEPS defines 5 canonical steps: invitation_sent, account_created, companies_assigned, role_configured, first_login. _onboarding_status_overall() correctly computes rollup status (pending/in_progress/completed/blocked)."
+      },
+      {
+        "feature": "MongoDB collections",
+        "status": "✅ WORKING",
+        "details": "All required collections exist: workspace_members, workspace_invites, people_onboarding_steps, audit_log, users, workspaces."
+      },
+      {
+        "feature": "Auth gating on new endpoints",
+        "status": "✅ WORKING",
+        "details": "All 4 new endpoints correctly return 401 Unauthorized without Bearer token: GET /api/workspaces/{id}/onboarding, POST /api/workspaces/{id}/onboarding/{member_user_id}/steps/{step_key}, POST /api/workspaces/{id}/onboarding/{member_user_id}/complete, GET /api/workspaces/{id}/audit"
+      },
+      {
+        "feature": "Existing flows",
+        "status": "✅ WORKING",
+        "details": "Health endpoint responds correctly. Backend is running and accepting requests."
+      }
+    ]
+  },
+  
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  
+  "passed_tests": [
+    "Role migration function executes without error",
+    "Legacy roles (agent/operator/manager/admin) successfully converted to Quantro roles (viewer/member/accountant/leader)",
+    "_normalize_role() function works correctly for all role types",
+    "role_rank() function correctly ranks roles with normalization",
+    "ONBOARDING_STEPS array matches specification (5 steps)",
+    "_onboarding_status_overall() correctly computes status",
+    "All required MongoDB collections exist",
+    "GET /api/workspaces/{id}/onboarding returns 401 without auth",
+    "POST /api/workspaces/{id}/onboarding/{member_user_id}/steps/{step_key} returns 401 without auth",
+    "POST /api/workspaces/{id}/onboarding/{member_user_id}/complete returns 401 without auth",
+    "GET /api/workspaces/{id}/audit returns 401 without auth",
+    "GET /api/health returns 200"
+  ],
+  
+  "test_report_links": [
+    "/app/backend_test_phase7b_ext.py",
+    "/app/test_phase7b_ext_direct.py"
+  ],
+  
+  "success_percentage": {
+    "backend": "100% (all testable features working)",
+    "frontend": "N/A (backend-only testing)"
+  },
+  
+  "action_item_for_main_agent": {
+    "critical": [],
+    "high_priority": [
+      {
+        "item": "Verify RBAC enforcement with live users",
+        "details": "Test require_role('leader') and require_role('accountant') with actual authenticated users of different roles. Current test credentials (josias.martin@hotmail.com, josias.martin90@hotmail.com) are invalid.",
+        "endpoints_to_test": [
+          "PUT /api/business-profile (leader+)",
+          "PUT /api/integrations/{provider} (leader+)",
+          "POST /api/integrations/{provider}/test (leader+)",
+          "POST /api/simulation/generate (leader+)",
+          "POST /api/simulation/clear (leader+)",
+          "POST /api/policies (accountant+)",
+          "PUT /api/policies/{id} (accountant+)",
+          "DELETE /api/policies/{id} (accountant+)",
+          "POST /api/escalation-rules (accountant+)",
+          "PUT /api/escalation-rules/{id} (accountant+)",
+          "DELETE /api/escalation-rules/{id} (accountant+)",
+          "POST /api/templates (accountant+)",
+          "PUT /api/templates/{id} (accountant+)",
+          "DELETE /api/templates/{id} (accountant+)"
+        ]
+      },
+      {
+        "item": "Test onboarding state computation end-to-end",
+        "details": "Verify GET /api/workspaces/{id}/onboarding returns correct member onboarding state with all 5 steps, progress calculation, and status rollup. Test with authenticated leader+ user."
+      },
+      {
+        "item": "Test onboarding step updates",
+        "details": "Verify POST /api/workspaces/{id}/onboarding/{member_user_id}/steps/{step_key} correctly: (1) rejects unknown step_key with 400, (2) rejects invalid status with 400, (3) allows leader+ or self to update, (4) blocks member from updating another member's steps with 403."
+      },
+      {
+        "item": "Test onboarding complete-all",
+        "details": "Verify POST /api/workspaces/{id}/onboarding/{member_user_id}/complete correctly: (1) forces all 5 steps to completed, (2) requires leader+ role (member → 403)."
+      },
+      {
+        "item": "Test audit log retrieval",
+        "details": "Verify GET /api/workspaces/{id}/audit correctly: (1) requires leader+ role (member → 403), (2) returns events newest-first, (3) hydrates actor and target user objects, (4) filters by member_user_id query param."
+      }
+    ],
+    "medium_priority": [
+      {
+        "item": "Create valid test credentials",
+        "details": "Either: (1) Create confirmed Supabase users for testing, or (2) Update /app/memory/test_credentials.md with valid credentials, or (3) Use Supabase admin API to create test users programmatically."
+      }
+    ]
+  },
+  
+  "updated_files": [
+    "/app/backend/server.py"
+  ],
+  
+  "should_call_test_agent_after_fix": "false",
+  "should_main_agent_test_itself": "true"
+}

@@ -18,13 +18,15 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader,
   AlertDialogTitle,
 } from '../components/ui/alert-dialog';
-import { Users, UserPlus, Copy, Trash2, Shield, Crown, Loader2, Link2 } from 'lucide-react';
+import { Users, UserPlus, Copy, Trash2, Shield, Crown, Loader2, Link2, ClipboardList, History, CheckCircle2, Clock, Mail, UserCheck, Building2, KeyRound, AlertCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
 import {
   listMembers, updateMemberRole, removeMember,
   listInvites, createInvite, revokeInvite,
+  getOnboarding, markOnboardingComplete,
+  getAuditLog,
 } from '../lib/api';
 
 const ROLE_RANK = { viewer: 1, member: 2, accountant: 3, leader: 4, owner: 5 };
@@ -50,12 +52,16 @@ export default function Members() {
   const { user, currentWorkspaceId } = useAuth();
   const [data, setData] = useState({ members: [], your_role: 'viewer' });
   const [invites, setInvites] = useState([]);
+  const [onboarding, setOnboarding] = useState(null);
+  const [auditEvents, setAuditEvents] = useState(null);
+  const [activeTab, setActiveTab] = useState('members');
   const [loading, setLoading] = useState(true);
   const [creatingInvite, setCreatingInvite] = useState(false);
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
   const [inviteForm, setInviteForm] = useState({ role: 'member', max_uses: 1, expires_in_days: 7 });
   const [pendingRemoval, setPendingRemoval] = useState(null);
   const [pendingRevoke, setPendingRevoke] = useState(null);
+  const [pendingComplete, setPendingComplete] = useState(null);
 
   const myRoleRank = ROLE_RANK[data.your_role] || 0;
   const isAdmin = myRoleRank >= ROLE_RANK.leader;
@@ -84,6 +90,70 @@ export default function Members() {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  // Lazy-load Onboarding the first time the user opens that tab.
+  useEffect(() => {
+    if (activeTab !== 'onboarding' || onboarding) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await getOnboarding(currentWorkspaceId);
+        if (!cancelled) setOnboarding(res);
+      } catch (err) {
+        toast.error('Could not load onboarding', { description: err?.response?.data?.detail || err.message });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [activeTab, onboarding, currentWorkspaceId]);
+
+  // Lazy-load the Audit timeline (leader+ only — silently skipped for
+  // lower roles since the tab itself isn't rendered).
+  useEffect(() => {
+    if (activeTab !== 'audit' || auditEvents) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await getAuditLog(currentWorkspaceId, { limit: 200 });
+        if (!cancelled) setAuditEvents(res?.events || []);
+      } catch (err) {
+        const detail = err?.response?.data?.detail;
+        const msg = typeof detail === 'string' ? detail : detail?.message || err.message;
+        toast.error('Could not load audit log', { description: msg });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [activeTab, auditEvents, currentWorkspaceId]);
+
+  const handleMarkOnboardingComplete = async () => {
+    if (!pendingComplete) return;
+    try {
+      await markOnboardingComplete(currentWorkspaceId, pendingComplete.user_id);
+      toast.success(t('onboarding.action_mark_complete'));
+      setOnboarding(null); // force re-fetch
+      setPendingComplete(null);
+    } catch (err) {
+      const detail = err?.response?.data?.detail;
+      const msg = typeof detail === 'string' ? detail : detail?.message || 'Action failed';
+      toast.error(msg);
+      setPendingComplete(null);
+    }
+  };
+
+  const handleCopyMostRecentInvite = async (memberCard) => {
+    // Best-effort: find the most recent active invite that this member
+    // accepted (or any active one if none match) and copy its URL.
+    const invite = invites.find((inv) => !inv.revoked && inv.url);
+    if (!invite?.url) {
+      toast.error(t('onboarding.action_copy_invite'));
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(invite.url);
+      toast.success(t('members.invite_link_copied'));
+    } catch {
+      toast.error('Copy failed');
+    }
+  };
 
   const handleRoleChange = async (member, newRole) => {
     if (newRole === member.role) return;
@@ -191,7 +261,7 @@ export default function Members() {
         </div>
       </div>
 
-      <Tabs defaultValue="members">
+      <Tabs defaultValue="members" onValueChange={setActiveTab}>
         <TabsList>
           <TabsTrigger value="members" data-testid="tab-members">
             <Users size={14} className="mr-1.5" />
@@ -201,6 +271,16 @@ export default function Members() {
             <TabsTrigger value="invites" data-testid="tab-invites">
               <Link2 size={14} className="mr-1.5" />
               {t('members.tab_invites')} · {activeInvites.length}
+            </TabsTrigger>
+          )}
+          <TabsTrigger value="onboarding" data-testid="tab-onboarding">
+            <ClipboardList size={14} className="mr-1.5" />
+            {t('onboarding.tab_label')}
+          </TabsTrigger>
+          {isAdmin && (
+            <TabsTrigger value="audit" data-testid="tab-audit">
+              <History size={14} className="mr-1.5" />
+              {t('audit.tab_label')}
             </TabsTrigger>
           )}
         </TabsList>
@@ -352,6 +432,70 @@ export default function Members() {
             </Card>
           </TabsContent>
         )}
+
+        {/* Onboarding tab — checklist + progress per member */}
+        <TabsContent value="onboarding" className="mt-4">
+          {!onboarding ? (
+            <Card>
+              <CardContent className="py-8">
+                <Skeleton className="h-32 w-full" />
+              </CardContent>
+            </Card>
+          ) : onboarding.members.length === 0 ? (
+            <Card>
+              <CardContent className="py-12 text-center">
+                <ClipboardList size={28} className="mx-auto text-muted-foreground/50 mb-3" />
+                <p className="text-sm text-muted-foreground">{t('onboarding.empty')}</p>
+              </CardContent>
+            </Card>
+          ) : (
+            <>
+              <div className="mb-4 text-xs text-muted-foreground" data-testid="onboarding-summary">
+                {t('onboarding.summary', {
+                  completed: onboarding.summary.completed_onboarding,
+                  total: onboarding.summary.total_members,
+                })}
+              </div>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                {onboarding.members.map((card) => (
+                  <OnboardingCard
+                    key={card.user_id}
+                    card={card}
+                    isAdmin={isAdmin}
+                    t={t}
+                    onMarkComplete={() => setPendingComplete(card)}
+                    onCopyInvite={() => handleCopyMostRecentInvite(card)}
+                    onRevokeAccess={() => setPendingRemoval({ user_id: card.user_id, role: card.role })}
+                  />
+                ))}
+              </div>
+            </>
+          )}
+        </TabsContent>
+
+        {/* Audit tab — append-only timeline (leader+ only) */}
+        {isAdmin && (
+          <TabsContent value="audit" className="mt-4">
+            {!auditEvents ? (
+              <Card>
+                <CardContent className="py-8">
+                  <Skeleton className="h-48 w-full" />
+                </CardContent>
+              </Card>
+            ) : auditEvents.length === 0 ? (
+              <Card>
+                <CardContent className="py-12 text-center">
+                  <History size={28} className="mx-auto text-muted-foreground/50 mb-3" />
+                  <p className="text-sm text-muted-foreground">{t('audit.empty')}</p>
+                </CardContent>
+              </Card>
+            ) : (
+              <AuditTimeline events={auditEvents} t={t} />
+            )}
+          </TabsContent>
+        )}
+
+
       </Tabs>
 
       {/* Invite create dialog */}
@@ -453,6 +597,262 @@ export default function Members() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Confirm mark onboarding complete */}
+      <AlertDialog open={!!pendingComplete} onOpenChange={(open) => { if (!open) setPendingComplete(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('onboarding.action_mark_complete')}</AlertDialogTitle>
+            <AlertDialogDescription>{t('onboarding.mark_complete_confirm')}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
+            <AlertDialogAction onClick={handleMarkOnboardingComplete} data-testid="confirm-mark-complete-btn">
+              {t('common.confirm')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
+  );
+}
+
+// ── Helpers / sub-components ────────────────────────────────────────────
+
+const STEP_ICONS = {
+  invitation_sent: Mail,
+  account_created: UserCheck,
+  companies_assigned: Building2,
+  role_configured: KeyRound,
+  first_login: CheckCircle2,
+};
+
+const ONBOARDING_STATUS_BADGE = {
+  pending: 'bg-[hsl(var(--muted-foreground)/0.15)] text-[hsl(var(--muted-foreground))]',
+  in_progress: 'bg-[hsl(var(--info)/0.15)] text-[hsl(var(--info))]',
+  completed: 'bg-[hsl(var(--success)/0.15)] text-[hsl(var(--success))]',
+  blocked: 'bg-[hsl(var(--destructive)/0.15)] text-[hsl(var(--destructive))]',
+};
+
+function formatStepDate(iso) {
+  if (!iso) return null;
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString(undefined, { day: '2-digit', month: 'short' });
+  } catch {
+    return null;
+  }
+}
+
+function OnboardingCard({ card, isAdmin, t, onMarkComplete, onCopyInvite, onRevokeAccess }) {
+  const pct = card.progress.total
+    ? Math.round((card.progress.completed / card.progress.total) * 100)
+    : 0;
+  const statusKey = card.status || 'pending';
+  return (
+    <div
+      data-testid={`onboarding-card-${card.user_id}`}
+      className="rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--surface-1))] p-4 hover:border-[hsl(var(--primary)/0.3)] transition-colors"
+    >
+      <div className="flex items-start gap-3">
+        <div className="w-10 h-10 rounded-full bg-[hsl(var(--primary)/0.15)] text-[hsl(var(--primary))] flex items-center justify-center text-sm font-semibold shrink-0 overflow-hidden">
+          {card.picture ? (
+            <img src={card.picture} alt={card.name} className="w-full h-full object-cover" />
+          ) : (
+            (card.name || card.email || '?').slice(0, 1).toUpperCase()
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <p className="text-sm font-medium truncate">{card.name || card.email}</p>
+            {card.role === 'owner' && <Crown size={12} className="text-[hsl(var(--primary))]" />}
+          </div>
+          <p className="text-xs text-muted-foreground truncate">{card.email}</p>
+        </div>
+        <Badge className={`${ONBOARDING_STATUS_BADGE[statusKey]} shrink-0 text-[10px]`}>
+          {t(`onboarding.status_${statusKey}`)}
+        </Badge>
+      </div>
+
+      <div className="mt-3 mb-2">
+        <div className="flex items-center justify-between text-[11px] text-muted-foreground mb-1.5">
+          <span>{t('onboarding.member_progress', { completed: card.progress.completed, total: card.progress.total })}</span>
+          <span className="font-mono">{pct}%</span>
+        </div>
+        <div className="h-1.5 rounded-full bg-[hsl(var(--surface-2))] overflow-hidden">
+          <div
+            className="h-full bg-[hsl(var(--primary))] transition-[width] duration-300"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      </div>
+
+      <ul className="mt-3 space-y-1.5">
+        {card.steps.map((step) => {
+          const Icon = STEP_ICONS[step.step_key] || AlertCircle;
+          const done = step.status === 'completed';
+          const blocked = step.status === 'blocked';
+          const stepDate = formatStepDate(step.completed_at);
+          const microcopy = done
+            ? t(`onboarding.step_${step.step_key}_done`)
+            : t(`onboarding.step_${step.step_key}_pending`);
+          return (
+            <li
+              key={step.step_key}
+              data-testid={`onboarding-step-${card.user_id}-${step.step_key}`}
+              className="flex items-start gap-2 text-xs"
+            >
+              <Icon
+                size={14}
+                className={`mt-0.5 shrink-0 ${
+                  done ? 'text-[hsl(var(--success))]'
+                    : blocked ? 'text-[hsl(var(--destructive))]'
+                    : 'text-muted-foreground/60'
+                }`}
+              />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center justify-between gap-2">
+                  <span className={done ? 'text-foreground' : 'text-muted-foreground'}>
+                    {t(`onboarding.step_${step.step_key}`)}
+                  </span>
+                  {stepDate && <span className="text-[10px] font-mono text-muted-foreground">{stepDate}</span>}
+                </div>
+                <p className="text-[10px] text-muted-foreground/80 mt-0.5">{microcopy}</p>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+
+      {isAdmin && card.status !== 'completed' && (
+        <div className="mt-3 pt-3 border-t border-[hsl(var(--border))] flex flex-wrap gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={onCopyInvite}
+            data-testid={`onb-copy-invite-${card.user_id}`}
+            className="text-xs h-7"
+          >
+            <Copy size={12} className="mr-1" />
+            {t('onboarding.action_copy_invite')}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={onMarkComplete}
+            data-testid={`onb-mark-complete-${card.user_id}`}
+            className="text-xs h-7"
+          >
+            <CheckCircle2 size={12} className="mr-1" />
+            {t('onboarding.action_mark_complete')}
+          </Button>
+          {card.role !== 'owner' && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onRevokeAccess}
+              data-testid={`onb-revoke-${card.user_id}`}
+              className="text-xs h-7 text-[hsl(var(--destructive))] hover:bg-[hsl(var(--destructive)/0.1)]"
+            >
+              <Trash2 size={12} className="mr-1" />
+              {t('onboarding.action_revoke_access')}
+            </Button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const AUDIT_ICON_MAP = {
+  'invites.created': Mail,
+  'invites.accepted': UserCheck,
+  'invites.revoked': Trash2,
+  'members.role_changed': KeyRound,
+  'members.removed': Trash2,
+  'workspace.claimed': Crown,
+  'workspace.created': Building2,
+  'workspace.switched': Building2,
+  'onboarding.completed': CheckCircle2,
+  'onboarding.step_updated': ClipboardList,
+  'policy.created': Shield,
+  'policy.deleted': Shield,
+};
+
+const AUDIT_LABEL_MAP = {
+  'invites.created': 'audit.action_invitation_created',
+  'invites.accepted': 'audit.action_invitation_accepted',
+  'invites.revoked': 'audit.action_access_revoked',
+  'members.role_changed': 'audit.action_role_changed',
+  'members.removed': 'audit.action_user_deleted',
+  'onboarding.completed': 'audit.action_onboarding_completed',
+};
+
+function relativeTime(iso, t) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const diffMs = Date.now() - d.getTime();
+  const minutes = Math.floor(diffMs / 60000);
+  if (minutes < 1) return t('audit.time_just_now');
+  if (minutes < 60) return t('audit.time_minutes_ago', { count: minutes });
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return t('audit.time_hours_ago', { count: hours });
+  const days = Math.floor(hours / 24);
+  if (days < 30) return t('audit.time_days_ago', { count: days });
+  return d.toLocaleDateString();
+}
+
+function AuditTimeline({ events, t }) {
+  return (
+    <Card>
+      <CardContent className="py-4">
+        <ul className="relative pl-6 space-y-4 before:content-[''] before:absolute before:left-3 before:top-2 before:bottom-2 before:w-px before:bg-[hsl(var(--border))]">
+          {events.map((ev) => {
+            const Icon = AUDIT_ICON_MAP[ev.action] || AlertCircle;
+            const labelKey = AUDIT_LABEL_MAP[ev.action];
+            const label = labelKey ? t(labelKey) : (ev.description || t('audit.action_unknown'));
+            const actorName = ev.actor?.name || ev.actor?.email || '—';
+            const targetName = ev.target?.name || ev.target?.email;
+            return (
+              <li
+                key={ev.event_id}
+                data-testid={`audit-event-${ev.event_id}`}
+                className="relative"
+              >
+                <span className="absolute -left-[18px] top-0 w-6 h-6 rounded-full bg-[hsl(var(--surface-2))] border border-[hsl(var(--border))] flex items-center justify-center">
+                  <Icon size={11} className="text-[hsl(var(--primary))]" />
+                </span>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-medium">{label}</p>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">
+                      <span className="font-medium text-foreground/90">{actorName}</span>
+                      {targetName && (
+                        <>
+                          {' → '}
+                          <span className="font-medium text-foreground/90">{targetName}</span>
+                        </>
+                      )}
+                      {ev.metadata?.new_role && (
+                        <>
+                          {' · '}
+                          <span className="capitalize">{ev.metadata.new_role}</span>
+                        </>
+                      )}
+                    </p>
+                    {ev.description && (
+                      <p className="text-[10px] text-muted-foreground/70 mt-0.5 truncate">{ev.description}</p>
+                    )}
+                  </div>
+                  <span className="text-[10px] font-mono text-muted-foreground shrink-0 mt-0.5">
+                    {relativeTime(ev.timestamp, t)}
+                  </span>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      </CardContent>
+    </Card>
   );
 }

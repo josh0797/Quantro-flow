@@ -1,38 +1,38 @@
 [
   {
-    "content": "Backend: Define role permission matrix + add `require_role` FastAPI dependency in server.py",
+    "content": "Backend: Migrar taxonomía de roles + script de migración on-startup",
     "status": "completed"
   },
   {
-    "content": "Backend: Workspace member CRUD endpoints (list/update role/remove member)",
+    "content": "Backend: log_audit con target_member_id + auditar invites/members con target",
     "status": "completed"
   },
   {
-    "content": "Backend: Invite token endpoints (create/list/revoke/accept) — token-based, email-free",
+    "content": "Backend: GET /api/workspaces/{id}/onboarding (5 pasos calculados)",
     "status": "completed"
   },
   {
-    "content": "Backend: Apply RBAC checks to existing sensitive endpoints (settings, integrations, business-profile, automation policies, escalation rules)",
+    "content": "Backend: Quick-actions — step upsert + complete-all",
     "status": "completed"
   },
   {
-    "content": "Frontend: Workspace switcher UI in Sidebar (dropdown to switch + create new)",
+    "content": "Backend: GET /api/workspaces/{id}/audit (timeline)",
     "status": "completed"
   },
   {
-    "content": "Frontend: Settings → Members tab (member list, role editor, invite link generation, revoke)",
+    "content": "Supabase: Migration SQL `20260426_people_onboarding_audit.sql`",
     "status": "completed"
   },
   {
-    "content": "Frontend: Public Accept-Invite page (`/join/:token`)",
+    "content": "Frontend: api.js helpers + i18n strings ES/EN para onboarding+audit",
     "status": "completed"
   },
   {
-    "content": "Frontend: i18n strings for all new RBAC/members UI (ES + EN)",
+    "content": "Frontend: Members.js — dos tabs nuevos con OnboardingCard + AuditTimeline inline",
     "status": "completed"
   },
   {
-    "content": "Lint + restart + smoke test (curl) + run testing agent",
-    "status": "completed"
+    "content": "Lint + esbuild + restart + smoke test + testing agent",
+    "status": "in_progress"
   }
 ]

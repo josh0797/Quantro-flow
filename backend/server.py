@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from ai_billing import run_ai_request
 
 # ─── Config ────────────────────────────────────────────────────────────
@@ -75,6 +75,7 @@ users_col = db["users"]
 user_sessions_col = db["user_sessions"]
 workspaces_col = db["workspaces"]
 workspace_members_col = db["workspace_members"]
+workspace_invites_col = db["workspace_invites"]
 audit_log_col = db["audit_log"]
 
 # The workspace_id used by pre-auth seed + backfill. The first user to
@@ -318,14 +319,28 @@ async def get_current_workspace_id(request: Request, user: User = Depends(get_cu
     return await _active_workspace_id(request, user)
 
 
-async def log_audit(event_type: str, description: str, user_id: Optional[str] = None, workspace_id: Optional[str] = None, metadata: Optional[dict] = None):
-    """Append an audit log event. Non-fatal on error."""
+async def log_audit(
+    event_type: str,
+    description: str,
+    user_id: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+    metadata: Optional[dict] = None,
+    target_member_id: Optional[str] = None,
+):
+    """Append an audit log event. Non-fatal on error.
+
+    The audit row mirrors the shape we'll eventually use in Supabase
+    (`people_audit_logs`): actor (`user_id`), target (`target_member_id`),
+    workspace context (`workspace_id`), action (`event_type`), and a
+    free-form `metadata` jsonb-like dict.
+    """
     try:
         await audit_log_col.insert_one({
             "event_id": str(uuid.uuid4()),
             "event_type": event_type,
             "description": description,
             "user_id": user_id,
+            "target_member_id": target_member_id,
             "workspace_id": workspace_id,
             "metadata": metadata or {},
             "timestamp": datetime.now(timezone.utc),
@@ -1209,8 +1224,34 @@ async def lifespan(app: FastAPI):
     await ensure_integrations_seeded()
     await backfill_simulation_flag()
     await backfill_workspace_scoping()
+    await migrate_legacy_role_names()
     yield
     client.close()
+
+
+async def migrate_legacy_role_names() -> None:
+    """One-shot migration: rewrite legacy role names in
+    workspace_members and workspace_invites to the canonical Quantro
+    taxonomy (agent→viewer, operator→member, manager→accountant,
+    admin→leader). Idempotent — runs every boot but only matches rows
+    still on the old names."""
+    pairs = [
+        ("agent", "viewer"),
+        ("operator", "member"),
+        ("manager", "accountant"),
+        ("admin", "leader"),
+    ]
+    total = 0
+    for legacy, canonical in pairs:
+        for col in (workspace_members_col, workspace_invites_col):
+            try:
+                res = await col.update_many({"role": legacy}, {"$set": {"role": canonical}})
+                total += res.modified_count
+            except Exception as e:
+                # Log the error instead of silently swallowing it
+                print(f"[role-migration] Warning: Failed to migrate {legacy} in {col.name}: {e}")
+    if total:
+        print(f"[role-migration] Migrated {total} rows to Quantro role taxonomy")
 
 app = FastAPI(title="Quantro Flow | Business OS", lifespan=lifespan)
 
@@ -1247,12 +1288,12 @@ async def auth_me(user: User = Depends(get_current_user)):
     workspaces = []
     if workspace_ids:
         rows = await workspaces_col.find({"workspace_id": {"$in": workspace_ids}}, {"_id": 0}).to_list(50)
-        role_map = {m["workspace_id"]: m.get("role", "member") for m in memberships}
+        role_map = {m["workspace_id"]: _normalize_role(m.get("role")) for m in memberships}
         for w in rows:
             workspaces.append({
                 "workspace_id": w["workspace_id"],
                 "name": w.get("name", "Workspace"),
-                "role": role_map.get(w["workspace_id"], "member"),
+                "role": role_map.get(w["workspace_id"], "viewer"),
                 "is_current": w["workspace_id"] == user.current_workspace_id,
             })
     return {
@@ -1311,39 +1352,65 @@ async def switch_workspace(req: SwitchWorkspaceRequest, user: User = Depends(get
 
 
 # ─── RBAC (Phase 7b) ──────────────────────────────────────────────────
-# Role hierarchy (highest → lowest privilege):
-#   owner     — Full control. One per workspace. Can transfer ownership and
-#               promote others to admin/owner.
-#   admin     — Manage members, integrations, business profile, simulation
-#               mode. Cannot transfer ownership.
-#   manager   — Edit automation policies, escalation rules, content
-#               templates. Cannot manage members or settings.
-#   operator  — Day-to-day workspace usage: inbox actions, CRM/Schedule
-#               writes, content generation. Cannot edit governance.
-#   agent     — Read-only on most modules. Cannot write.
+# Quantro role hierarchy (highest → lowest privilege).
+# Matches the `org_members.role` column in Supabase.
+#   owner       — Full control. One per workspace. Can transfer ownership and
+#                 promote others to leader/owner.
+#   leader      — Manage members, integrations, business profile, simulation
+#                 mode. Cannot transfer ownership.
+#   accountant  — Edit automation policies, escalation rules, content
+#                 templates. Cannot manage members or settings.
+#   member      — Day-to-day workspace usage: inbox actions, CRM/Schedule
+#                 writes, content generation. Cannot edit governance.
+#   viewer      — Read-only on most modules. Cannot write.
 #
 # Helpers:
 #   ROLE_RANK[role] -> int
 #   require_role(min_role) -> FastAPI dependency that 403s when the
 #       caller's role in the active workspace is below `min_role`.
-ROLE_RANK = {"agent": 1, "operator": 2, "manager": 3, "admin": 4, "owner": 5}
+ROLE_RANK = {"viewer": 1, "member": 2, "accountant": 3, "leader": 4, "owner": 5}
 VALID_ROLES = list(ROLE_RANK.keys())
+
+# Legacy → Quantro role aliases. Used by `_normalize_role()` so any data
+# still tagged with the previous taxonomy (agent/operator/manager/admin)
+# is silently translated on read AND rewritten on write. Phase 7b-ext
+# also runs a one-shot migration in lifespan to bring rows up to date.
+ROLE_ALIASES = {
+    "agent": "viewer",
+    "operator": "member",
+    "manager": "accountant",
+    "admin": "leader",
+    "owner": "owner",
+    "viewer": "viewer",
+    "member": "member",
+    "accountant": "accountant",
+    "leader": "leader",
+}
+
+
+def _normalize_role(role: Optional[str]) -> str:
+    return ROLE_ALIASES.get((role or "").lower().strip(), "viewer")
 
 # Workspace invites: each invite is a single document (no email needed).
 # A workspace admin generates an invite, gets a shareable URL, and any
 # authenticated user that hits /api/invites/{token}/accept gets added to
 # the workspace with the role specified on the invite.
-invites_col = db["workspace_invites"]
+# Note: workspace_invites_col is defined at the top with other collections
 
 
 def role_rank(role: Optional[str]) -> int:
-    return ROLE_RANK.get((role or "").lower(), 0)
+    return ROLE_RANK.get(_normalize_role(role), 0)
 
 
 async def _membership_for(user_id: str, workspace_id: str) -> Optional[dict]:
-    return await workspace_members_col.find_one(
+    member = await workspace_members_col.find_one(
         {"user_id": user_id, "workspace_id": workspace_id}, {"_id": 0}
     )
+    if member and member.get("role"):
+        # Normalize on read so callers always see the canonical Quantro
+        # role even if the row was written before the migration.
+        member["role"] = _normalize_role(member["role"])
+    return member
 
 
 def require_role(min_role: str):
@@ -1358,7 +1425,7 @@ def require_role(min_role: str):
         async def update_profile(
             req: BusinessProfileRequest,
             workspace_id: str = Depends(get_current_workspace_id),
-            membership: dict = Depends(require_role("admin")),
+            membership: dict = Depends(require_role("leader")),
         ):
             ...
     """
@@ -1392,7 +1459,7 @@ class UpdateMemberRoleRequest(BaseModel):
 
 
 class CreateInviteRequest(BaseModel):
-    role: str = "operator"
+    role: str = "member"
     max_uses: Optional[int] = 1
     expires_in_days: Optional[int] = 7
 
@@ -1400,7 +1467,7 @@ class CreateInviteRequest(BaseModel):
 def _serialize_member(member_doc: dict, user_doc: Optional[dict]) -> dict:
     return {
         "user_id": member_doc.get("user_id"),
-        "role": member_doc.get("role", "agent"),
+        "role": _normalize_role(member_doc.get("role")),
         "joined_at": (
             member_doc.get("joined_at").isoformat()
             if isinstance(member_doc.get("joined_at"), datetime)
@@ -1417,7 +1484,7 @@ def _serialize_invite(invite: dict, *, base_url: Optional[str] = None) -> dict:
     return {
         "invite_id": invite.get("invite_id"),
         "workspace_id": invite.get("workspace_id"),
-        "role": invite.get("role"),
+        "role": _normalize_role(invite.get("role")),
         "token": token,
         "url": f"{base_url}/join/{token}" if base_url and token else None,
         "max_uses": invite.get("max_uses"),
@@ -1482,28 +1549,28 @@ async def update_member_role(
     me = await _membership_for(user.user_id, workspace_id)
     if not me:
         raise HTTPException(status_code=403, detail="Not a workspace member")
-    if role_rank(me.get("role")) < role_rank("admin"):
-        raise HTTPException(status_code=403, detail="Requires admin role")
+    if role_rank(me.get("role")) < role_rank("leader"):
+        raise HTTPException(status_code=403, detail="Requires leader role")
 
     target = await _membership_for(target_user_id, workspace_id)
     if not target:
         raise HTTPException(status_code=404, detail="Member not found")
 
-    target_role = (target.get("role") or "agent").lower()
+    target_role = _normalize_role(target.get("role"))
 
-    # Only Owner can touch admin/owner roles (either side of the change).
-    is_privileged_change = new_role in {"admin", "owner"} or target_role in {"admin", "owner"}
+    # Only Owner can touch leader/owner roles (either side of the change).
+    is_privileged_change = new_role in {"leader", "owner"} or target_role in {"leader", "owner"}
     if is_privileged_change and me.get("role") != "owner":
-        raise HTTPException(status_code=403, detail="Only the Owner can manage admin/owner roles")
+        raise HTTPException(status_code=403, detail="Only the Owner can manage leader/owner roles")
 
-    # Ownership transfer: demote previous owner to admin so workspace
+    # Ownership transfer: demote previous owner to leader so workspace
     # always has exactly one Owner.
     if new_role == "owner":
         if user.user_id == target_user_id:
             raise HTTPException(status_code=400, detail="You're already the owner")
         await workspace_members_col.update_one(
             {"user_id": user.user_id, "workspace_id": workspace_id},
-            {"$set": {"role": "admin"}},
+            {"$set": {"role": "leader"}},
         )
         await workspaces_col.update_one(
             {"workspace_id": workspace_id},
@@ -1518,6 +1585,7 @@ async def update_member_role(
         "members.role_changed",
         f"{user.email} changed role of {target_user_id} to {new_role}",
         user_id=user.user_id, workspace_id=workspace_id,
+        target_member_id=target_user_id,
         metadata={"target_user_id": target_user_id, "new_role": new_role, "previous_role": target_role},
     )
     return {"success": True, "user_id": target_user_id, "role": new_role}
@@ -1539,17 +1607,17 @@ async def remove_member(
     if not target:
         raise HTTPException(status_code=404, detail="Member not found")
 
-    target_role = (target.get("role") or "agent").lower()
+    target_role = _normalize_role(target.get("role"))
     is_self = user.user_id == target_user_id
 
     if target_role == "owner":
         raise HTTPException(status_code=400, detail="Owner cannot be removed. Transfer ownership first.")
 
     if not is_self:
-        if role_rank(me.get("role")) < role_rank("admin"):
-            raise HTTPException(status_code=403, detail="Requires admin role")
-        if target_role == "admin" and me.get("role") != "owner":
-            raise HTTPException(status_code=403, detail="Only the Owner can remove an admin")
+        if role_rank(me.get("role")) < role_rank("leader"):
+            raise HTTPException(status_code=403, detail="Requires leader role")
+        if target_role == "leader" and me.get("role") != "owner":
+            raise HTTPException(status_code=403, detail="Only the Owner can remove a leader")
 
     await workspace_members_col.delete_one(
         {"user_id": target_user_id, "workspace_id": workspace_id}
@@ -1564,6 +1632,7 @@ async def remove_member(
         "members.removed",
         f"{user.email} removed {target_user_id} from workspace",
         user_id=user.user_id, workspace_id=workspace_id,
+        target_member_id=target_user_id,
         metadata={"target_user_id": target_user_id, "self_leave": is_self, "previous_role": target_role},
     )
     return {"success": True}
@@ -1576,19 +1645,19 @@ async def create_invite(
     request: Request,
     user: User = Depends(get_current_user),
 ):
-    """Generate a shareable invite link. Admin+ only."""
+    """Generate a shareable invite link. Leader+ only."""
     me = await _membership_for(user.user_id, workspace_id)
     if not me:
         raise HTTPException(status_code=403, detail="Not a workspace member")
-    if role_rank(me.get("role")) < role_rank("admin"):
-        raise HTTPException(status_code=403, detail="Requires admin role")
+    if role_rank(me.get("role")) < role_rank("leader"):
+        raise HTTPException(status_code=403, detail="Requires leader role")
 
-    role = (req.role or "operator").lower()
+    role = _normalize_role(req.role or "member")
     if role not in VALID_ROLES:
         raise HTTPException(status_code=400, detail=f"Invalid role. Allowed: {VALID_ROLES}")
-    # Only the Owner can mint invites that grant admin/owner.
-    if role in {"admin", "owner"} and me.get("role") != "owner":
-        raise HTTPException(status_code=403, detail="Only the Owner can invite admins/owners")
+    # Only the Owner can mint invites that grant leader/owner.
+    if role in {"leader", "owner"} and me.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Only the Owner can invite leaders/owners")
 
     import secrets
     token = secrets.token_urlsafe(24)
@@ -1610,7 +1679,7 @@ async def create_invite(
         "created_at": datetime.now(timezone.utc),
         "accepted_by": [],
     }
-    await invites_col.insert_one(invite_doc)
+    await workspace_invites_col.insert_one(invite_doc)
     await log_audit(
         "invites.created",
         f"{user.email} created invite for role={role}",
@@ -1627,13 +1696,13 @@ async def list_invites(
     request: Request,
     user: User = Depends(get_current_user),
 ):
-    """List active invites for a workspace. Admin+ only."""
+    """List active invites for a workspace. Leader+ only."""
     me = await _membership_for(user.user_id, workspace_id)
     if not me:
         raise HTTPException(status_code=403, detail="Not a workspace member")
-    if role_rank(me.get("role")) < role_rank("admin"):
-        raise HTTPException(status_code=403, detail="Requires admin role")
-    rows = await invites_col.find({"workspace_id": workspace_id}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    if role_rank(me.get("role")) < role_rank("leader"):
+        raise HTTPException(status_code=403, detail="Requires leader role")
+    rows = await workspace_invites_col.find({"workspace_id": workspace_id}, {"_id": 0}).sort("created_at", -1).to_list(100)
     base_url = (request.headers.get("origin") or "").rstrip("/")
     return {"invites": [_serialize_invite(r, base_url=base_url or None) for r in rows]}
 
@@ -1644,13 +1713,13 @@ async def revoke_invite(
     invite_id: str,
     user: User = Depends(get_current_user),
 ):
-    """Revoke a pending invite. Admin+ only."""
+    """Revoke a pending invite. Leader+ only."""
     me = await _membership_for(user.user_id, workspace_id)
     if not me:
         raise HTTPException(status_code=403, detail="Not a workspace member")
-    if role_rank(me.get("role")) < role_rank("admin"):
-        raise HTTPException(status_code=403, detail="Requires admin role")
-    result = await invites_col.update_one(
+    if role_rank(me.get("role")) < role_rank("leader"):
+        raise HTTPException(status_code=403, detail="Requires leader role")
+    result = await workspace_invites_col.update_one(
         {"workspace_id": workspace_id, "invite_id": invite_id},
         {"$set": {"revoked": True, "revoked_at": datetime.now(timezone.utc), "revoked_by": user.user_id}},
     )
@@ -1670,7 +1739,7 @@ async def peek_invite(token: str, user: User = Depends(get_current_user)):  # no
     """Public-ish endpoint (still requires Supabase auth so abuse is
     bounded) that shows the receiver what they're about to accept. Used
     by the /join/:token frontend page."""
-    invite = await invites_col.find_one({"token": token}, {"_id": 0})
+    invite = await workspace_invites_col.find_one({"token": token}, {"_id": 0})
     if not invite:
         raise HTTPException(status_code=404, detail="Invite not found or expired")
     if invite.get("revoked"):
@@ -1684,7 +1753,7 @@ async def peek_invite(token: str, user: User = Depends(get_current_user)):  # no
     return {
         "workspace_id": invite["workspace_id"],
         "workspace_name": (workspace or {}).get("name", "Workspace"),
-        "role": invite.get("role"),
+        "role": _normalize_role(invite.get("role")),
         "expires_at": expires_at.isoformat() if isinstance(expires_at, datetime) else expires_at,
     }
 
@@ -1695,7 +1764,7 @@ async def accept_invite(token: str, user: User = Depends(get_current_user)):
     workspace with the role specified on the invite. Idempotent: if the
     user is already a member, the existing membership is preserved
     (role is NOT downgraded)."""
-    invite = await invites_col.find_one({"token": token}, {"_id": 0})
+    invite = await workspace_invites_col.find_one({"token": token}, {"_id": 0})
     if not invite:
         raise HTTPException(status_code=404, detail="Invite not found")
     if invite.get("revoked"):
@@ -1707,7 +1776,7 @@ async def accept_invite(token: str, user: User = Depends(get_current_user)):
         raise HTTPException(status_code=410, detail="This invite has reached its usage limit")
 
     workspace_id = invite["workspace_id"]
-    role = (invite.get("role") or "operator").lower()
+    role = _normalize_role(invite.get("role") or "member")
 
     existing = await _membership_for(user.user_id, workspace_id)
     if existing:
@@ -1726,7 +1795,7 @@ async def accept_invite(token: str, user: User = Depends(get_current_user)):
         "joined_at": datetime.now(timezone.utc),
         "joined_via_invite": invite.get("invite_id"),
     })
-    await invites_col.update_one(
+    await workspace_invites_col.update_one(
         {"token": token},
         {
             "$inc": {"used_count": 1},
@@ -1741,9 +1810,381 @@ async def accept_invite(token: str, user: User = Depends(get_current_user)):
         "invites.accepted",
         f"{user.email} joined workspace via invite as {role}",
         user_id=user.user_id, workspace_id=workspace_id,
+        target_member_id=user.user_id,
         metadata={"invite_id": invite.get("invite_id"), "role": role},
     )
-    return {"success": True, "workspace_id": workspace_id, "role": role, "already_member": False}
+
+
+# ─── Onboarding + Audit (Phase 7b-ext) ────────────────────────────────
+# `people_onboarding_steps_col` mirrors the Supabase table of the same
+# shape (see `/app/supabase/migrations/20260426_people_onboarding_audit.sql`).
+# We persist the same five canonical step keys per (workspace_id,
+# member_user_id) so the UI can show progress + completed_at timestamps
+# without recomputing on every render.
+people_onboarding_col = db["people_onboarding_steps"]
+
+ONBOARDING_STEPS = [
+    "invitation_sent",
+    "account_created",
+    "companies_assigned",
+    "role_configured",
+    "first_login",
+]
+
+
+def _onboarding_status_overall(steps: List[dict]) -> str:
+    """Compute the human-readable rollup status for a member's onboarding."""
+    if not steps:
+        return "pending"
+    if any(s.get("status") == "blocked" for s in steps):
+        return "blocked"
+    completed = sum(1 for s in steps if s.get("status") == "completed")
+    if completed == len(ONBOARDING_STEPS):
+        return "completed"
+    if completed > 0:
+        return "in_progress"
+    return "pending"
+
+
+async def _hydrate_member_onboarding(
+    workspace_id: str,
+    member: dict,
+    user_doc: Optional[dict],
+    invite_for_member: Optional[dict] = None,
+    business_profile: Optional[dict] = None,
+) -> dict:
+    """Build the per-member onboarding payload by merging persisted
+    `people_onboarding_steps` rows with derived signals from the rest of
+    the system (auth, workspace_members, business_profile)."""
+    user_id = member["user_id"]
+    persisted_rows = await people_onboarding_col.find(
+        {"workspace_id": workspace_id, "member_user_id": user_id},
+        {"_id": 0},
+    ).to_list(20)
+    persisted = {r["step_key"]: r for r in persisted_rows}
+
+    derived: Dict[str, dict] = {}
+
+    # 1) invitation_sent — derived from workspace_invites_col rows whose
+    #    accepted_by[].user_id == this user's id, or rows still pending
+    #    that match the user's email (best-effort).
+    inv = invite_for_member
+    if inv:
+        derived["invitation_sent"] = {
+            "status": "completed",
+            "completed_at": inv.get("created_at"),
+            "metadata": {"invite_id": inv.get("invite_id")},
+        }
+    else:
+        # No invite found means the user is the workspace owner
+        # (claimed/created the workspace directly) — that counts as
+        # already onboarded for this step.
+        if member.get("role") == "owner":
+            derived["invitation_sent"] = {
+                "status": "completed",
+                "completed_at": member.get("joined_at"),
+                "metadata": {"source": "workspace_owner"},
+            }
+
+    # 2) account_created — true if there is any user_doc row.
+    if user_doc and user_doc.get("user_id"):
+        derived["account_created"] = {
+            "status": "completed",
+            "completed_at": user_doc.get("created_at") or user_doc.get("last_login_at"),
+        }
+
+    # 3) companies_assigned — workspace_members membership exists +
+    #    business_profile completed for this workspace (proxy for "the
+    #    workspace itself is configured to belong to a real company").
+    if business_profile and business_profile.get("industry"):
+        derived["companies_assigned"] = {
+            "status": "completed",
+            "completed_at": business_profile.get("updated_at") or member.get("joined_at"),
+            "metadata": {"industry": business_profile.get("industry")},
+        }
+
+    # 4) role_configured — true once the member's role rank is >=
+    #    member (i.e. moved off the default `viewer`).
+    role = _normalize_role(member.get("role"))
+    if role_rank(role) >= role_rank("member"):
+        derived["role_configured"] = {
+            "status": "completed",
+            "completed_at": member.get("role_updated_at") or member.get("joined_at"),
+            "metadata": {"role": role},
+        }
+
+    # 5) first_login — last_login_at on user_doc.
+    if user_doc and user_doc.get("last_login_at"):
+        derived["first_login"] = {
+            "status": "completed",
+            "completed_at": user_doc.get("last_login_at"),
+        }
+
+    # Merge: persisted values WIN over derived (user explicitly marked
+    # something complete should not be re-reverted).
+    steps = []
+    for key in ONBOARDING_STEPS:
+        if key in persisted:
+            row = persisted[key]
+            steps.append({
+                "step_key": key,
+                "status": row.get("status", "pending"),
+                "completed_at": (
+                    row["completed_at"].isoformat()
+                    if isinstance(row.get("completed_at"), datetime)
+                    else row.get("completed_at")
+                ),
+                "metadata": row.get("metadata") or {},
+            })
+            continue
+        d = derived.get(key)
+        if d:
+            steps.append({
+                "step_key": key,
+                "status": d.get("status", "pending"),
+                "completed_at": (
+                    d["completed_at"].isoformat()
+                    if isinstance(d.get("completed_at"), datetime)
+                    else d.get("completed_at")
+                ),
+                "metadata": d.get("metadata") or {},
+            })
+        else:
+            steps.append({"step_key": key, "status": "pending", "completed_at": None, "metadata": {}})
+
+    completed = sum(1 for s in steps if s["status"] == "completed")
+    return {
+        "user_id": user_id,
+        "name": (user_doc or {}).get("name"),
+        "email": (user_doc or {}).get("email"),
+        "picture": (user_doc or {}).get("picture"),
+        "role": role,
+        "status": _onboarding_status_overall(steps),
+        "progress": {"completed": completed, "total": len(ONBOARDING_STEPS)},
+        "steps": steps,
+    }
+
+
+@app.get("/api/workspaces/{workspace_id}/onboarding")
+async def get_onboarding(workspace_id: str, user: User = Depends(get_current_user)):
+    """Return per-member onboarding state for a workspace. Any member
+    can view this (it's a productivity view, not sensitive data)."""
+    me = await _membership_for(user.user_id, workspace_id)
+    if not me:
+        raise HTTPException(status_code=403, detail="Not a workspace member")
+
+    members = await workspace_members_col.find(
+        {"workspace_id": workspace_id}, {"_id": 0}
+    ).to_list(200)
+    user_ids = [m["user_id"] for m in members]
+    user_rows = await users_col.find(
+        {"user_id": {"$in": user_ids}},
+        {"_id": 0, "user_id": 1, "email": 1, "name": 1, "picture": 1, "last_login_at": 1, "created_at": 1},
+    ).to_list(200)
+    by_user = {u["user_id"]: u for u in user_rows}
+
+    # Fetch invites once and map by accepted user_id (best-effort).
+    invite_rows = await workspace_invites_col.find(
+        {"workspace_id": workspace_id}, {"_id": 0}
+    ).to_list(200)
+    invite_by_user: Dict[str, dict] = {}
+    for inv in invite_rows:
+        for acc in inv.get("accepted_by") or []:
+            uid = (acc or {}).get("user_id")
+            if uid:
+                invite_by_user.setdefault(uid, inv)
+
+    # Business profile is workspace-scoped, fetch once.
+    business_profile = await business_profile_col.find_one(
+        {"workspace_id": workspace_id}, {"_id": 0}
+    )
+
+    cards = []
+    for m in members:
+        # Ensure role is canonical for downstream consumers.
+        m["role"] = _normalize_role(m.get("role"))
+        cards.append(await _hydrate_member_onboarding(
+            workspace_id, m, by_user.get(m["user_id"]),
+            invite_for_member=invite_by_user.get(m["user_id"]),
+            business_profile=business_profile,
+        ))
+
+    overall_completed = sum(1 for c in cards if c["status"] == "completed")
+    return {
+        "workspace_id": workspace_id,
+        "members": cards,
+        "summary": {
+            "total_members": len(cards),
+            "completed_onboarding": overall_completed,
+        },
+    }
+
+
+class OnboardingStepUpdate(BaseModel):
+    status: str = "completed"
+    metadata: Optional[Dict[str, Any]] = None
+
+
+@app.post("/api/workspaces/{workspace_id}/onboarding/{member_user_id}/steps/{step_key}")
+async def upsert_onboarding_step(
+    workspace_id: str,
+    member_user_id: str,
+    step_key: str,
+    req: OnboardingStepUpdate,
+    user: User = Depends(get_current_user),
+):
+    """Manually mark a single onboarding step. Leader+ or self only.
+
+    Persists to `people_onboarding_steps` with unique(member, step_key)
+    semantics so repeated calls just update the existing row."""
+    if step_key not in ONBOARDING_STEPS:
+        raise HTTPException(status_code=400, detail=f"Unknown step. Allowed: {ONBOARDING_STEPS}")
+    new_status = (req.status or "completed").lower()
+    if new_status not in {"pending", "completed", "blocked"}:
+        raise HTTPException(status_code=400, detail="Invalid status")
+
+    me = await _membership_for(user.user_id, workspace_id)
+    if not me:
+        raise HTTPException(status_code=403, detail="Not a workspace member")
+    is_self = user.user_id == member_user_id
+    if not is_self and role_rank(me.get("role")) < role_rank("leader"):
+        raise HTTPException(status_code=403, detail="Requires leader role")
+
+    target = await _membership_for(member_user_id, workspace_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    now = datetime.now(timezone.utc)
+    update_doc = {
+        "workspace_id": workspace_id,
+        "member_user_id": member_user_id,
+        "step_key": step_key,
+        "status": new_status,
+        "metadata": req.metadata or {},
+        "updated_at": now,
+    }
+    if new_status == "completed":
+        update_doc["completed_at"] = now
+    else:
+        update_doc["completed_at"] = None
+
+    await people_onboarding_col.update_one(
+        {"workspace_id": workspace_id, "member_user_id": member_user_id, "step_key": step_key},
+        {"$set": update_doc, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+    await log_audit(
+        "onboarding.step_updated",
+        f"{user.email} marked {step_key}={new_status} for {member_user_id}",
+        user_id=user.user_id, workspace_id=workspace_id,
+        target_member_id=member_user_id,
+        metadata={"step_key": step_key, "status": new_status},
+    )
+    return {"success": True, "step_key": step_key, "status": new_status}
+
+
+@app.post("/api/workspaces/{workspace_id}/onboarding/{member_user_id}/complete")
+async def mark_onboarding_complete(
+    workspace_id: str,
+    member_user_id: str,
+    user: User = Depends(get_current_user),
+):
+    """Force all 5 onboarding steps to `completed` for one member.
+    Leader+ only — useful when you've onboarded someone outside the
+    automatic flow."""
+    me = await _membership_for(user.user_id, workspace_id)
+    if not me:
+        raise HTTPException(status_code=403, detail="Not a workspace member")
+    if role_rank(me.get("role")) < role_rank("leader"):
+        raise HTTPException(status_code=403, detail="Requires leader role")
+    target = await _membership_for(member_user_id, workspace_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Member not found")
+    now = datetime.now(timezone.utc)
+    for key in ONBOARDING_STEPS:
+        await people_onboarding_col.update_one(
+            {"workspace_id": workspace_id, "member_user_id": member_user_id, "step_key": key},
+            {
+                "$set": {
+                    "workspace_id": workspace_id,
+                    "member_user_id": member_user_id,
+                    "step_key": key,
+                    "status": "completed",
+                    "completed_at": now,
+                    "updated_at": now,
+                },
+                "$setOnInsert": {"created_at": now, "metadata": {"forced_by": user.user_id}},
+            },
+            upsert=True,
+        )
+    await log_audit(
+        "onboarding.completed",
+        f"{user.email} marked onboarding complete for {member_user_id}",
+        user_id=user.user_id, workspace_id=workspace_id,
+        target_member_id=member_user_id,
+    )
+    return {"success": True}
+
+
+@app.get("/api/workspaces/{workspace_id}/audit")
+async def list_audit(
+    workspace_id: str,
+    user: User = Depends(get_current_user),
+    limit: int = 100,
+    member_user_id: Optional[str] = None,
+):
+    """Workspace audit timeline. Leader+ only. Returns rows newest-first,
+    hydrated with actor + target user metadata."""
+    me = await _membership_for(user.user_id, workspace_id)
+    if not me:
+        raise HTTPException(status_code=403, detail="Not a workspace member")
+    if role_rank(me.get("role")) < role_rank("leader"):
+        raise HTTPException(status_code=403, detail="Requires leader role")
+
+    query: Dict[str, Any] = {"workspace_id": workspace_id}
+    if member_user_id:
+        query["target_member_id"] = member_user_id
+
+    capped_limit = max(1, min(int(limit or 100), 500))
+    rows = await audit_log_col.find(query, {"_id": 0}).sort("timestamp", -1).limit(capped_limit).to_list(capped_limit)
+
+    actor_ids = list({r.get("user_id") for r in rows if r.get("user_id")})
+    target_ids = list({r.get("target_member_id") for r in rows if r.get("target_member_id")})
+    all_ids = list({*actor_ids, *target_ids})
+    user_rows = await users_col.find(
+        {"user_id": {"$in": all_ids}},
+        {"_id": 0, "user_id": 1, "email": 1, "name": 1, "picture": 1},
+    ).to_list(500) if all_ids else []
+    by_id = {u["user_id"]: u for u in user_rows}
+
+    events = []
+    for r in rows:
+        actor = by_id.get(r.get("user_id")) or {}
+        target = by_id.get(r.get("target_member_id")) or {}
+        events.append({
+            "event_id": r.get("event_id"),
+            "action": r.get("event_type"),
+            "description": r.get("description"),
+            "timestamp": (
+                r["timestamp"].isoformat()
+                if isinstance(r.get("timestamp"), datetime)
+                else r.get("timestamp")
+            ),
+            "actor": {
+                "user_id": r.get("user_id"),
+                "email": actor.get("email"),
+                "name": actor.get("name"),
+                "picture": actor.get("picture"),
+            } if r.get("user_id") else None,
+            "target": {
+                "user_id": r.get("target_member_id"),
+                "email": target.get("email"),
+                "name": target.get("name"),
+                "picture": target.get("picture"),
+            } if r.get("target_member_id") else None,
+            "metadata": r.get("metadata") or {},
+        })
+    return {"workspace_id": workspace_id, "events": events, "total": len(events)}
 
 
 
@@ -2786,7 +3227,7 @@ async def get_policies(workspace_id: str = Depends(get_current_workspace_id)):
     return [serialize_doc(p) for p in policies]
 
 @app.post("/api/policies")
-async def create_policy(req: AutomationPolicyRequest, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("manager"))):
+async def create_policy(req: AutomationPolicyRequest, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("accountant"))):
     policy = {
         "policy_id": str(uuid.uuid4()),
         "workspace_id": workspace_id,
@@ -2806,7 +3247,7 @@ async def create_policy(req: AutomationPolicyRequest, workspace_id: str = Depend
     return serialize_doc(policy)
 
 @app.delete("/api/policies/{policy_id}")
-async def delete_policy(policy_id: str, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("manager"))):
+async def delete_policy(policy_id: str, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("accountant"))):
     result = await policies_col.delete_one({"workspace_id": workspace_id, "policy_id": policy_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Policy not found")
@@ -2814,7 +3255,7 @@ async def delete_policy(policy_id: str, workspace_id: str = Depends(get_current_
     return {"success": True}
 
 @app.put("/api/policies/{policy_id}")
-async def update_policy(policy_id: str, req: AutomationPolicyRequest, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("manager"))):
+async def update_policy(policy_id: str, req: AutomationPolicyRequest, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("accountant"))):
     update = {
         "intent": req.intent,
         "action": req.action,
@@ -2888,7 +3329,7 @@ async def get_escalation_rules(workspace_id: str = Depends(get_current_workspace
     return [serialize_doc(r) for r in rules]
 
 @app.post("/api/escalation-rules")
-async def create_escalation_rule(req: EscalationRuleRequest, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("manager"))):
+async def create_escalation_rule(req: EscalationRuleRequest, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("accountant"))):
     rule = {
         "rule_id": str(uuid.uuid4()),
         "workspace_id": workspace_id,
@@ -2905,7 +3346,7 @@ async def create_escalation_rule(req: EscalationRuleRequest, workspace_id: str =
     return serialize_doc(rule)
 
 @app.put("/api/escalation-rules/{rule_id}")
-async def update_escalation_rule(rule_id: str, req: EscalationRuleRequest, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("manager"))):
+async def update_escalation_rule(rule_id: str, req: EscalationRuleRequest, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("accountant"))):
     update = {
         "name": req.name,
         "condition_type": req.condition_type,
@@ -2922,7 +3363,7 @@ async def update_escalation_rule(rule_id: str, req: EscalationRuleRequest, works
     return serialize_doc(updated)
 
 @app.delete("/api/escalation-rules/{rule_id}")
-async def delete_escalation_rule(rule_id: str, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("manager"))):
+async def delete_escalation_rule(rule_id: str, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("accountant"))):
     result = await escalation_col.delete_one({"workspace_id": workspace_id, "rule_id": rule_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Rule not found")
@@ -2947,7 +3388,7 @@ async def get_template(template_id: str, workspace_id: str = Depends(get_current
     return serialize_doc(template)
 
 @app.post("/api/templates")
-async def create_template(req: ContentTemplateRequest, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("manager"))):
+async def create_template(req: ContentTemplateRequest, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("accountant"))):
     template = {
         "template_id": str(uuid.uuid4()),
         "workspace_id": workspace_id,
@@ -2967,7 +3408,7 @@ async def create_template(req: ContentTemplateRequest, workspace_id: str = Depen
     return serialize_doc(template)
 
 @app.put("/api/templates/{template_id}")
-async def update_template(template_id: str, req: ContentTemplateRequest, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("manager"))):
+async def update_template(template_id: str, req: ContentTemplateRequest, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("accountant"))):
     update = {
         "name": req.name,
         "category": req.category,
@@ -2985,7 +3426,7 @@ async def update_template(template_id: str, req: ContentTemplateRequest, workspa
     return serialize_doc(updated)
 
 @app.delete("/api/templates/{template_id}")
-async def delete_template(template_id: str, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("manager"))):
+async def delete_template(template_id: str, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("accountant"))):
     result = await templates_col.delete_one({"workspace_id": workspace_id, "template_id": template_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Template not found")
@@ -3133,7 +3574,7 @@ async def get_business_profile(workspace_id: str = Depends(get_current_workspace
     return serialize_doc(profile)
 
 @app.put("/api/business-profile")
-async def update_business_profile(req: BusinessProfileUpdate, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("admin"))):
+async def update_business_profile(req: BusinessProfileUpdate, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("leader"))):
     """Update the business profile configuration."""
     # Get current profile to check if we need to generate simulation data
     current_profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
@@ -3204,7 +3645,7 @@ async def get_integration(provider: str, workspace_id: str = Depends(get_current
     return serialize_doc(integration)
 
 @app.put("/api/integrations/{provider}")
-async def update_integration(provider: str, req: IntegrationUpdate, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("admin"))):
+async def update_integration(provider: str, req: IntegrationUpdate, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("leader"))):
     """Update an integration configuration."""
     update_data = {
         "status": req.status,
@@ -3230,7 +3671,7 @@ async def update_integration(provider: str, req: IntegrationUpdate, workspace_id
     return serialize_doc(updated)
 
 @app.post("/api/integrations/{provider}/test")
-async def test_integration(provider: str, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("admin"))):
+async def test_integration(provider: str, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("leader"))):
     """Test an integration connection (simulated)."""
     integration = await integrations_config_col.find_one({"workspace_id": workspace_id, "provider": provider}, {"_id": 0})
     if not integration:
@@ -3453,7 +3894,7 @@ async def generate_simulation_data(industry: str):
 
 
 @app.post("/api/simulation/generate")
-async def generate_simulation(workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("admin"))):
+async def generate_simulation(workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("leader"))):
     """Generate simulation data for the current industry."""
     profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
     if not profile:
@@ -3471,7 +3912,7 @@ async def generate_simulation(workspace_id: str = Depends(get_current_workspace_
 
 
 @app.post("/api/simulation/clear")
-async def clear_simulation(workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("admin"))):
+async def clear_simulation(workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("leader"))):
     """Clear all simulation data."""
     deleted_counts = {
         "contacts": (await contacts_col.delete_many({"is_simulation": True})).deleted_count,

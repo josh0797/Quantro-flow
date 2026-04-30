@@ -86,6 +86,18 @@ export const revokeInvite = (workspace_id, invite_id) =>
 export const peekInvite = (token) => api.get(`/invites/${token}`).then(r => r.data);
 export const acceptInvite = (token) => api.post(`/invites/${token}/accept`).then(r => r.data);
 
+// Onboarding
+export const getOnboarding = (workspace_id) =>
+  api.get(`/workspaces/${workspace_id}/onboarding`).then(r => r.data);
+export const upsertOnboardingStep = (workspace_id, member_user_id, step_key, payload) =>
+  api.post(`/workspaces/${workspace_id}/onboarding/${member_user_id}/steps/${step_key}`, payload).then(r => r.data);
+export const markOnboardingComplete = (workspace_id, member_user_id) =>
+  api.post(`/workspaces/${workspace_id}/onboarding/${member_user_id}/complete`).then(r => r.data);
+
+// Audit timeline
+export const getAuditLog = (workspace_id, params = {}) =>
+  api.get(`/workspaces/${workspace_id}/audit`, { params }).then(r => r.data);
+
 // Dashboard
 export const getDashboardMetrics = () => api.get('/dashboard/metrics').then(r => r.data);
 export const getAISuggestions = () => api.get('/dashboard/suggestions').then(r => r.data);
