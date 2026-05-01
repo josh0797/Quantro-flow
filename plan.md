@@ -80,7 +80,23 @@
   - Cada export se registra en el propio audit log (`audit.exported`) para compliance
   - CSV incluye BOM UTF-8 para compatibilidad con Excel
   - Auth: leader+ only (mismo que list_audit)
-- ⏭️ Next: **Flip `QUANTRO_DB_PRIMARY=supabase`** + Phase 7c post-MVP (limpieza de workspaces duplicados de contacto)
+- ✅ **Phase 7c-cleanup:** Limpieza total de Mongo legacy
+  - Borrados 12 workspaces legacy (`ws_test_*`, `ws_1e70d…`, `ws_5*`, `ws_d*`, `ws_f*`, `ws_9*`, `ws_b*`, `ws_3a10…`, `ws_168c…`, etc.)
+  - Borrados datos asociados: 60 integrations_config, 12 business_profile, 12 workspace_members legacy, 12 audit_logs de seed, 2 contacts de test
+  - Borrados seeds de test (`user_test_20aaa7f9`, `user_test2_b`) y sus memberships huérfanos
+  - Workspace default renombrado: `Test User Workspace` → **Quantro**
+  - Owner real asignado al default: `c342ed89-…` (contacto@kontagroup.com)
+  - Estado final Mongo: 1 workspace (`Quantro`), 2 miembros reales (owner + leader)
+- ✅ **Phase 7c-rename:** Feature user-facing de renombrar workspace
+  - Endpoint `PATCH /api/workspaces/{workspace_id}` (leader+, registra `workspace.renamed` en audit)
+  - UI: pill con nombre del workspace + botón ✎ Pencil en el header de Members → abre Dialog de rename
+  - Validación: 1-80 chars, trim de whitespace, refresh automático del AuthContext
+  - i18n (ES+EN) completo
+- ✅ **Phase 7c-swap:** `QUANTRO_DB_PRIMARY=supabase` activado
+  - Backend verificado en runtime: `is_supabase_primary=True`, `service_role_available=True`
+  - `list_orgs_for_user` funcionando contra ambos usuarios reales
+  - Dual-write seguirá activo hacia Mongo para backward compatibility
+- ⏭️ Next: **Phase 7d roadmap** — refactor cyclomatic complexity + split de pages grandes
 
 ---
 

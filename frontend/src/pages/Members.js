@@ -18,7 +18,7 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader,
   AlertDialogTitle,
 } from '../components/ui/alert-dialog';
-import { Users, UserPlus, Copy, Trash2, Shield, Crown, Loader2, Link2, ClipboardList, History, CheckCircle2, Clock, Mail, UserCheck, Building2, KeyRound, AlertCircle, Download, FileJson, FileSpreadsheet } from 'lucide-react';
+import { Users, UserPlus, Copy, Trash2, Shield, Crown, Loader2, Link2, ClipboardList, History, CheckCircle2, Clock, Mail, UserCheck, Building2, KeyRound, AlertCircle, Download, FileJson, FileSpreadsheet, Pencil } from 'lucide-react';
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
   DropdownMenuLabel, DropdownMenuSeparator,
@@ -30,7 +30,7 @@ import {
   listMembers, updateMemberRole, removeMember,
   listInvites, createInvite, revokeInvite,
   getOnboarding, markOnboardingComplete,
-  getAuditLog, exportAuditLog,
+  getAuditLog, exportAuditLog, renameWorkspace,
 } from '../lib/api';
 
 const ROLE_RANK = { viewer: 1, member: 2, accountant: 3, leader: 4, owner: 5 };
@@ -53,7 +53,7 @@ function roleBadgeClass(role) {
 
 export default function Members() {
   const { t } = useLanguage();
-  const { user, currentWorkspaceId } = useAuth();
+  const { user, currentWorkspaceId, workspaces, refresh } = useAuth();
   const [data, setData] = useState({ members: [], your_role: 'viewer' });
   const [invites, setInvites] = useState([]);
   const [onboarding, setOnboarding] = useState(null);
@@ -68,6 +68,9 @@ export default function Members() {
   const [pendingComplete, setPendingComplete] = useState(null);
   const [auditFilters, setAuditFilters] = useState({ start_date: '', end_date: '', action: '' });
   const [exporting, setExporting] = useState(false);
+  const [renameDialogOpen, setRenameDialogOpen] = useState(false);
+  const [renameValue, setRenameValue] = useState('');
+  const [renaming, setRenaming] = useState(false);
 
   const myRoleRank = ROLE_RANK[data.your_role] || 0;
   const isAdmin = myRoleRank >= ROLE_RANK.leader;
@@ -159,6 +162,43 @@ export default function Members() {
       setExporting(false);
     }
   }, [currentWorkspaceId, auditFilters, t]);
+
+  // Rename the active workspace. Leader+ only on the backend, but we also
+  // gate the UI entry point so regular members never see the edit affordance.
+  const currentWs = useMemo(
+    () => (workspaces || []).find((w) => w.workspace_id === currentWorkspaceId) || null,
+    [workspaces, currentWorkspaceId],
+  );
+  const openRenameDialog = useCallback(() => {
+    setRenameValue(currentWs?.name || '');
+    setRenameDialogOpen(true);
+  }, [currentWs]);
+  const handleRenameWorkspace = useCallback(async () => {
+    const name = (renameValue || '').trim();
+    if (!name) {
+      toast.error(t('workspace.rename_empty'));
+      return;
+    }
+    if (name === (currentWs?.name || '')) {
+      setRenameDialogOpen(false);
+      return;
+    }
+    setRenaming(true);
+    try {
+      await renameWorkspace(currentWorkspaceId, name);
+      toast.success(t('workspace.rename_success', { name }));
+      setRenameDialogOpen(false);
+      // Pull fresh workspace metadata into the AuthContext so the sidebar
+      // switcher reflects the new name without a full reload.
+      await refresh?.();
+    } catch (err) {
+      const detail = err?.response?.data?.detail;
+      const msg = typeof detail === 'string' ? detail : detail?.message || err.message;
+      toast.error(t('workspace.rename_error'), { description: msg });
+    } finally {
+      setRenaming(false);
+    }
+  }, [renameValue, currentWs, currentWorkspaceId, refresh, t]);
 
   const handleMarkOnboardingComplete = async () => {
     if (!pendingComplete) return;
@@ -289,6 +329,26 @@ export default function Members() {
         <div>
           <h1 className="font-display text-2xl font-semibold tracking-tight">{t('members.title')}</h1>
           <p className="text-sm text-muted-foreground mt-1">{t('members.subtitle')}</p>
+          {/* Current workspace pill — with inline rename for leader+. Gives
+              every tenant an obvious path to customize the default name. */}
+          {currentWs && (
+            <div className="mt-3 inline-flex items-center gap-2 rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--muted)/0.3)] px-3 py-1.5 text-sm">
+              <Building2 size={14} className="text-[hsl(var(--primary))]" />
+              <span className="font-medium" data-testid="workspace-name">{currentWs.name}</span>
+              {isAdmin && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 w-6 p-0 hover:bg-[hsl(var(--muted))]"
+                  onClick={openRenameDialog}
+                  data-testid="workspace-rename-btn"
+                  aria-label={t('workspace.rename_button')}
+                >
+                  <Pencil size={12} />
+                </Button>
+              )}
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-3">
           <Badge className={`${roleBadgeClass(data.your_role)} capitalize`} data-testid="my-role-badge">
@@ -627,6 +687,50 @@ export default function Members() {
 
 
       </Tabs>
+
+      {/* Rename workspace dialog — leader+ only */}
+      <Dialog open={renameDialogOpen} onOpenChange={setRenameDialogOpen}>
+        <DialogContent className="bg-[hsl(var(--card))] border-[hsl(var(--border))] max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('workspace.rename_title')}</DialogTitle>
+            <DialogDescription>{t('workspace.rename_description')}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 py-2">
+            <Label htmlFor="workspace-rename-input">{t('workspace.rename_label')}</Label>
+            <Input
+              id="workspace-rename-input"
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              maxLength={80}
+              placeholder={t('workspace.rename_placeholder')}
+              data-testid="workspace-rename-input"
+              onKeyDown={(e) => { if (e.key === 'Enter' && !renaming) handleRenameWorkspace(); }}
+            />
+            <p className="text-xs text-muted-foreground">
+              {t('workspace.rename_hint')}
+            </p>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setRenameDialogOpen(false)}
+              disabled={renaming}
+              data-testid="workspace-rename-cancel"
+            >
+              {t('common.cancel')}
+            </Button>
+            <Button
+              onClick={handleRenameWorkspace}
+              disabled={renaming || !(renameValue || '').trim()}
+              data-testid="workspace-rename-save"
+              className="gap-2"
+            >
+              {renaming && <Loader2 size={14} className="animate-spin" />}
+              {t('workspace.rename_save')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Invite create dialog */}
       <Dialog open={inviteDialogOpen} onOpenChange={setInviteDialogOpen}>

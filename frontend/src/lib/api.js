@@ -98,6 +98,10 @@ export const markOnboardingComplete = (workspace_id, member_user_id) =>
 export const getAuditLog = (workspace_id, params = {}) =>
   api.get(`/workspaces/${workspace_id}/audit`, { params }).then(r => r.data);
 
+// Rename a workspace (leader+ only)
+export const renameWorkspace = (workspace_id, name) =>
+  api.patch(`/workspaces/${workspace_id}`, { name }).then(r => r.data);
+
 // Audit export — returns the raw Blob so callers can trigger a download.
 // Accepts { format: 'csv'|'json', start_date, end_date, action }.
 export const exportAuditLog = (workspace_id, params = {}) =>

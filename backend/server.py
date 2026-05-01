@@ -1524,6 +1524,55 @@ async def switch_workspace(req: SwitchWorkspaceRequest, user: User = Depends(get
     return {"success": True, "workspace_id": req.workspace_id}
 
 
+class UpdateWorkspaceRequest(BaseModel):
+    name: str
+
+
+@app.patch("/api/workspaces/{workspace_id}")
+async def update_workspace(
+    workspace_id: str,
+    req: UpdateWorkspaceRequest,
+    user: User = Depends(get_current_user),
+):
+    """Rename a workspace. Leader+ only.
+
+    This is the primary way to customize the default workspace name
+    (``Quantro``) once the customer takes ownership of their tenant.
+    The audit trail records the previous and new names for traceability.
+    """
+    me = await _membership_for(user.user_id, workspace_id)
+    if not me:
+        raise HTTPException(status_code=403, detail="Not a workspace member")
+    if role_rank(me.get("role")) < role_rank("leader"):
+        raise HTTPException(status_code=403, detail="Requires leader role")
+
+    new_name = (req.name or "").strip()
+    if not new_name:
+        raise HTTPException(status_code=422, detail="Workspace name cannot be empty")
+    if len(new_name) > 80:
+        raise HTTPException(status_code=422, detail="Workspace name is too long (max 80 chars)")
+
+    ws = await workspaces_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
+    if not ws:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    old_name = ws.get("name") or ""
+    if old_name == new_name:
+        return {"workspace_id": workspace_id, "name": new_name, "unchanged": True}
+
+    await workspaces_col.update_one(
+        {"workspace_id": workspace_id},
+        {"$set": {"name": new_name, "updated_at": datetime.now(timezone.utc)}},
+    )
+    await log_audit(
+        "workspace.renamed",
+        f"Renamed workspace '{old_name}' → '{new_name}'",
+        user_id=user.user_id,
+        workspace_id=workspace_id,
+        metadata={"old_name": old_name, "new_name": new_name},
+    )
+    return {"workspace_id": workspace_id, "name": new_name, "unchanged": False}
+
+
 # ─── RBAC (Phase 7b) ──────────────────────────────────────────────────
 # Quantro role hierarchy (highest → lowest privilege).
 # Matches the `org_members.role` column in Supabase.
