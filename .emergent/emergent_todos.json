@@ -1,30 +1,30 @@
 [
   {
-    "content": "Phase A — Foundation: borrar OnboardingLite, agregar /welcome routes, ProtectedRoute redirect, OnboardingShell (dark+cyan Apple-style)",
+    "content": "Task A.1 — Componente <DemoPreview> compartido (preview 7s + phases + 2 CTAs + Apple transitions)",
     "status": "completed"
   },
   {
-    "content": "Phase B — Start Choice (3 cards) + Checkout placeholder",
+    "content": "Task A.2 — Mockups visuales: InboxMockup, CalendarMockup, CRMMockup, WebhooksMockup",
     "status": "completed"
   },
   {
-    "content": "Phase C — Flow Setup 4 steps (Inbox+sim analysis, Calendar, CRM, Automations) con fade/slide",
+    "content": "Task A.3 — Refactor StepInbox/Calendar/CRM/Automations con Preview→Connect + connection_mode tracking",
     "status": "completed"
   },
   {
-    "content": "Phase D — Activación final con Simulation Mode auto + counters reales",
+    "content": "Task A.4 — Update StepReady: diferenciar 'datos reales' vs 'modo demo' + badges",
     "status": "completed"
   },
   {
-    "content": "Backend: endpoint para marcar onboarding completo + activar simulation_mode",
+    "content": "Task A.5 — i18n nuevas strings ES+EN para preview/demo/real",
     "status": "completed"
   },
   {
-    "content": "i18n ES+EN para todo el flujo",
-    "status": "completed"
+    "content": "Task A.6 — Banner 'Modo demo' en Smart Inbox (post-MVP, lo haré cuando tengamos OAuth real)",
+    "status": "pending"
   },
   {
-    "content": "Smoke test E2E con cuenta nueva + retest contacto/josias para no regresión",
-    "status": "in_progress"
+    "content": "Task B — BLOQUEADO esperando GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET del usuario",
+    "status": "pending"
   }
 ]

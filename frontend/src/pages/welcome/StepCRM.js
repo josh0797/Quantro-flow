@@ -1,28 +1,23 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 import { useLanguage } from '../../context/LanguageContext';
 import { useOnboarding } from './OnboardingContext';
-import { Users2, ArrowRight, Check, SkipForward } from 'lucide-react';
+import DemoPreview from './components/DemoPreview';
+import CRMMockup from './components/CRMMockup';
+import { Users2 } from 'lucide-react';
 
-/**
- * Step 3 — CRM. Marked optional in the brief. We provide a bigger
- * visual breathing room and an explicit "skip" affordance because
- * many SMBs onboard without an existing CRM.
- */
 export default function StepCRM() {
   const { t } = useLanguage();
   const { markStepConnected, markStepSkipped } = useOnboarding();
   const navigate = useNavigate();
-  const [connecting, setConnecting] = React.useState(false);
-  const [done, setDone] = React.useState(false);
 
-  const handleConnect = () => {
-    setConnecting(true);
-    window.setTimeout(() => {
-      setDone(true);
-      markStepConnected('crm', 'simulated');
-      window.setTimeout(() => navigate('/welcome/automations'), 1100);
-    }, 1100);
+  const handleConnect = async () => {
+    toast.info(t('welcome.preview.real_pending_title'), {
+      description: t('welcome.preview.real_pending_desc_crm'),
+    });
+    markStepConnected('crm', 'demo');
+    window.setTimeout(() => navigate('/welcome/automations'), 600);
   };
 
   const handleSkip = () => {
@@ -32,56 +27,36 @@ export default function StepCRM() {
 
   return (
     <div className="flex flex-col items-center text-center" data-testid="step-crm-page">
-      <div className="size-16 rounded-2xl bg-[hsl(var(--accent)/0.12)] text-[hsl(var(--accent))] flex items-center justify-center mb-7">
+      <div className="size-16 rounded-2xl bg-[hsl(var(--accent)/0.12)] text-[hsl(var(--accent))] flex items-center justify-center mb-6">
         <Users2 size={28} />
       </div>
       <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground mb-3" data-testid="step-crm-eyebrow">
         {t('welcome.crm.eyebrow_optional')}
       </p>
-      <h1 className="font-display text-4xl md:text-5xl font-semibold tracking-tight mb-4 text-balance" data-testid="step-crm-title">
+      <h1 className="font-display text-3xl md:text-5xl font-semibold tracking-tight mb-3 text-balance" data-testid="step-crm-title">
         {t('welcome.crm.title')}
       </h1>
       <p className="text-base md:text-lg text-muted-foreground max-w-xl mb-10 leading-relaxed text-balance whitespace-pre-line">
         {t('welcome.crm.subtitle')}
       </p>
 
-      {!done && (
-        <div className="flex flex-col items-center gap-3">
-          <button
-            type="button"
-            onClick={handleConnect}
-            disabled={connecting}
-            data-testid="step-crm-connect-btn"
-            className="inline-flex items-center gap-2.5 rounded-full bg-[hsl(var(--primary))] hover:bg-[hsl(var(--primary)/0.92)] text-[hsl(var(--primary-foreground))] px-7 py-3.5 text-sm font-semibold transition-all duration-300 ease-out hover:-translate-y-0.5 disabled:opacity-60 disabled:cursor-wait"
-          >
-            {connecting && <span className="size-3 rounded-full border-2 border-current border-t-transparent animate-spin" />}
-            {t('welcome.crm.connect_cta')}
-          </button>
-          <button
-            type="button"
-            onClick={handleSkip}
-            disabled={connecting}
-            data-testid="step-crm-skip"
-            className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors duration-200 disabled:opacity-50"
-          >
-            <SkipForward size={12} />
-            {t('welcome.crm.skip_cta')}
-          </button>
-        </div>
-      )}
-
-      {done && (
-        <div className="flex flex-col items-center gap-3 animate-in fade-in slide-in-from-bottom-1 duration-500" data-testid="step-crm-done">
-          <div className="inline-flex items-center gap-2 rounded-full bg-[hsl(var(--primary)/0.12)] text-[hsl(var(--primary))] px-4 py-2 text-sm font-medium">
-            <Check size={14} />
-            {t('welcome.crm.ready_label')}
-          </div>
-          <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-            {t('welcome.crm.advancing')}
-            <ArrowRight size={12} />
-          </span>
-        </div>
-      )}
+      <DemoPreview
+        testIdPrefix="step-crm"
+        microcopyPreview={t('welcome.crm.preview_microcopy')}
+        microcopyEnd={t('welcome.crm.preview_end_microcopy')}
+        connectLabel={t('welcome.crm.connect_cta')}
+        skipLabel={t('welcome.crm.skip_cta')}
+        phases={[
+          { key: 'matching',  delay_ms: 0,    label: t('welcome.crm.phase_matching')  },
+          { key: 'staging',   delay_ms: 1800, label: t('welcome.crm.phase_staging')   },
+          { key: 'flagging',  delay_ms: 3600, label: t('welcome.crm.phase_flagging')  },
+        ]}
+        previewDurationMs={7000}
+        onConnect={handleConnect}
+        onSkip={handleSkip}
+      >
+        <CRMMockup />
+      </DemoPreview>
     </div>
   );
 }

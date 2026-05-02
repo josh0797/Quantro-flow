@@ -59,10 +59,11 @@ export function OnboardingProvider({ children }) {
     setState((s) => ({ ...s, start_choice: choice }));
   }, []);
 
-  const markStepConnected = useCallback((step, mode = 'simulated') => {
+  const markStepConnected = useCallback((step, mode = 'demo') => {
+    // mode: 'demo' (preview only, no real OAuth) | 'real' (OAuth completed)
     setState((s) => ({
       ...s,
-      [`${step}_connected`]: true,
+      [`${step}_connected`]: mode === 'real',
       [`${step}_skipped`]: false,
       [`${step}_connection_mode`]: mode,
     }));

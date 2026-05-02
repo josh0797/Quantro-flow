@@ -69,6 +69,14 @@ export default function StepReady() {
 
   const firstName = (user?.name || '').trim().split(' ')[0];
 
+  // Honest copy: differentiate "you have real connected data" vs "we
+  // gave you a polished demo seed". The brief mandates this split.
+  const hasAnyRealConnection =
+    state.inbox_connection_mode === 'real'
+    || state.calendar_connection_mode === 'real'
+    || state.crm_connection_mode === 'real'
+    || state.automations_connection_mode === 'real';
+
   const handleEnter = async () => {
     setAdvancing(true);
     try {
@@ -92,28 +100,53 @@ export default function StepReady() {
 
   return (
     <div className="flex flex-col items-center text-center" data-testid="step-ready-page">
-      <p className="text-xs uppercase tracking-[0.18em] text-[hsl(var(--primary))] mb-3" data-testid="step-ready-eyebrow">
-        {t('welcome.ready.eyebrow')}
+      <p
+        className={[
+          'text-xs uppercase tracking-[0.18em] mb-3',
+          hasAnyRealConnection ? 'text-[hsl(var(--primary))]' : 'text-muted-foreground',
+        ].join(' ')}
+        data-testid="step-ready-eyebrow"
+      >
+        {hasAnyRealConnection ? t('welcome.ready.eyebrow_real') : t('welcome.ready.eyebrow_demo')}
       </p>
       <h1
         className="font-display text-4xl md:text-6xl font-semibold tracking-tight mb-6 text-balance"
         data-testid="step-ready-title"
       >
-        {firstName
-          ? t('welcome.ready.title_with_name', { name: firstName })
-          : t('welcome.ready.title')}
+        {hasAnyRealConnection
+          ? (firstName
+              ? t('welcome.ready.title_real_with_name', { name: firstName })
+              : t('welcome.ready.title_real'))
+          : (firstName
+              ? t('welcome.ready.title_demo_with_name', { name: firstName })
+              : t('welcome.ready.title_demo'))}
       </h1>
       <p className="text-base md:text-lg text-muted-foreground max-w-xl mb-10 leading-relaxed text-balance">
-        {t('welcome.ready.subtitle')}
+        {hasAnyRealConnection ? t('welcome.ready.subtitle_real') : t('welcome.ready.subtitle_demo')}
       </p>
 
       <div
         className="w-full max-w-2xl rounded-2xl border border-[hsl(var(--primary)/0.25)] bg-[hsl(var(--primary)/0.04)] p-6 md:p-8 mb-10 text-left"
         data-testid="step-ready-counters"
       >
-        <p className="text-xs uppercase tracking-[0.16em] font-semibold text-[hsl(var(--primary))] mb-5">
-          {t('welcome.ready.detected_label')}
-        </p>
+        <div className="flex items-center justify-between mb-5">
+          <p className="text-xs uppercase tracking-[0.16em] font-semibold text-[hsl(var(--primary))]">
+            {t('welcome.ready.detected_label')}
+          </p>
+          {/* Honest mode badge so the user always knows what they're
+              looking at. Becomes "Datos reales" once Phase B lands. */}
+          <span
+            className={[
+              'inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] uppercase tracking-[0.16em] font-semibold border',
+              hasAnyRealConnection
+                ? 'bg-[hsl(var(--primary)/0.12)] text-[hsl(var(--primary))] border-[hsl(var(--primary)/0.30)]'
+                : 'bg-[hsl(var(--muted)/0.6)] text-muted-foreground border-[hsl(var(--border))]',
+            ].join(' ')}
+            data-testid="step-ready-mode-badge"
+          >
+            {hasAnyRealConnection ? t('welcome.preview.badge_real') : t('welcome.preview.badge_demo')}
+          </span>
+        </div>
         <ul className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4">
           <ReadyMetric label={t('welcome.ready.metric_conversations')} value={counters.conversations} testid="metric-conversations" />
           <ReadyMetric label={t('welcome.ready.metric_opportunities')} value={counters.opportunities} testid="metric-opportunities" />
@@ -133,6 +166,11 @@ export default function StepReady() {
         {t('welcome.ready.enter_cta')}
         <ArrowRight size={18} />
       </button>
+      {!hasAnyRealConnection && (
+        <p className="mt-5 text-xs text-muted-foreground max-w-md text-balance" data-testid="step-ready-demo-hint">
+          {t('welcome.ready.demo_hint')}
+        </p>
+      )}
     </div>
   );
 }
