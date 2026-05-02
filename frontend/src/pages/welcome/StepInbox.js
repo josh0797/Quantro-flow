@@ -6,15 +6,22 @@ import { useOnboarding } from './OnboardingContext';
 import DemoPreview from './components/DemoPreview';
 import InboxMockup from './components/InboxMockup';
 import { Mail } from 'lucide-react';
+import { startGoogleOAuth } from '../../lib/api';
 
 /**
- * Step 1 — Inbox. Preview → Connect pattern.
+ * Step 1 — Inbox. Preview → Connect pattern wired to the real Google
+ * OAuth flow. Click on Connect: we call /api/integrations/google/start,
+ * which returns a Google authorization URL. We hand the browser to
+ * Google (full-page redirect, NOT popup — popups break on Safari and
+ * lose context on mobile). After consent, Google bounces the user back
+ * to /api/integrations/google/callback which redirects to
+ * /welcome/inbox?google_connected=success&account=... — the
+ * OnboardingShell picks up that query param and triggers /sync, then
+ * marks connection_mode='real'.
  *
- *   1. Show InboxMockup for ~7s while phase lines fade in.
- *   2. Surface CTA pair: "Conectar con Google" / "Continuar con demo".
- *   3. Connect path is wired to start the Google OAuth flow once it
- *      lands; today it surfaces a transparent toast and falls back to
- *      demo mode (we never claim a connection that didn't happen).
+ * Failure paths (cancel, scope deny, network) come back with
+ * ?google_connected=error and we keep the user in demo mode without
+ * lying.
  */
 export default function StepInbox() {
   const { t } = useLanguage();
@@ -22,18 +29,26 @@ export default function StepInbox() {
   const navigate = useNavigate();
 
   const handleConnect = async () => {
-    // Real OAuth wiring lives in Phase B. Until those credentials land
-    // we explicitly tell the user the flow is upcoming and keep them
-    // in demo mode — honesty over fake "connected" badges.
-    toast.info(t('welcome.preview.real_pending_title'), {
-      description: t('welcome.preview.real_pending_desc'),
-    });
-    markStepConnected('inbox', 'demo');
-    window.setTimeout(() => navigate('/welcome/calendar'), 600);
+    try {
+      const { auth_url } = await startGoogleOAuth('/welcome/inbox');
+      if (!auth_url) throw new Error('no auth_url returned');
+      // Full-page redirect — onAuthStateChange / OnboardingShell will
+      // resume the flow once Google sends the user back.
+      window.location.href = auth_url;
+    } catch (err) {
+      // 503 = OAuth not configured server-side. We still let the user
+      // proceed in demo mode rather than blocking.
+      const detail = err?.response?.data?.detail;
+      const desc = typeof detail === 'string' ? detail : t('welcome.preview.real_pending_desc');
+      toast.error(t('welcome.preview.real_failed_title'), { description: desc });
+      markStepSkipped('inbox');
+      navigate('/welcome/calendar');
+    }
   };
 
   const handleSkip = () => {
     markStepSkipped('inbox');
+    markStepConnected('inbox', 'demo');
     navigate('/welcome/calendar');
   };
 

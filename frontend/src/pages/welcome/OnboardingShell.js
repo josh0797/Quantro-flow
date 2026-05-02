@@ -1,8 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Outlet, useLocation, useNavigate, Link } from 'react-router-dom';
+import { Outlet, useLocation, useNavigate, Link, useSearchParams } from 'react-router-dom';
+import { toast } from 'sonner';
 import { useAuth } from '../../contexts/AuthContext';
 import { useLanguage } from '../../context/LanguageContext';
-import { OnboardingProvider } from './OnboardingContext';
+import { OnboardingProvider, useOnboarding } from './OnboardingContext';
+import { syncGoogleData } from '../../lib/api';
 import { Zap, LogOut } from 'lucide-react';
 
 /**
@@ -54,6 +56,7 @@ export default function OnboardingShell() {
 
   return (
     <OnboardingProvider>
+      <GoogleCallbackHandler />
       <div
         className="min-h-screen w-full bg-background text-foreground relative overflow-hidden"
         data-testid="onboarding-shell"
@@ -126,4 +129,90 @@ export default function OnboardingShell() {
       </div>
     </OnboardingProvider>
   );
+}
+
+/**
+ * GoogleCallbackHandler — invisible companion that watches the URL for
+ * the ``?google_connected=success`` query string the OAuth callback
+ * appends. When it fires, it:
+ *
+ *   1. Triggers /api/integrations/google/sync to pull the user's real
+ *      mailbox + calendar into Mongo (last 50 / next 30 days).
+ *   2. Marks both the inbox and calendar steps with
+ *      connection_mode='real' so the Activación screen renders the
+ *      "Datos reales" badge instead of "Modo demo".
+ *   3. Cleans the query string so a refresh doesn't re-run the sync.
+ *   4. Navigates the user to the next pending step (CRM if they came
+ *      from inbox/calendar, else /welcome/ready) so the flow keeps
+ *      its forward momentum.
+ *
+ * Errors (?google_connected=error&reason=...) only show a toast and
+ * leave the user where they were — we never trap them.
+ */
+function GoogleCallbackHandler() {
+  const [params, setParams] = useSearchParams();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { t } = useLanguage();
+  const { markStepConnected } = useOnboarding();
+
+  useEffect(() => {
+    const status = params.get('google_connected');
+    if (!status) return;
+
+    // Strip the query params immediately so any re-render or refresh
+    // doesn't re-fire the side effects.
+    const nextParams = new URLSearchParams(params);
+    nextParams.delete('google_connected');
+    nextParams.delete('account');
+    nextParams.delete('return_to');
+    nextParams.delete('reason');
+    nextParams.delete('detail');
+    setParams(nextParams, { replace: true });
+
+    if (status === 'error') {
+      const reason = params.get('reason') || 'unknown';
+      toast.error(t('welcome.preview.real_failed_title'), { description: reason });
+      return;
+    }
+
+    if (status === 'success') {
+      const account = params.get('account') || '';
+      // Sync runs in the background — we don't block the user. If it
+      // fails we degrade to "real connection but no synced rows yet"
+      // and show a toast.
+      (async () => {
+        try {
+          const res = await syncGoogleData();
+          markStepConnected('inbox', 'real');
+          markStepConnected('calendar', 'real');
+          toast.success(t('welcome.preview.real_connected_title'), {
+            description: t('welcome.preview.real_synced_desc', {
+              account,
+              emails: res?.counts?.emails ?? 0,
+              events: res?.counts?.events ?? 0,
+            }),
+          });
+        } catch (err) {
+          markStepConnected('inbox', 'real');
+          markStepConnected('calendar', 'real');
+          toast.warning(t('welcome.preview.real_connected_no_sync_title'), {
+            description: err?.response?.data?.detail || t('welcome.preview.real_connected_no_sync_desc'),
+          });
+        } finally {
+          // Forward to the natural next step.
+          const here = location.pathname;
+          if (here.endsWith('/inbox') || here === '/welcome' || here.endsWith('/welcome/inbox')) {
+            navigate('/welcome/calendar', { replace: true });
+          } else if (here.endsWith('/calendar')) {
+            navigate('/welcome/crm', { replace: true });
+          }
+          // Otherwise leave the user where they are.
+        }
+      })();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params.get('google_connected')]);
+
+  return null;
 }

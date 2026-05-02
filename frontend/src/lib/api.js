@@ -107,6 +107,19 @@ export const renameWorkspace = (workspace_id, name) =>
 export const completeWelcomeOnboarding = (payload) =>
   api.post('/onboarding/welcome/complete', payload).then(r => r.data);
 
+// Google OAuth (Gmail + Calendar) — Phase 7e
+export const getGoogleIntegrationStatus = () =>
+  api.get('/integrations/google/status').then(r => r.data);
+
+export const startGoogleOAuth = (return_to = '/welcome/inbox') =>
+  api.get('/integrations/google/start', { params: { return_to } }).then(r => r.data);
+
+export const syncGoogleData = () =>
+  api.post('/integrations/google/sync').then(r => r.data);
+
+export const disconnectGoogle = () =>
+  api.delete('/integrations/google/disconnect').then(r => r.data);
+
 // Audit export — returns the raw Blob so callers can trigger a download.
 // Accepts { format: 'csv'|'json', start_date, end_date, action }.
 export const exportAuditLog = (workspace_id, params = {}) =>

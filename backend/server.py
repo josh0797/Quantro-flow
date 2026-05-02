@@ -14,7 +14,7 @@ import httpx
 import jwt as pyjwt
 from jwt import PyJWKClient, InvalidTokenError, ExpiredSignatureError
 from fastapi import FastAPI, HTTPException, Query, Request, Response, Depends
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
@@ -82,6 +82,9 @@ workspaces_col = db["workspaces"]
 workspace_members_col = db["workspace_members"]
 workspace_invites_col = db["workspace_invites"]
 audit_log_col = db["audit_log"]
+# Phase 7e — Google OAuth (Gmail + Calendar)
+google_integrations_col = db["google_integrations"]
+google_oauth_state_col = db["google_oauth_state"]
 
 # The workspace_id used by pre-auth seed + backfill. The first user to
 # log in claims this workspace (rename + become Owner). Subsequent users
@@ -4718,6 +4721,404 @@ async def simulation_status(workspace_id: str = Depends(get_current_workspace_id
         "data_counts": counts,
         "has_data": sum(counts.values()) > 0
     }
+
+
+# ─── Google OAuth — Gmail + Calendar (Phase 7e) ───────────────────────
+import google_oauth as goog
+
+
+def _google_status_doc(workspace_id: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+    """Tiny synchronous wrapper to compose a JSON-friendly status. The
+    actual DB lookup happens in the route handler so we can stay
+    awaitable."""
+    return {"workspace_id": workspace_id, "user_id": user_id, "connected": False}
+
+
+@app.get("/api/integrations/google/status")
+async def google_integration_status(
+    workspace_id: str = Depends(get_current_workspace_id),
+    user: User = Depends(get_current_user),
+):
+    """Return whether the active workspace has a usable Google
+    connection. The frontend uses this on the inbox/calendar steps to
+    decide whether to render `Datos reales` or stay in demo mode."""
+    if not goog.is_oauth_configured():
+        return {"configured": False, "connected": False}
+    doc = await google_integrations_col.find_one(
+        {"workspace_id": workspace_id},
+        {"_id": 0, "account_email": 1, "scopes": 1, "connected_at": 1, "last_sync_at": 1, "expires_at": 1},
+    )
+    if not doc:
+        return {"configured": True, "connected": False}
+    return {
+        "configured": True,
+        "connected": True,
+        "account_email": doc.get("account_email"),
+        "scopes": doc.get("scopes") or [],
+        "connected_at": doc.get("connected_at"),
+        "last_sync_at": doc.get("last_sync_at"),
+    }
+
+
+@app.get("/api/integrations/google/start")
+async def google_oauth_start(
+    request: Request,
+    return_to: Optional[str] = None,
+    workspace_id: str = Depends(get_current_workspace_id),
+    user: User = Depends(get_current_user),
+):
+    """Kick off the Authorization Code Flow.
+
+    The frontend hits this with a Bearer token (so we know the
+    workspace+user) and then sends the user's browser to ``auth_url``.
+    We persist a short-lived state document tying the random ``state``
+    to the user, so the callback can verify nothing was tampered with.
+    """
+    if not goog.is_oauth_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Google OAuth is not configured. Set GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET in backend/.env.",
+        )
+
+    base_url = str(request.base_url).rstrip("/")
+    redirect_uri = goog.resolve_redirect_uri(base_url)
+    state = uuid.uuid4().hex
+
+    await google_oauth_state_col.insert_one(
+        {
+            "state": state,
+            "user_id": user.user_id,
+            "workspace_id": workspace_id,
+            "return_to": return_to or "/welcome/inbox",
+            "redirect_uri": redirect_uri,
+            "created_at": datetime.now(timezone.utc),
+            # State documents auto-expire after 10 min via TTL index
+            # configured at startup (see google_oauth_state_col below).
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
+        }
+    )
+
+    auth_url = goog.build_authorization_url(state=state, redirect_uri=redirect_uri)
+    return {"auth_url": auth_url, "state": state}
+
+
+def _frontend_url_from(request: Request) -> str:
+    """Best-effort guess of the frontend origin so the callback can
+    bounce the browser back. Prefers the Origin/Referer headers, falls
+    back to REACT_APP_BACKEND_URL because in this preview environment
+    the same host serves both."""
+    origin = request.headers.get("origin") or request.headers.get("referer")
+    if origin:
+        # Strip path/query if it's a referer.
+        from urllib.parse import urlparse
+
+        p = urlparse(origin)
+        return f"{p.scheme}://{p.netloc}"
+    return (os.environ.get("REACT_APP_BACKEND_URL") or "").rstrip("/")
+
+
+@app.get("/api/integrations/google/callback")
+async def google_oauth_callback(
+    request: Request,
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+):
+    """Handle Google's redirect.
+
+    On success we persist encrypted tokens + the user's Google email,
+    then redirect the browser back to the frontend with
+    ``?google_connected=success&account=<email>``. On any failure we
+    redirect with ``?google_connected=error&reason=<short>`` so the UI
+    can keep the user in demo mode without throwing.
+    """
+    fe = _frontend_url_from(request) or ""
+    base_redirect = (fe or "").rstrip("/")
+
+    def _bounce(qs: str) -> RedirectResponse:
+        target = (base_redirect or "") + "/welcome/inbox" + ("?" + qs if qs else "")
+        return RedirectResponse(url=target, status_code=303)
+
+    if error:
+        return _bounce(f"google_connected=error&reason={error}")
+    if not code or not state:
+        return _bounce("google_connected=error&reason=missing_code_or_state")
+
+    state_doc = await google_oauth_state_col.find_one_and_delete({"state": state})
+    if not state_doc:
+        return _bounce("google_connected=error&reason=invalid_state")
+
+    expires = state_doc.get("expires_at")
+    if isinstance(expires, datetime) and expires.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+        return _bounce("google_connected=error&reason=state_expired")
+
+    redirect_uri = state_doc.get("redirect_uri") or goog.resolve_redirect_uri(str(request.base_url))
+    workspace_id = state_doc.get("workspace_id")
+    user_id = state_doc.get("user_id")
+    return_to = state_doc.get("return_to") or "/welcome/inbox"
+
+    try:
+        creds, profile = goog.exchange_code_for_tokens(code, redirect_uri)
+    except Exception as exc:  # noqa: BLE001
+        return _bounce(f"google_connected=error&reason=exchange_failed&detail={str(exc)[:80]}")
+
+    expires_at = creds.expiry
+    if isinstance(expires_at, datetime) and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+    await google_integrations_col.update_one(
+        {"workspace_id": workspace_id},
+        {
+            "$set": {
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "access_token": goog.encrypt_token(creds.token),
+                "refresh_token": goog.encrypt_token(creds.refresh_token),
+                "expires_at": expires_at,
+                "scopes": list(creds.scopes or goog.GOOGLE_SCOPES),
+                "account_email": (profile or {}).get("email"),
+                "account_name": (profile or {}).get("name"),
+                "google_user_id": (profile or {}).get("google_user_id"),
+                "connected_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }
+        },
+        upsert=True,
+    )
+
+    try:
+        await log_audit(
+            "integration.google_connected",
+            f"Google account connected ({(profile or {}).get('email') or 'unknown'})",
+            user_id=user_id,
+            workspace_id=workspace_id,
+            metadata={"scopes": list(creds.scopes or [])[:8]},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    qs = f"google_connected=success&account={(profile or {}).get('email') or ''}&return_to={return_to}"
+    return _bounce(qs)
+
+
+async def _load_google_credentials(workspace_id: str):
+    """Decrypt + auto-refresh credentials for a workspace, persisting
+    rotated tokens. Returns ``(creds, integration_doc)`` or
+    ``(None, None)`` if the workspace isn't connected."""
+    doc = await google_integrations_col.find_one({"workspace_id": workspace_id})
+    if not doc:
+        return None, None
+    access_token = goog.decrypt_token(doc.get("access_token"))
+    refresh_token = goog.decrypt_token(doc.get("refresh_token"))
+    if not access_token:
+        return None, None
+    creds = goog.credentials_from_tokens(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_at=doc.get("expires_at"),
+        scopes=doc.get("scopes"),
+    )
+    if goog.maybe_refresh(creds):
+        # Persist the rotated access token + new expiry. Refresh tokens
+        # rarely change but we still re-encrypt to be safe.
+        new_expiry = creds.expiry
+        if isinstance(new_expiry, datetime) and new_expiry.tzinfo is None:
+            new_expiry = new_expiry.replace(tzinfo=timezone.utc)
+        await google_integrations_col.update_one(
+            {"workspace_id": workspace_id},
+            {
+                "$set": {
+                    "access_token": goog.encrypt_token(creds.token),
+                    "refresh_token": goog.encrypt_token(creds.refresh_token) or doc.get("refresh_token"),
+                    "expires_at": new_expiry,
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            },
+        )
+    return creds, doc
+
+
+@app.post("/api/integrations/google/sync")
+async def google_oauth_sync(
+    workspace_id: str = Depends(get_current_workspace_id),
+    user: User = Depends(get_current_user),
+):
+    """Pull last 50 Gmail messages + next 30 days of Calendar events.
+
+    We persist the rows alongside the simulation seed so existing
+    inbox/calendar UIs work unmodified — but tag them ``is_real=True``
+    so the rest of the app can hide simulation rows once real data
+    lands."""
+    creds, doc = await _load_google_credentials(workspace_id)
+    if not creds:
+        raise HTTPException(status_code=400, detail="Google not connected for this workspace")
+
+    counts = {"emails": 0, "events": 0}
+
+    try:
+        emails = goog.fetch_recent_gmail(creds, limit=50)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Gmail fetch failed: {exc}") from exc
+
+    now = datetime.now(timezone.utc)
+    for m in emails:
+        # Idempotent upsert keyed by gmail_id so repeat syncs don't
+        # duplicate inbox rows.
+        await inbox_col.update_one(
+            {"workspace_id": workspace_id, "gmail_id": m["gmail_id"]},
+            {
+                "$set": {
+                    "workspace_id": workspace_id,
+                    "source": "gmail",
+                    "gmail_id": m["gmail_id"],
+                    "thread_id": m["thread_id"],
+                    "from_name": m["from_name"],
+                    "from_address": m["from_address"],
+                    "subject": m["subject"],
+                    "preview": m["snippet"],
+                    "received_at": m["date_iso"],
+                    "label_ids": m["label_ids"],
+                    "is_real": True,
+                    "is_simulation": False,
+                    "synced_at": now,
+                },
+                "$setOnInsert": {
+                    "id": str(uuid.uuid4()),
+                    "status": "new",
+                    "priority": "medium",
+                    "created_at": now,
+                },
+            },
+            upsert=True,
+        )
+        counts["emails"] += 1
+
+    try:
+        events = goog.fetch_upcoming_calendar(creds, days=30)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Calendar fetch failed: {exc}") from exc
+
+    for ev in events:
+        await calendar_col.update_one(
+            {"workspace_id": workspace_id, "gcal_id": ev["gcal_id"]},
+            {
+                "$set": {
+                    "workspace_id": workspace_id,
+                    "source": "google_calendar",
+                    "gcal_id": ev["gcal_id"],
+                    "title": ev["title"],
+                    "description": ev["description"],
+                    "location": ev["location"],
+                    "start": ev["start_iso"],
+                    "end": ev["end_iso"],
+                    "attendees": ev["attendees"],
+                    "html_link": ev["html_link"],
+                    "status": ev["status"],
+                    "is_real": True,
+                    "is_simulation": False,
+                    "synced_at": now,
+                },
+                "$setOnInsert": {
+                    "id": str(uuid.uuid4()),
+                    "created_at": now,
+                },
+            },
+            upsert=True,
+        )
+        counts["events"] += 1
+
+    # Once we have real data, retire the demo seed for this workspace so
+    # the UI never mixes the two. We mark them rather than deleting in
+    # case the user wants to disconnect and roll back.
+    await inbox_col.update_many(
+        {"workspace_id": workspace_id, "is_simulation": True},
+        {"$set": {"hidden_by_real": True}},
+    )
+    await calendar_col.update_many(
+        {"workspace_id": workspace_id, "is_simulation": True},
+        {"$set": {"hidden_by_real": True}},
+    )
+
+    # Flip simulation_mode off — we have real data now.
+    await business_profile_col.update_one(
+        {"workspace_id": workspace_id},
+        {"$set": {"simulation_mode": False, "updated_at": now_iso()}},
+        upsert=True,
+    )
+
+    await google_integrations_col.update_one(
+        {"workspace_id": workspace_id},
+        {"$set": {"last_sync_at": now}},
+    )
+    try:
+        await log_audit(
+            "integration.google_synced",
+            f"Synced Google data ({counts['emails']} emails, {counts['events']} events)",
+            user_id=user.user_id,
+            workspace_id=workspace_id,
+            metadata=counts,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    return {"success": True, "counts": counts, "synced_at": now.isoformat()}
+
+
+@app.delete("/api/integrations/google/disconnect")
+async def google_oauth_disconnect(
+    workspace_id: str = Depends(get_current_workspace_id),
+    user: User = Depends(get_current_user),
+):
+    """Revoke tokens at Google + delete locally + restore demo seed.
+
+    Disconnecting un-hides the simulation rows so the workspace doesn't
+    end up with an empty inbox/calendar, and re-enables simulation_mode
+    so the UI returns to demo state cleanly.
+    """
+    doc = await google_integrations_col.find_one({"workspace_id": workspace_id})
+    if not doc:
+        return {"success": True, "already": "disconnected"}
+
+    refresh = goog.decrypt_token(doc.get("refresh_token"))
+    access = goog.decrypt_token(doc.get("access_token"))
+    if refresh:
+        goog.revoke_token(refresh)
+    elif access:
+        goog.revoke_token(access)
+
+    await google_integrations_col.delete_one({"workspace_id": workspace_id})
+
+    # Wipe any rows we synced from Google so the user doesn't see stale
+    # data after disconnecting.
+    await inbox_col.delete_many({"workspace_id": workspace_id, "is_real": True, "source": "gmail"})
+    await calendar_col.delete_many({"workspace_id": workspace_id, "is_real": True, "source": "google_calendar"})
+
+    # Bring the demo seed back online.
+    await inbox_col.update_many(
+        {"workspace_id": workspace_id, "is_simulation": True},
+        {"$unset": {"hidden_by_real": ""}},
+    )
+    await calendar_col.update_many(
+        {"workspace_id": workspace_id, "is_simulation": True},
+        {"$unset": {"hidden_by_real": ""}},
+    )
+    await business_profile_col.update_one(
+        {"workspace_id": workspace_id},
+        {"$set": {"simulation_mode": True, "updated_at": now_iso()}},
+        upsert=True,
+    )
+
+    try:
+        await log_audit(
+            "integration.google_disconnected",
+            f"Google disconnected ({(doc or {}).get('account_email') or 'unknown'})",
+            user_id=user.user_id,
+            workspace_id=workspace_id,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    return {"success": True}
 
 
 # ─── Welcome onboarding (Phase 7d) ────────────────────────────────────

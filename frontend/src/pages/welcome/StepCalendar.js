@@ -6,6 +6,7 @@ import { useOnboarding } from './OnboardingContext';
 import DemoPreview from './components/DemoPreview';
 import CalendarMockup from './components/CalendarMockup';
 import { CalendarDays } from 'lucide-react';
+import { startGoogleOAuth, getGoogleIntegrationStatus } from '../../lib/api';
 
 export default function StepCalendar() {
   const { t } = useLanguage();
@@ -13,15 +14,39 @@ export default function StepCalendar() {
   const navigate = useNavigate();
 
   const handleConnect = async () => {
-    toast.info(t('welcome.preview.real_pending_title'), {
-      description: t('welcome.preview.real_pending_desc'),
-    });
-    markStepConnected('calendar', 'demo');
-    window.setTimeout(() => navigate('/welcome/crm'), 600);
+    // If the user already linked Google in StepInbox, we don't need to
+    // run OAuth again — Calendar scope was granted in the same consent.
+    // Just mark this step as real-connected and advance.
+    try {
+      const status = await getGoogleIntegrationStatus();
+      if (status?.connected) {
+        markStepConnected('calendar', 'real');
+        toast.success(t('welcome.calendar.already_connected_title'), {
+          description: t('welcome.calendar.already_connected_desc', { account: status.account_email || 'Google' }),
+        });
+        navigate('/welcome/crm');
+        return;
+      }
+    } catch {
+      /* If status fails we still try the full OAuth, no harm done */
+    }
+
+    try {
+      const { auth_url } = await startGoogleOAuth('/welcome/calendar');
+      if (!auth_url) throw new Error('no auth_url returned');
+      window.location.href = auth_url;
+    } catch (err) {
+      const detail = err?.response?.data?.detail;
+      const desc = typeof detail === 'string' ? detail : t('welcome.preview.real_pending_desc');
+      toast.error(t('welcome.preview.real_failed_title'), { description: desc });
+      markStepSkipped('calendar');
+      navigate('/welcome/crm');
+    }
   };
 
   const handleSkip = () => {
     markStepSkipped('calendar');
+    markStepConnected('calendar', 'demo');
     navigate('/welcome/crm');
   };
 

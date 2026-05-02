@@ -98,6 +98,58 @@
   - Dual-write seguirá activo hacia Mongo para backward compatibility
 - ⏭️ Next: **Phase 7d roadmap** — refactor cyclomatic complexity + split de pages grandes
 
+## Phase 7e — Google OAuth Real (en progreso)
+
+### ✅ Implementado
+- **`/app/backend/google_oauth.py`** — módulo aislado con:
+  - Encriptación Fernet (AES-128-CBC + HMAC) para access/refresh tokens en reposo
+  - `build_authorization_url`, `exchange_code_for_tokens`, `credentials_from_tokens`, `maybe_refresh`
+  - Auto-refresh transparente (rota access token cuando faltan <60s para expirar)
+  - Helpers de fetch: `fetch_recent_gmail(limit=50)`, `fetch_upcoming_calendar(days=30)`, `revoke_token`
+  - `is_oauth_configured()` + `resolve_redirect_uri()` para fallar limpio cuando falten credenciales
+- **4 endpoints REST** (`/api/integrations/google/*`):
+  - `GET /status` — dice si el workspace tiene una conexión activa + email + scopes + last_sync_at
+  - `GET /start?return_to=` — genera state UUID, lo persiste con TTL 10min y devuelve `auth_url` para redirect
+  - `GET /callback?code&state` — valida state, intercambia code por tokens, encripta y persiste, hace audit log, redirige a `<frontend>/welcome/inbox?google_connected=success&account=...`
+  - `POST /sync` — pulls 50 últimos Gmail + 30 días Calendar, upsert idempotente, marca `is_real=true` en inbox/calendar, oculta los seeds simulation, flipea `simulation_mode=False`
+  - `DELETE /disconnect` — revoca tokens en Google + borra DB + restaura seed simulation
+- **Frontend** (`StepInbox`, `StepCalendar`, `OnboardingShell`):
+  - Click en "Conectar con Google" → llamada real a `/start` → `window.location.href = auth_url` (full-page redirect, no popup)
+  - `<GoogleCallbackHandler>` invisible dentro de `<OnboardingProvider>` detecta `?google_connected=success`, dispara `/sync`, marca `connection_mode='real'` y limpia query string
+  - Step Calendar fast-path: si Google ya está conectado en este workspace, salta directo sin reconsentir (mismo OAuth cubre ambos scopes)
+  - Toast diferenciado: `real_connected_title` (success), `real_failed_title` (error), `real_connected_no_sync_title` (link OK pero sync falló)
+- **Seguridad**:
+  - Tokens encriptados en reposo con Fernet (clave `GOOGLE_TOKENS_ENCRYPTION_KEY` ya generada y persistida en `/app/backend/.env`)
+  - Estado OAuth con TTL 10min para prevenir replay attacks
+  - `find_one_and_delete` del state: cada state se usa exactamente una vez
+  - Refresh token rotation: si Google rota el refresh token al refrescar el access, persistimos el nuevo
+  - Revocación bidireccional: disconnect llama a Google `/revoke` antes de borrar localmente
+
+### ⚠️ Pendiente del lado del usuario (one-off)
+
+Para activar la conexión real, configurar **una sola vez** en Google Cloud Console:
+
+1. Crear/elegir proyecto en https://console.cloud.google.com
+2. Habilitar **Gmail API** + **Google Calendar API** desde Library
+3. Configurar **OAuth consent screen** (External): app name `Quantro Flow`, scopes `openid + email + profile + gmail.readonly + calendar.readonly`, agregar test users
+4. Crear **OAuth 2.0 Client ID** (Web application):
+   - Authorized JavaScript origin: `https://quantro-os.preview.emergentagent.com`
+   - Authorized redirect URI: `https://quantro-os.preview.emergentagent.com/api/integrations/google/callback`
+5. Copiar `Client ID` + `Client Secret` y pegarlos en `/app/backend/.env`:
+   ```
+   GOOGLE_CLIENT_ID=<el client_id>
+   GOOGLE_CLIENT_SECRET=<el client_secret>
+   ```
+6. Reiniciar backend: `sudo supervisorctl restart backend`
+
+A partir de ese momento, todo usuario que haga click en **Conectar con Google** dentro del Welcome flow va a hacer OAuth real, sus emails y eventos van a aparecer en Smart Inbox y Schedule, y la pantalla Ready va a mostrar `Datos reales` cyan.
+
+### ⏭️ Phase 7e remaining
+- Banner persistente en Smart Inbox / Schedule diferenciando "Datos reales" vs "Modo demo"
+- UI en Settings → Integrations para reconectar / desconectar Google manualmente (post-onboarding)
+- Sync periódico en background (cron job o scheduler) cada 15 min para mantener datos frescos
+- Soporte multi-provider (Outlook, Yahoo, IMAP genérico) — sesiones siguientes
+
 ---
 
 ## 2. Implementation Steps
