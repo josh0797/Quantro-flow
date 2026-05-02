@@ -1,46 +1,57 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { useLanguage } from '../../context/LanguageContext';
 import { useOnboarding } from './OnboardingContext';
 import DemoPreview from './components/DemoPreview';
 import CalendarMockup from './components/CalendarMockup';
+import ProviderConnectModal from './components/ProviderConnectModal';
 import { CalendarDays } from 'lucide-react';
-import { startGoogleOAuth, getGoogleIntegrationStatus } from '../../lib/api';
+import { getGoogleIntegrationStatus, getMicrosoftIntegrationStatus } from '../../lib/api';
 
 export default function StepCalendar() {
   const { t } = useLanguage();
   const { markStepConnected, markStepSkipped } = useOnboarding();
   const navigate = useNavigate();
+  const [pickerOpen, setPickerOpen] = useState(false);
 
+  // If either Google or Microsoft is already connected from StepInbox
+  // (the OAuth scopes for Mail include Calendar in both providers),
+  // we don't bother running OAuth again — just mark the step real and
+  // advance.
   const handleConnect = async () => {
-    // If the user already linked Google in StepInbox, we don't need to
-    // run OAuth again — Calendar scope was granted in the same consent.
-    // Just mark this step as real-connected and advance.
     try {
-      const status = await getGoogleIntegrationStatus();
-      if (status?.connected) {
+      const [g, m] = await Promise.all([
+        getGoogleIntegrationStatus().catch(() => null),
+        getMicrosoftIntegrationStatus().catch(() => null),
+      ]);
+      const alreadyConnected = g?.connected || m?.connected;
+      if (alreadyConnected) {
+        const account = g?.connected ? (g.account_email || 'Google') : (m?.account_email || 'Microsoft');
         markStepConnected('calendar', 'real');
         toast.success(t('welcome.calendar.already_connected_title'), {
-          description: t('welcome.calendar.already_connected_desc', { account: status.account_email || 'Google' }),
+          description: t('welcome.calendar.already_connected_desc', { account }),
         });
         navigate('/welcome/crm');
         return;
       }
     } catch {
-      /* If status fails we still try the full OAuth, no harm done */
+      /* status calls failed — fall through and let the user pick. */
     }
 
-    try {
-      const { auth_url } = await startGoogleOAuth('/welcome/calendar');
-      if (!auth_url) throw new Error('no auth_url returned');
-      window.location.href = auth_url;
-    } catch (err) {
-      const detail = err?.response?.data?.detail;
-      const desc = typeof detail === 'string' ? detail : t('welcome.preview.real_pending_desc');
-      toast.error(t('welcome.preview.real_failed_title'), { description: desc });
-      markStepSkipped('calendar');
-      navigate('/welcome/crm');
+    // Open picker. Promise stays pending so DemoPreview keeps its
+    // 'connecting' spinner while the user decides.
+    return new Promise((resolve) => {
+      setPickerOpen(true);
+      window.__quantroPickerResolve = resolve;
+    });
+  };
+
+  const handleOpenChange = (open) => {
+    setPickerOpen(open);
+    if (!open) {
+      window.__quantroPickerResolve?.();
+      window.__quantroPickerResolve = null;
     }
   };
 
@@ -79,6 +90,13 @@ export default function StepCalendar() {
       >
         <CalendarMockup />
       </DemoPreview>
+
+      <ProviderConnectModal
+        open={pickerOpen}
+        onOpenChange={handleOpenChange}
+        step="calendar"
+        returnTo="/welcome/calendar"
+      />
     </div>
   );
 }

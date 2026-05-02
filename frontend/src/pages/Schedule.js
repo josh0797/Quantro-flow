@@ -16,6 +16,7 @@ import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 import { getEntityLabel, getIndustryConfig } from '../config/industryConfig';
 import { useLanguage } from '../context/LanguageContext';
 import LiveEmptyState from '../components/LiveEmptyState';
+import DataModeBanner from '../components/DataModeBanner';
 
 export default function Schedule() {
   const { profile } = useBusinessProfile();
@@ -160,6 +161,10 @@ export default function Schedule() {
 
   return (
     <div className="page-container relative z-[1]">
+      {/* Persistent honesty banner — surfaces "Modo demo / Datos
+          reales" with a one-tap connect for /welcome/calendar. */}
+      <DataModeBanner module="schedule" />
+
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="font-display text-2xl font-semibold tracking-tight">{meetingsLabel}</h1>

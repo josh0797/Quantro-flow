@@ -1,22 +1,46 @@
 [
   {
-    "content": "Phase 7e.1 — Sync periódico Google: scheduler asyncio cada 15min + flag auto_sync_paused + endpoint toggle + UI minimal en Welcome shell",
+    "content": "Crear componente ProviderConnectModal (modal Google/Microsoft) reutilizable",
+    "status": "completed"
+  },
+  {
+    "content": "Actualizar StepInbox.js para usar el modal en handleConnect",
+    "status": "completed"
+  },
+  {
+    "content": "Actualizar StepCalendar.js para usar el modal en handleConnect",
+    "status": "completed"
+  },
+  {
+    "content": "Extender OnboardingShell.js para manejar también ?microsoft_connected",
+    "status": "completed"
+  },
+  {
+    "content": "Añadir traducciones ES/EN para el modal y los nuevos estados",
+    "status": "completed"
+  },
+  {
+    "content": "Verificar compilación frontend (esbuild) y reiniciar servicio",
+    "status": "completed"
+  },
+  {
+    "content": "Localizar SmartInbox y Schedule en frontend e identificar punto de inserción",
+    "status": "completed"
+  },
+  {
+    "content": "Crear DataModeBanner componente reutilizable",
+    "status": "completed"
+  },
+  {
+    "content": "Integrar banner en SmartInbox y Schedule",
+    "status": "completed"
+  },
+  {
+    "content": "Añadir traducciones ES/EN para el banner",
+    "status": "completed"
+  },
+  {
+    "content": "Tests backend con testing agent (endpoints integrations + sync)",
     "status": "in_progress"
-  },
-  {
-    "content": "Phase 7e.2 — Microsoft Outlook OAuth: módulo microsoft_oauth.py con MSAL + 4 endpoints (start/callback/sync/disconnect) + status",
-    "status": "pending"
-  },
-  {
-    "content": "Phase 7e.2 — Frontend: provider picker en StepInbox (Google + Outlook) + callback handler genérico",
-    "status": "pending"
-  },
-  {
-    "content": "Phase 7e.2 — Variables .env + documentación Azure AD para usuario",
-    "status": "pending"
-  },
-  {
-    "content": "Lints + restart + plan.md update",
-    "status": "pending"
   }
 ]

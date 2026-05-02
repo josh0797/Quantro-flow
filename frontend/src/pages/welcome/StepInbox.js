@@ -1,48 +1,51 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { toast } from 'sonner';
 import { useLanguage } from '../../context/LanguageContext';
 import { useOnboarding } from './OnboardingContext';
 import DemoPreview from './components/DemoPreview';
 import InboxMockup from './components/InboxMockup';
+import ProviderConnectModal from './components/ProviderConnectModal';
 import { Mail } from 'lucide-react';
-import { startGoogleOAuth } from '../../lib/api';
 
 /**
- * Step 1 — Inbox. Preview → Connect pattern wired to the real Google
- * OAuth flow. Click on Connect: we call /api/integrations/google/start,
- * which returns a Google authorization URL. We hand the browser to
- * Google (full-page redirect, NOT popup — popups break on Safari and
- * lose context on mobile). After consent, Google bounces the user back
- * to /api/integrations/google/callback which redirects to
- * /welcome/inbox?google_connected=success&account=... — the
- * OnboardingShell picks up that query param and triggers /sync, then
- * marks connection_mode='real'.
+ * Step 1 — Inbox. Preview → Connect, multi-provider edition.
  *
- * Failure paths (cancel, scope deny, network) come back with
- * ?google_connected=error and we keep the user in demo mode without
- * lying.
+ * The CTA "Conectar" no longer redirects directly to Google. It opens
+ * a small modal where the user can pick Google (Gmail) or Microsoft
+ * (Outlook). The actual OAuth bootstrap lives inside
+ * <ProviderConnectModal /> — once the user picks a provider we do a
+ * full-page redirect to the consent screen. The provider callback
+ * bounces back with ?<provider>_connected=success and the
+ * <OnboardingShell /> picks it up to run the sync.
+ *
+ * Skip path: marks the step as demo, advances to /welcome/calendar.
  */
 export default function StepInbox() {
   const { t } = useLanguage();
   const { markStepConnected, markStepSkipped } = useOnboarding();
   const navigate = useNavigate();
+  const [pickerOpen, setPickerOpen] = useState(false);
 
-  const handleConnect = async () => {
-    try {
-      const { auth_url } = await startGoogleOAuth('/welcome/inbox');
-      if (!auth_url) throw new Error('no auth_url returned');
-      // Full-page redirect — onAuthStateChange / OnboardingShell will
-      // resume the flow once Google sends the user back.
-      window.location.href = auth_url;
-    } catch (err) {
-      // 503 = OAuth not configured server-side. We still let the user
-      // proceed in demo mode rather than blocking.
-      const detail = err?.response?.data?.detail;
-      const desc = typeof detail === 'string' ? detail : t('welcome.preview.real_pending_desc');
-      toast.error(t('welcome.preview.real_failed_title'), { description: desc });
-      markStepSkipped('inbox');
-      navigate('/welcome/calendar');
+  // Note: DemoPreview's onConnect awaits the returned promise. Resolving
+  // *before* the redirect happens would put DemoPreview back into
+  // 'decision' stage; instead we keep the promise pending so the spinner
+  // remains until the browser actually navigates. If the user closes
+  // the modal we resolve manually so DemoPreview returns to its
+  // decision state.
+  const handleConnect = () => {
+    return new Promise((resolve) => {
+      setPickerOpen(true);
+      // Stash resolver on the window so we can call it from the
+      // onOpenChange handler without prop-drilling.
+      window.__quantroPickerResolve = resolve;
+    });
+  };
+
+  const handleOpenChange = (open) => {
+    setPickerOpen(open);
+    if (!open) {
+      window.__quantroPickerResolve?.();
+      window.__quantroPickerResolve = null;
     }
   };
 
@@ -81,6 +84,13 @@ export default function StepInbox() {
       >
         <InboxMockup />
       </DemoPreview>
+
+      <ProviderConnectModal
+        open={pickerOpen}
+        onOpenChange={handleOpenChange}
+        step="inbox"
+        returnTo="/welcome/inbox"
+      />
     </div>
   );
 }

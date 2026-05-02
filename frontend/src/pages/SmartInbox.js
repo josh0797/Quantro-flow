@@ -28,6 +28,7 @@ import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 import { getEntityLabel } from '../config/industryConfig';
 import { useLanguage } from '../context/LanguageContext';
 import LiveEmptyState from '../components/LiveEmptyState';
+import DataModeBanner from '../components/DataModeBanner';
 
 // Human-friendly intent labels (no AI jargon)
 const intentConfig = {
@@ -293,6 +294,11 @@ export default function SmartInbox() {
 
   return (
     <div className="page-container relative z-[1]">
+      {/* Persistent honesty banner — tells the user whether they're
+          looking at real data or demo data, with a one-tap path to
+          connect their inbox. */}
+      <DataModeBanner module="inbox" />
+
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div>

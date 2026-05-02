@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 import { useAuth } from '../../contexts/AuthContext';
 import { useLanguage } from '../../context/LanguageContext';
 import { OnboardingProvider, useOnboarding } from './OnboardingContext';
-import { syncGoogleData } from '../../lib/api';
+import { syncGoogleData, syncMicrosoftData } from '../../lib/api';
 import { Zap, LogOut } from 'lucide-react';
 
 /**
@@ -56,7 +56,7 @@ export default function OnboardingShell() {
 
   return (
     <OnboardingProvider>
-      <GoogleCallbackHandler />
+      <ProviderCallbackHandler />
       <div
         className="min-h-screen w-full bg-background text-foreground relative overflow-hidden"
         data-testid="onboarding-shell"
@@ -132,12 +132,12 @@ export default function OnboardingShell() {
 }
 
 /**
- * GoogleCallbackHandler — invisible companion that watches the URL for
- * the ``?google_connected=success`` query string the OAuth callback
- * appends. When it fires, it:
+ * ProviderCallbackHandler — invisible companion that watches the URL
+ * for the ?google_connected=success or ?microsoft_connected=success
+ * query string a provider OAuth callback appends. When it fires, it:
  *
- *   1. Triggers /api/integrations/google/sync to pull the user's real
- *      mailbox + calendar into Mongo (last 50 / next 30 days).
+ *   1. Triggers /api/integrations/<provider>/sync to pull the user's
+ *      real mailbox + calendar (last 50 / next 30 days).
  *   2. Marks both the inbox and calendar steps with
  *      connection_mode='real' so the Activación screen renders the
  *      "Datos reales" badge instead of "Modo demo".
@@ -146,24 +146,32 @@ export default function OnboardingShell() {
  *      from inbox/calendar, else /welcome/ready) so the flow keeps
  *      its forward momentum.
  *
- * Errors (?google_connected=error&reason=...) only show a toast and
- * leave the user where they were — we never trap them.
+ * Errors (?<provider>_connected=error&reason=...) only show a toast
+ * and leave the user where they were — we never trap them.
  */
-function GoogleCallbackHandler() {
+function ProviderCallbackHandler() {
   const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useLanguage();
   const { markStepConnected } = useOnboarding();
 
+  // Detect which provider (if any) just bounced the user back. Order
+  // matters: if both are present (shouldn't happen, but defensive),
+  // we honour Google first.
+  const googleStatus = params.get('google_connected');
+  const microsoftStatus = params.get('microsoft_connected');
+  const provider = googleStatus ? 'google' : microsoftStatus ? 'microsoft' : null;
+  const status = provider === 'google' ? googleStatus : microsoftStatus;
+
   useEffect(() => {
-    const status = params.get('google_connected');
-    if (!status) return;
+    if (!provider || !status) return;
 
     // Strip the query params immediately so any re-render or refresh
     // doesn't re-fire the side effects.
     const nextParams = new URLSearchParams(params);
     nextParams.delete('google_connected');
+    nextParams.delete('microsoft_connected');
     nextParams.delete('account');
     nextParams.delete('return_to');
     nextParams.delete('reason');
@@ -172,21 +180,27 @@ function GoogleCallbackHandler() {
 
     if (status === 'error') {
       const reason = params.get('reason') || 'unknown';
-      toast.error(t('welcome.preview.real_failed_title'), { description: reason });
+      toast.error(
+        t(`welcome.connect_modal.${provider}_failed_title`),
+        { description: reason }
+      );
       return;
     }
 
     if (status === 'success') {
       const account = params.get('account') || '';
+      const providerLabel = provider === 'google' ? 'Google' : 'Microsoft';
+      const syncFn = provider === 'google' ? syncGoogleData : syncMicrosoftData;
+
       // Sync runs in the background — we don't block the user. If it
       // fails we degrade to "real connection but no synced rows yet"
       // and show a toast.
       (async () => {
         try {
-          const res = await syncGoogleData();
+          const res = await syncFn();
           markStepConnected('inbox', 'real');
           markStepConnected('calendar', 'real');
-          toast.success(t('welcome.preview.real_connected_title'), {
+          toast.success(t('welcome.preview.real_connected_title_v2', { provider: providerLabel }), {
             description: t('welcome.preview.real_synced_desc', {
               account,
               emails: res?.counts?.emails ?? 0,
@@ -196,7 +210,7 @@ function GoogleCallbackHandler() {
         } catch (err) {
           markStepConnected('inbox', 'real');
           markStepConnected('calendar', 'real');
-          toast.warning(t('welcome.preview.real_connected_no_sync_title'), {
+          toast.warning(t('welcome.preview.real_connected_no_sync_title_v2', { provider: providerLabel }), {
             description: err?.response?.data?.detail || t('welcome.preview.real_connected_no_sync_desc'),
           });
         } finally {
@@ -212,7 +226,7 @@ function GoogleCallbackHandler() {
       })();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params.get('google_connected')]);
+  }, [provider, status]);
 
   return null;
 }
