@@ -17,7 +17,14 @@ import Settings from './pages/Settings';
 import PlanAndUsage from './pages/PlanAndUsage';
 import LoginPage from './pages/LoginPage';
 import AuthCallback from './pages/AuthCallback';
-import OnboardingLite from './pages/OnboardingLite';
+import OnboardingShell from './pages/welcome/OnboardingShell';
+import StartChoice from './pages/welcome/StartChoice';
+import Checkout from './pages/welcome/Checkout';
+import StepInbox from './pages/welcome/StepInbox';
+import StepCalendar from './pages/welcome/StepCalendar';
+import StepCRM from './pages/welcome/StepCRM';
+import StepAutomations from './pages/welcome/StepAutomations';
+import StepReady from './pages/welcome/StepReady';
 import Members from './pages/Members';
 import JoinPage from './pages/JoinPage';
 import './App.css';
@@ -70,17 +77,26 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
-      {/* Onboarding-lite sits OUTSIDE the AppShell (full-screen intake) but
-          still behind auth. We pass bypassOnboarding so we don't loop on
-          ourselves when ProtectedRoute evaluates the needs_onboarding flag. */}
+      {/* Welcome flow (Phase 7d) — multi-step activation experience for
+          new signups. Lives OUTSIDE the AppShell so each step gets a
+          full-screen Apple-style canvas. bypassOnboarding prevents the
+          ProtectedRoute from looping back here once the flow is done. */}
       <Route
-        path="/onboarding-lite"
+        path="/welcome"
         element={
           <ProtectedRoute bypassOnboarding>
-            <OnboardingLite />
+            <OnboardingShell />
           </ProtectedRoute>
         }
-      />
+      >
+        <Route index element={<StartChoice />} />
+        <Route path="checkout" element={<Checkout />} />
+        <Route path="inbox" element={<StepInbox />} />
+        <Route path="calendar" element={<StepCalendar />} />
+        <Route path="crm" element={<StepCRM />} />
+        <Route path="automations" element={<StepAutomations />} />
+        <Route path="ready" element={<StepReady />} />
+      </Route>
       <Route
         path="/*"
         element={

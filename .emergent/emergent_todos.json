@@ -1,22 +1,30 @@
 [
   {
-    "content": "Backfill script: estructura base + argparse",
+    "content": "Phase A — Foundation: borrar OnboardingLite, agregar /welcome routes, ProtectedRoute redirect, OnboardingShell (dark+cyan Apple-style)",
     "status": "completed"
   },
   {
-    "content": "Backfill script: workspace_members → org_members con dedup y validación UUID",
+    "content": "Phase B — Start Choice (3 cards) + Checkout placeholder",
     "status": "completed"
   },
   {
-    "content": "Backfill script: workspace_invites → invitations con dedup token + email placeholder",
+    "content": "Phase C — Flow Setup 4 steps (Inbox+sim analysis, Calendar, CRM, Automations) con fade/slide",
     "status": "completed"
   },
   {
-    "content": "Backfill script: audit_log → org_audit_logs con mapeo y skip de no-mapeables",
+    "content": "Phase D — Activación final con Simulation Mode auto + counters reales",
     "status": "completed"
   },
   {
-    "content": "Backfill script: reporte final + README de uso",
+    "content": "Backend: endpoint para marcar onboarding completo + activar simulation_mode",
     "status": "completed"
+  },
+  {
+    "content": "i18n ES+EN para todo el flujo",
+    "status": "completed"
+  },
+  {
+    "content": "Smoke test E2E con cuenta nueva + retest contacto/josias para no regresión",
+    "status": "in_progress"
   }
 ]

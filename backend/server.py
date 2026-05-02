@@ -4718,3 +4718,135 @@ async def simulation_status(workspace_id: str = Depends(get_current_workspace_id
         "data_counts": counts,
         "has_data": sum(counts.values()) > 0
     }
+
+
+# ─── Welcome onboarding (Phase 7d) ────────────────────────────────────
+class WelcomeCompleteRequest(BaseModel):
+    industry: Optional[str] = "other"
+    start_choice: Optional[str] = None  # 'email' | 'tools' | 'explore'
+    inbox_connected: bool = False
+    calendar_connected: bool = False
+    crm_connected: bool = False
+    automations_connected: bool = False
+
+
+@app.post("/api/onboarding/welcome/complete")
+async def complete_welcome_onboarding(
+    req: WelcomeCompleteRequest,
+    workspace_id: str = Depends(get_current_workspace_id),
+    user: User = Depends(get_current_user),
+):
+    """Activate the workspace at the end of the Welcome flow.
+
+    What happens here:
+      1. Persist the chosen industry and flip ``simulation_mode=True`` on
+         the business profile so the rest of the app surfaces the demo
+         dataset right away.
+      2. Generate the simulation seed if it doesn't exist yet (so the
+         counters returned below are real, not fake).
+      3. Return high-level counters tailored to the Activación screen
+         copy (conversations, opportunities, contacts, events).
+
+    Auth: any authenticated user. We deliberately don't gate this on
+    ``leader+`` because the welcome flow runs *before* role assignment
+    on a brand-new tenant — the user is implicitly the owner of their
+    own workspace at this point.
+    """
+    industry = (req.industry or "other").strip().lower() or "other"
+
+    # 1) Update business profile (upsert, mirror what Settings does).
+    now = now_iso()
+    await business_profile_col.update_one(
+        {"workspace_id": workspace_id},
+        {
+            "$set": {
+                "industry": industry,
+                "simulation_mode": True,
+                "updated_at": now,
+            },
+            "$setOnInsert": {
+                "workspace_id": workspace_id,
+                "use_case": "general",
+                "created_at": now,
+            },
+        },
+        upsert=True,
+    )
+
+    # 2) Seed the simulation dataset if empty. ``generate_simulation_data``
+    #    is idempotent-ish — it short-circuits when seed rows already
+    #    carry the same workspace_id + industry combo, so re-running this
+    #    endpoint never duplicates data.
+    try:
+        existing = await contacts_col.count_documents(
+            {"is_simulation": True, "workspace_id": workspace_id}
+        )
+        if existing == 0:
+            try:
+                await generate_simulation_data(industry)
+            except Exception:  # noqa: BLE001
+                # Seeding is best-effort — even with zero seeded rows the
+                # rest of the activation screen still works (counters
+                # just show 0). We never block onboarding on this.
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 3) Compute Activación counters. We map our internal collections to
+    #    the user-facing labels in the brief: "conversaciones" = inbox
+    #    items, "oportunidades" = inbox items flagged as opportunity OR
+    #    high-priority, "contactos" = CRM contacts, "eventos" = upcoming
+    #    calendar events.
+    inbox_total = await inbox_col.count_documents(
+        {"workspace_id": workspace_id, "is_simulation": True}
+    )
+    try:
+        opportunities = await inbox_col.count_documents({
+            "workspace_id": workspace_id,
+            "is_simulation": True,
+            "$or": [
+                {"category": {"$in": ["opportunity", "lead", "sales"]}},
+                {"priority": {"$in": ["high", "urgent"]}},
+            ],
+        })
+    except Exception:  # noqa: BLE001
+        opportunities = 0
+    contacts_total = await contacts_col.count_documents(
+        {"workspace_id": workspace_id, "is_simulation": True}
+    )
+    events_total = await calendar_col.count_documents(
+        {"workspace_id": workspace_id, "is_simulation": True}
+    )
+
+    # Audit trail — owner-level event so the activation moment is
+    # auditable end-to-end.
+    try:
+        await log_audit(
+            "onboarding.welcome_completed",
+            f"Welcome flow completed (start={req.start_choice}, industry={industry})",
+            user_id=user.user_id,
+            workspace_id=workspace_id,
+            metadata={
+                "start_choice": req.start_choice,
+                "industry": industry,
+                "inbox_connected": req.inbox_connected,
+                "calendar_connected": req.calendar_connected,
+                "crm_connected": req.crm_connected,
+                "automations_connected": req.automations_connected,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    return {
+        "success": True,
+        "workspace_id": workspace_id,
+        "industry": industry,
+        "simulation_mode": True,
+        "counters": {
+            "conversations": inbox_total,
+            "opportunities": opportunities,
+            "contacts": contacts_total,
+            "events": events_total,
+        },
+    }

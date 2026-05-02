@@ -102,6 +102,11 @@ export const getAuditLog = (workspace_id, params = {}) =>
 export const renameWorkspace = (workspace_id, name) =>
   api.patch(`/workspaces/${workspace_id}`, { name }).then(r => r.data);
 
+// Welcome / activation flow — sets industry, flips Simulation Mode ON,
+// seeds the demo dataset and returns counters for the Activación screen.
+export const completeWelcomeOnboarding = (payload) =>
+  api.post('/onboarding/welcome/complete', payload).then(r => r.data);
+
 // Audit export — returns the raw Blob so callers can trigger a download.
 // Accepts { format: 'csv'|'json', start_date, end_date, action }.
 export const exportAuditLog = (workspace_id, params = {}) =>

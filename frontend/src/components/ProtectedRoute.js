@@ -34,12 +34,12 @@ export default function ProtectedRoute({ children, bypassOnboarding = false }) {
     return <Navigate to="/login" replace state={{ from: location }} />;
   }
 
-  // Onboarding gate: freshly-signed-up users must finish the 3-question
-  // intake before reaching the main platform. Existing users (who signed
-  // up on the landing and never saw this flow) are NOT forced through it
-  // because they don't carry the `needs_onboarding` flag.
-  if (!bypassOnboarding && user.needs_onboarding && location.pathname !== '/onboarding-lite') {
-    return <Navigate to="/onboarding-lite" replace />;
+  // Onboarding gate: freshly-signed-up users must finish the Welcome
+  // activation flow before reaching the main platform. Existing users
+  // (who never had `needs_onboarding=true` set on their Supabase
+  // metadata) are NOT forced through it.
+  if (!bypassOnboarding && user.needs_onboarding && !location.pathname.startsWith('/welcome')) {
+    return <Navigate to="/welcome" replace />;
   }
 
   return children;

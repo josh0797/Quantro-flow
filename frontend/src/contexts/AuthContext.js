@@ -149,11 +149,17 @@ export function AuthProvider({ children }) {
   }, [hydrateFromSession]);
 
   const signUp = useCallback(async (email, password, metadata = {}) => {
+    // Default new signups into the Welcome activation flow. Callers can
+    // still override by passing `needs_onboarding: false` explicitly.
+    const enrichedMetadata = {
+      needs_onboarding: true,
+      ...metadata,
+    };
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
       options: {
-        data: metadata,
+        data: enrichedMetadata,
         emailRedirectTo: `${window.location.origin}/auth/callback`,
       },
     });
