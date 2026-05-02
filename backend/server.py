@@ -2,6 +2,7 @@ import os
 import uuid
 import json
 import time
+import asyncio
 import csv
 import io
 import re
@@ -18,7 +19,7 @@ from fastapi.responses import StreamingResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from ai_billing import run_ai_request
 import supabase_admin
 
@@ -85,6 +86,9 @@ audit_log_col = db["audit_log"]
 # Phase 7e — Google OAuth (Gmail + Calendar)
 google_integrations_col = db["google_integrations"]
 google_oauth_state_col = db["google_oauth_state"]
+# Phase 7e.2 — Microsoft Outlook OAuth (Mail + Calendar)
+microsoft_integrations_col = db["microsoft_integrations"]
+microsoft_oauth_state_col = db["microsoft_oauth_state"]
 
 # The workspace_id used by pre-auth seed + backfill. The first user to
 # log in claims this workspace (rename + become Owner). Subsequent users
@@ -1401,8 +1405,137 @@ async def lifespan(app: FastAPI):
     await backfill_simulation_flag()
     await backfill_workspace_scoping()
     await migrate_legacy_role_names()
-    yield
-    client.close()
+    # Phase 7e — Background sync scheduler. We launch a single asyncio
+    # task that wakes up every PERIODIC_SYNC_INTERVAL_SECS and calls the
+    # provider-specific sync helpers for every workspace whose
+    # integration row doesn't have ``auto_sync_paused: True``. Using an
+    # in-process task (instead of apscheduler/celery) is intentional:
+    # one process per backend pod is enough for our scale today, and it
+    # keeps the deploy story trivial. If we ever need multi-pod sync
+    # we'll switch to a Mongo lock or move to a real worker.
+    sync_task = asyncio.create_task(_periodic_provider_sync_loop())
+    try:
+        yield
+    finally:
+        sync_task.cancel()
+        try:
+            await sync_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+        client.close()
+
+
+# ─── Periodic provider sync (Phase 7e) ────────────────────────────────
+PERIODIC_SYNC_INTERVAL_SECS = int(
+    os.environ.get("PERIODIC_SYNC_INTERVAL_SECS") or 15 * 60
+)
+
+
+async def _perform_google_sync_for_workspace(workspace_id: str) -> Dict[str, Any]:
+    """Run the same sync logic as POST /api/integrations/google/sync but
+    suitable to call from the scheduler (no Request/User context). The
+    auth audit/trail is intentionally lighter here — we only log
+    failures to keep the log readable."""
+    creds, doc = await _load_google_credentials(workspace_id)
+    if not creds or not doc:
+        return {"workspace_id": workspace_id, "skipped": "not_connected"}
+    if doc.get("auto_sync_paused"):
+        return {"workspace_id": workspace_id, "skipped": "paused"}
+
+    counts = {"emails": 0, "events": 0}
+    now = datetime.now(timezone.utc)
+    try:
+        emails = goog.fetch_recent_gmail(creds, limit=50)
+        for m in emails:
+            await inbox_col.update_one(
+                {"workspace_id": workspace_id, "gmail_id": m["gmail_id"]},
+                {
+                    "$set": {
+                        "workspace_id": workspace_id, "source": "gmail",
+                        "gmail_id": m["gmail_id"], "thread_id": m["thread_id"],
+                        "from_name": m["from_name"], "from_address": m["from_address"],
+                        "subject": m["subject"], "preview": m["snippet"],
+                        "received_at": m["date_iso"], "label_ids": m["label_ids"],
+                        "is_real": True, "is_simulation": False, "synced_at": now,
+                    },
+                    "$setOnInsert": {"id": str(uuid.uuid4()), "status": "new", "priority": "medium", "created_at": now},
+                },
+                upsert=True,
+            )
+            counts["emails"] += 1
+        events = goog.fetch_upcoming_calendar(creds, days=30)
+        for ev in events:
+            await calendar_col.update_one(
+                {"workspace_id": workspace_id, "gcal_id": ev["gcal_id"]},
+                {
+                    "$set": {
+                        "workspace_id": workspace_id, "source": "google_calendar",
+                        "gcal_id": ev["gcal_id"], "title": ev["title"],
+                        "description": ev["description"], "location": ev["location"],
+                        "start": ev["start_iso"], "end": ev["end_iso"],
+                        "attendees": ev["attendees"], "html_link": ev["html_link"],
+                        "status": ev["status"], "is_real": True, "is_simulation": False, "synced_at": now,
+                    },
+                    "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": now},
+                },
+                upsert=True,
+            )
+            counts["events"] += 1
+        await google_integrations_col.update_one(
+            {"workspace_id": workspace_id},
+            {"$set": {"last_sync_at": now, "last_sync_error": None}},
+        )
+        return {"workspace_id": workspace_id, "ok": True, "counts": counts}
+    except Exception as exc:  # noqa: BLE001
+        await google_integrations_col.update_one(
+            {"workspace_id": workspace_id},
+            {"$set": {"last_sync_error": str(exc)[:200], "last_sync_attempt_at": now}},
+        )
+        return {"workspace_id": workspace_id, "error": str(exc)[:200]}
+
+
+async def _periodic_provider_sync_loop() -> None:
+    """Forever loop. Wakes up every interval and dispatches sync for
+    every connected, non-paused workspace across every provider."""
+    # Small initial delay so the first tick happens AFTER startup
+    # finishes (avoids contending with seed/backfill jobs).
+    await asyncio.sleep(60)
+    while True:
+        try:
+            # --- Google
+            cursor = google_integrations_col.find(
+                {"auto_sync_paused": {"$ne": True}},
+                {"_id": 0, "workspace_id": 1},
+            )
+            async for row in cursor:
+                wid = row.get("workspace_id")
+                if not wid:
+                    continue
+                res = await _perform_google_sync_for_workspace(wid)
+                if res.get("error"):
+                    print(f"[sync:google] {wid} failed: {res['error']}")
+            # --- Microsoft (registered only if module is loaded)
+            ms_sync = globals().get("_perform_microsoft_sync_for_workspace")
+            if ms_sync is not None:
+                cursor_ms = microsoft_integrations_col.find(
+                    {"auto_sync_paused": {"$ne": True}},
+                    {"_id": 0, "workspace_id": 1},
+                )
+                async for row in cursor_ms:
+                    wid = row.get("workspace_id")
+                    if not wid:
+                        continue
+                    try:
+                        res = await ms_sync(wid)
+                        if res.get("error"):
+                            print(f"[sync:microsoft] {wid} failed: {res['error']}")
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[sync:microsoft] {wid} crashed: {exc}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            print(f"[sync] loop error: {exc}")
+        await asyncio.sleep(PERIODIC_SYNC_INTERVAL_SECS)
 
 
 async def migrate_legacy_role_names() -> None:
@@ -4746,7 +4879,8 @@ async def google_integration_status(
         return {"configured": False, "connected": False}
     doc = await google_integrations_col.find_one(
         {"workspace_id": workspace_id},
-        {"_id": 0, "account_email": 1, "scopes": 1, "connected_at": 1, "last_sync_at": 1, "expires_at": 1},
+        {"_id": 0, "account_email": 1, "scopes": 1, "connected_at": 1,
+         "last_sync_at": 1, "expires_at": 1, "auto_sync_paused": 1, "last_sync_error": 1},
     )
     if not doc:
         return {"configured": True, "connected": False}
@@ -4757,6 +4891,8 @@ async def google_integration_status(
         "scopes": doc.get("scopes") or [],
         "connected_at": doc.get("connected_at"),
         "last_sync_at": doc.get("last_sync_at"),
+        "auto_sync_paused": bool(doc.get("auto_sync_paused")),
+        "last_sync_error": doc.get("last_sync_error"),
     }
 
 
@@ -5119,6 +5255,380 @@ async def google_oauth_disconnect(
         pass
 
     return {"success": True}
+
+
+# ─── Microsoft Outlook OAuth — Mail + Calendar (Phase 7e.2) ───────────
+import microsoft_oauth as msoa
+
+
+@app.get("/api/integrations/microsoft/status")
+async def microsoft_integration_status(
+    workspace_id: str = Depends(get_current_workspace_id),
+    user: User = Depends(get_current_user),
+):
+    if not msoa.is_oauth_configured():
+        return {"configured": False, "connected": False}
+    doc = await microsoft_integrations_col.find_one(
+        {"workspace_id": workspace_id},
+        {"_id": 0, "account_email": 1, "scopes": 1, "connected_at": 1,
+         "last_sync_at": 1, "auto_sync_paused": 1, "last_sync_error": 1},
+    )
+    if not doc:
+        return {"configured": True, "connected": False}
+    return {
+        "configured": True,
+        "connected": True,
+        "account_email": doc.get("account_email"),
+        "scopes": doc.get("scopes") or [],
+        "connected_at": doc.get("connected_at"),
+        "last_sync_at": doc.get("last_sync_at"),
+        "auto_sync_paused": bool(doc.get("auto_sync_paused")),
+        "last_sync_error": doc.get("last_sync_error"),
+    }
+
+
+@app.get("/api/integrations/microsoft/start")
+async def microsoft_oauth_start(
+    request: Request,
+    return_to: Optional[str] = None,
+    workspace_id: str = Depends(get_current_workspace_id),
+    user: User = Depends(get_current_user),
+):
+    if not msoa.is_oauth_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Microsoft OAuth is not configured. Set MS_CLIENT_ID + MS_CLIENT_SECRET in backend/.env.",
+        )
+    base_url = str(request.base_url).rstrip("/")
+    redirect_uri = msoa.resolve_redirect_uri(base_url)
+    state = uuid.uuid4().hex
+    await microsoft_oauth_state_col.insert_one(
+        {
+            "state": state, "user_id": user.user_id, "workspace_id": workspace_id,
+            "return_to": return_to or "/welcome/inbox", "redirect_uri": redirect_uri,
+            "created_at": datetime.now(timezone.utc),
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
+        }
+    )
+    auth_url = msoa.build_authorization_url(state=state, redirect_uri=redirect_uri)
+    return {"auth_url": auth_url, "state": state}
+
+
+@app.get("/api/integrations/microsoft/callback")
+async def microsoft_oauth_callback(
+    request: Request,
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    error_description: Optional[str] = None,
+):
+    fe = _frontend_url_from(request) or ""
+    base_redirect = (fe or "").rstrip("/")
+
+    def _bounce(qs: str) -> RedirectResponse:
+        target = (base_redirect or "") + "/welcome/inbox" + ("?" + qs if qs else "")
+        return RedirectResponse(url=target, status_code=303)
+
+    if error:
+        return _bounce(f"microsoft_connected=error&reason={error}")
+    if not code or not state:
+        return _bounce("microsoft_connected=error&reason=missing_code_or_state")
+
+    state_doc = await microsoft_oauth_state_col.find_one_and_delete({"state": state})
+    if not state_doc:
+        return _bounce("microsoft_connected=error&reason=invalid_state")
+    expires = state_doc.get("expires_at")
+    if isinstance(expires, datetime) and expires.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+        return _bounce("microsoft_connected=error&reason=state_expired")
+
+    redirect_uri = state_doc.get("redirect_uri") or msoa.resolve_redirect_uri(str(request.base_url))
+    workspace_id = state_doc.get("workspace_id")
+    user_id = state_doc.get("user_id")
+    return_to = state_doc.get("return_to") or "/welcome/inbox"
+
+    try:
+        token_payload, profile = msoa.exchange_code_for_tokens(code, redirect_uri)
+    except Exception as exc:  # noqa: BLE001
+        return _bounce(f"microsoft_connected=error&reason=exchange_failed&detail={str(exc)[:80]}")
+
+    expires_in = int(token_payload.get("expires_in") or 3600)
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+    granted_scopes = (token_payload.get("scope") or "").split()
+
+    await microsoft_integrations_col.update_one(
+        {"workspace_id": workspace_id},
+        {
+            "$set": {
+                "workspace_id": workspace_id, "user_id": user_id,
+                "access_token": msoa.encrypt_token(token_payload.get("access_token")),
+                "refresh_token": msoa.encrypt_token(token_payload.get("refresh_token")),
+                "expires_at": expires_at,
+                "scopes": granted_scopes or msoa.MS_SCOPES,
+                "account_email": (profile or {}).get("email"),
+                "account_name": (profile or {}).get("name"),
+                "ms_user_id": (profile or {}).get("ms_user_id"),
+                "connected_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }
+        },
+        upsert=True,
+    )
+
+    try:
+        await log_audit(
+            "integration.microsoft_connected",
+            f"Microsoft account connected ({(profile or {}).get('email') or 'unknown'})",
+            user_id=user_id, workspace_id=workspace_id,
+            metadata={"scopes": granted_scopes[:8]},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    qs = f"microsoft_connected=success&account={(profile or {}).get('email') or ''}&return_to={return_to}"
+    return _bounce(qs)
+
+
+async def _load_microsoft_credentials(workspace_id: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Decrypt + auto-refresh the Microsoft access token. Returns
+    ``(access_token_plain, doc)`` or ``(None, None)`` if not connected
+    or unrecoverable."""
+    doc = await microsoft_integrations_col.find_one({"workspace_id": workspace_id})
+    if not doc:
+        return None, None
+    access_plain = msoa.decrypt_token(doc.get("access_token"))
+    refresh_plain = msoa.decrypt_token(doc.get("refresh_token"))
+    if not access_plain:
+        return None, None
+    expires_at = doc.get("expires_at")
+    needs_refresh = False
+    if isinstance(expires_at, datetime):
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        needs_refresh = datetime.now(timezone.utc) >= expires_at - timedelta(seconds=60)
+    if needs_refresh and refresh_plain:
+        try:
+            fresh = msoa.refresh_access_token(refresh_plain)
+            access_plain = fresh.get("access_token") or access_plain
+            new_refresh = fresh.get("refresh_token") or refresh_plain
+            new_expiry = datetime.now(timezone.utc) + timedelta(seconds=int(fresh.get("expires_in") or 3600))
+            await microsoft_integrations_col.update_one(
+                {"workspace_id": workspace_id},
+                {"$set": {
+                    "access_token": msoa.encrypt_token(access_plain),
+                    "refresh_token": msoa.encrypt_token(new_refresh),
+                    "expires_at": new_expiry,
+                    "updated_at": datetime.now(timezone.utc),
+                }},
+            )
+        except Exception:  # noqa: BLE001
+            return None, doc
+    return access_plain, doc
+
+
+async def _perform_microsoft_sync_for_workspace(workspace_id: str) -> Dict[str, Any]:
+    access, doc = await _load_microsoft_credentials(workspace_id)
+    if not access or not doc:
+        return {"workspace_id": workspace_id, "skipped": "not_connected"}
+    if doc.get("auto_sync_paused"):
+        return {"workspace_id": workspace_id, "skipped": "paused"}
+
+    counts = {"emails": 0, "events": 0}
+    now = datetime.now(timezone.utc)
+    try:
+        emails = msoa.fetch_recent_outlook(access, limit=50)
+        for m in emails:
+            await inbox_col.update_one(
+                {"workspace_id": workspace_id, "ms_id": m["ms_id"]},
+                {
+                    "$set": {
+                        "workspace_id": workspace_id, "source": "outlook",
+                        "ms_id": m["ms_id"], "thread_id": m["thread_id"],
+                        "from_name": m["from_name"], "from_address": m["from_address"],
+                        "subject": m["subject"], "preview": m["snippet"],
+                        "received_at": m["date_iso"], "categories": m["categories"],
+                        "is_real": True, "is_simulation": False, "synced_at": now,
+                    },
+                    "$setOnInsert": {"id": str(uuid.uuid4()), "status": "new", "priority": "medium", "created_at": now},
+                },
+                upsert=True,
+            )
+            counts["emails"] += 1
+        events = msoa.fetch_upcoming_outlook_events(access, days=30)
+        for ev in events:
+            await calendar_col.update_one(
+                {"workspace_id": workspace_id, "ms_id": ev["ms_id"]},
+                {
+                    "$set": {
+                        "workspace_id": workspace_id, "source": "outlook_calendar",
+                        "ms_id": ev["ms_id"], "title": ev["title"],
+                        "description": ev["description"], "location": ev["location"],
+                        "start": ev["start_iso"], "end": ev["end_iso"],
+                        "attendees": ev["attendees"], "html_link": ev["html_link"],
+                        "status": ev["status"], "is_real": True, "is_simulation": False, "synced_at": now,
+                    },
+                    "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": now},
+                },
+                upsert=True,
+            )
+            counts["events"] += 1
+        await microsoft_integrations_col.update_one(
+            {"workspace_id": workspace_id},
+            {"$set": {"last_sync_at": now, "last_sync_error": None}},
+        )
+        return {"workspace_id": workspace_id, "ok": True, "counts": counts}
+    except Exception as exc:  # noqa: BLE001
+        await microsoft_integrations_col.update_one(
+            {"workspace_id": workspace_id},
+            {"$set": {"last_sync_error": str(exc)[:200], "last_sync_attempt_at": now}},
+        )
+        return {"workspace_id": workspace_id, "error": str(exc)[:200]}
+
+
+@app.post("/api/integrations/microsoft/sync")
+async def microsoft_oauth_sync(
+    workspace_id: str = Depends(get_current_workspace_id),
+    user: User = Depends(get_current_user),
+):
+    res = await _perform_microsoft_sync_for_workspace(workspace_id)
+    if res.get("skipped") == "not_connected":
+        raise HTTPException(status_code=400, detail="Microsoft not connected")
+    if res.get("error"):
+        raise HTTPException(status_code=502, detail=res["error"])
+
+    # First successful sync: hide simulation seed and flip mode off,
+    # mirroring the Google branch.
+    await inbox_col.update_many(
+        {"workspace_id": workspace_id, "is_simulation": True},
+        {"$set": {"hidden_by_real": True}},
+    )
+    await calendar_col.update_many(
+        {"workspace_id": workspace_id, "is_simulation": True},
+        {"$set": {"hidden_by_real": True}},
+    )
+    await business_profile_col.update_one(
+        {"workspace_id": workspace_id},
+        {"$set": {"simulation_mode": False, "updated_at": now_iso()}},
+        upsert=True,
+    )
+    try:
+        await log_audit(
+            "integration.microsoft_synced",
+            f"Synced Microsoft data ({res['counts']['emails']} emails, {res['counts']['events']} events)",
+            user_id=user.user_id, workspace_id=workspace_id, metadata=res["counts"],
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return {"success": True, "counts": res["counts"], "synced_at": datetime.now(timezone.utc).isoformat()}
+
+
+@app.delete("/api/integrations/microsoft/disconnect")
+async def microsoft_oauth_disconnect(
+    workspace_id: str = Depends(get_current_workspace_id),
+    user: User = Depends(get_current_user),
+):
+    doc = await microsoft_integrations_col.find_one({"workspace_id": workspace_id})
+    if not doc:
+        return {"success": True, "already": "disconnected"}
+
+    refresh = msoa.decrypt_token(doc.get("refresh_token"))
+    access = msoa.decrypt_token(doc.get("access_token"))
+    if refresh:
+        msoa.revoke_token(refresh)
+    elif access:
+        msoa.revoke_token(access)
+
+    await microsoft_integrations_col.delete_one({"workspace_id": workspace_id})
+    await inbox_col.delete_many({"workspace_id": workspace_id, "is_real": True, "source": "outlook"})
+    await calendar_col.delete_many({"workspace_id": workspace_id, "is_real": True, "source": "outlook_calendar"})
+
+    # Only restore demo mode if there's no other real integration
+    # (e.g. Google) keeping this workspace in real-data territory.
+    other_real = await google_integrations_col.find_one({"workspace_id": workspace_id})
+    if not other_real:
+        await inbox_col.update_many(
+            {"workspace_id": workspace_id, "is_simulation": True},
+            {"$unset": {"hidden_by_real": ""}},
+        )
+        await calendar_col.update_many(
+            {"workspace_id": workspace_id, "is_simulation": True},
+            {"$unset": {"hidden_by_real": ""}},
+        )
+        await business_profile_col.update_one(
+            {"workspace_id": workspace_id},
+            {"$set": {"simulation_mode": True, "updated_at": now_iso()}},
+            upsert=True,
+        )
+
+    try:
+        await log_audit(
+            "integration.microsoft_disconnected",
+            f"Microsoft disconnected ({(doc or {}).get('account_email') or 'unknown'})",
+            user_id=user.user_id, workspace_id=workspace_id,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return {"success": True}
+
+
+# ─── Auto-sync controls (Phase 7e) ────────────────────────────────────
+class AutoSyncToggleRequest(BaseModel):
+    paused: bool
+
+
+def _provider_collection(provider: str):
+    """Map a provider slug to its mongo integration collection. Keeps
+    the toggle endpoint generic so we add new providers in one line."""
+    if provider == "google":
+        return google_integrations_col
+    if provider == "microsoft":
+        return microsoft_integrations_col
+    raise HTTPException(status_code=400, detail=f"Unknown provider '{provider}'")
+
+
+@app.post("/api/integrations/{provider}/auto-sync")
+async def toggle_auto_sync(
+    provider: str,
+    req: AutoSyncToggleRequest,
+    workspace_id: str = Depends(get_current_workspace_id),
+    user: User = Depends(get_current_user),
+):
+    """Pause or resume the periodic sync for a connected integration.
+
+    Pausing keeps the OAuth tokens intact but tells the scheduler to
+    skip this workspace on its next tick. Resuming flips the flag back
+    AND triggers an immediate sync so the user gets fresh data without
+    having to wait up to 15 min for the next cycle.
+    """
+    col = _provider_collection(provider)
+    doc = await col.find_one({"workspace_id": workspace_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"{provider} not connected")
+
+    await col.update_one(
+        {"workspace_id": workspace_id},
+        {"$set": {"auto_sync_paused": req.paused, "updated_at": datetime.now(timezone.utc)}},
+    )
+    try:
+        await log_audit(
+            f"integration.{provider}_auto_sync_{'paused' if req.paused else 'resumed'}",
+            f"Auto-sync {'paused' if req.paused else 'resumed'} for {provider}",
+            user_id=user.user_id,
+            workspace_id=workspace_id,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    # If we're resuming, kick off a fresh sync right now so the user
+    # gets their inbox up-to-date without waiting up to 15 minutes.
+    if not req.paused:
+        if provider == "google":
+            asyncio.create_task(_perform_google_sync_for_workspace(workspace_id))
+        elif provider == "microsoft":
+            ms_sync = globals().get("_perform_microsoft_sync_for_workspace")
+            if ms_sync is not None:
+                asyncio.create_task(ms_sync(workspace_id))
+
+    return {"success": True, "paused": req.paused}
 
 
 # ─── Welcome onboarding (Phase 7d) ────────────────────────────────────

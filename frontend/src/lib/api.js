@@ -120,6 +120,23 @@ export const syncGoogleData = () =>
 export const disconnectGoogle = () =>
   api.delete('/integrations/google/disconnect').then(r => r.data);
 
+// Microsoft Outlook OAuth (Mail + Calendar) — Phase 7e.2
+export const getMicrosoftIntegrationStatus = () =>
+  api.get('/integrations/microsoft/status').then(r => r.data);
+
+export const startMicrosoftOAuth = (return_to = '/welcome/inbox') =>
+  api.get('/integrations/microsoft/start', { params: { return_to } }).then(r => r.data);
+
+export const syncMicrosoftData = () =>
+  api.post('/integrations/microsoft/sync').then(r => r.data);
+
+export const disconnectMicrosoft = () =>
+  api.delete('/integrations/microsoft/disconnect').then(r => r.data);
+
+// Auto-sync toggle (works for any registered provider: 'google' | 'microsoft')
+export const toggleAutoSync = (provider, paused) =>
+  api.post(`/integrations/${provider}/auto-sync`, { paused }).then(r => r.data);
+
 // Audit export — returns the raw Blob so callers can trigger a download.
 // Accepts { format: 'csv'|'json', start_date, end_date, action }.
 export const exportAuditLog = (workspace_id, params = {}) =>

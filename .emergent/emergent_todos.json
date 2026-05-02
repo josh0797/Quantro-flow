@@ -1,38 +1,22 @@
 [
   {
-    "content": "Backend: instalar libs (google-auth, google-auth-oauthlib, google-api-python-client, cryptography) y generar GOOGLE_TOKENS_ENCRYPTION_KEY",
-    "status": "completed"
+    "content": "Phase 7e.1 — Sync periódico Google: scheduler asyncio cada 15min + flag auto_sync_paused + endpoint toggle + UI minimal en Welcome shell",
+    "status": "in_progress"
   },
   {
-    "content": "Backend: módulo google_oauth.py con encriptación Fernet + helpers de creds + auto-refresh",
-    "status": "completed"
-  },
-  {
-    "content": "Backend: 4 endpoints (start, callback, sync, disconnect) + helper status",
-    "status": "completed"
-  },
-  {
-    "content": "Backend: sync real — leer 50 últimos Gmail + 30 días Calendar y persistir como is_real=true en inbox_items / calendar_events",
-    "status": "completed"
-  },
-  {
-    "content": "Frontend: api.js helpers + StepInbox/StepCalendar con redirect real a Google + manejo de callback ?google_connected",
-    "status": "completed"
-  },
-  {
-    "content": "Frontend: OnboardingShell detecta ?google_connected, llama /sync, marca connection_mode='real'",
-    "status": "completed"
-  },
-  {
-    "content": "Smart Inbox / Schedule: leer datos reales si Google está conectado (banner real vs demo) — PRÓXIMA SESIÓN",
+    "content": "Phase 7e.2 — Microsoft Outlook OAuth: módulo microsoft_oauth.py con MSAL + 4 endpoints (start/callback/sync/disconnect) + status",
     "status": "pending"
   },
   {
-    "content": "Documentar setup en plan.md + variables a configurar",
-    "status": "completed"
+    "content": "Phase 7e.2 — Frontend: provider picker en StepInbox (Google + Outlook) + callback handler genérico",
+    "status": "pending"
   },
   {
-    "content": "BLOQUEO: usuario debe configurar GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET en Google Cloud + .env para activar OAuth real",
+    "content": "Phase 7e.2 — Variables .env + documentación Azure AD para usuario",
+    "status": "pending"
+  },
+  {
+    "content": "Lints + restart + plan.md update",
     "status": "pending"
   }
 ]
