@@ -24,10 +24,6 @@
     "status": "completed"
   },
   {
-    "content": "Localizar SmartInbox y Schedule en frontend e identificar punto de inserción",
-    "status": "completed"
-  },
-  {
     "content": "Crear DataModeBanner componente reutilizable",
     "status": "completed"
   },
@@ -40,7 +36,7 @@
     "status": "completed"
   },
   {
-    "content": "Tests backend con testing agent (endpoints integrations + sync)",
-    "status": "in_progress"
+    "content": "Tests backend (17/17 PASS)",
+    "status": "completed"
   }
 ]
