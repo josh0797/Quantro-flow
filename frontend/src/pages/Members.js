@@ -889,17 +889,18 @@ const ONBOARDING_STATUS_BADGE = {
   blocked: 'bg-[hsl(var(--destructive)/0.15)] text-[hsl(var(--destructive))]',
 };
 
-function formatStepDate(iso) {
+function formatStepDate(iso, lang) {
   if (!iso) return null;
   try {
     const d = new Date(iso);
-    return d.toLocaleDateString(undefined, { day: '2-digit', month: 'short' });
+    return d.toLocaleDateString(lang === 'es' ? 'es-ES' : 'en-US', { day: '2-digit', month: 'short' });
   } catch {
     return null;
   }
 }
 
 function OnboardingCard({ card, isAdmin, t, onMarkComplete, onCopyInvite, onRevokeAccess }) {
+  const { lang } = useLanguage();
   const pct = card.progress.total
     ? Math.round((card.progress.completed / card.progress.total) * 100)
     : 0;
@@ -947,7 +948,7 @@ function OnboardingCard({ card, isAdmin, t, onMarkComplete, onCopyInvite, onRevo
           const Icon = STEP_ICONS[step.step_key] || AlertCircle;
           const done = step.status === 'completed';
           const blocked = step.status === 'blocked';
-          const stepDate = formatStepDate(step.completed_at);
+          const stepDate = formatStepDate(step.completed_at, lang);
           const microcopy = done
             ? t(`onboarding.step_${step.step_key}_done`)
             : t(`onboarding.step_${step.step_key}_pending`);

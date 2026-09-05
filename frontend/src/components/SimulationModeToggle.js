@@ -14,6 +14,7 @@ import {
 import { toast } from 'sonner';
 import { useLanguage } from '../context/LanguageContext';
 import { useBusinessProfile } from '../contexts/BusinessProfileContext';
+import { authFetch } from '../lib/authFetch';
 
 const STORAGE_KEY = 'realtyos_mode';
 const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
@@ -73,6 +74,19 @@ export default function SimulationModeToggle({ variant = 'compact' }) {
           simulation_mode: nextOn,
           language: profile.language,
         });
+        // Keep the actual sample data in sync with the toggle: generate
+        // demo records when turning Simulation ON, and wipe them when
+        // going back to Live — otherwise the toggle only changes a flag
+        // without actually switching what the user sees.
+        try {
+          if (nextOn) {
+            await authFetch(`${backendUrl}/api/simulation/generate`, { method: 'POST', credentials: 'include' });
+          } else {
+            await authFetch(`${backendUrl}/api/simulation/clear`, { method: 'POST', credentials: 'include' });
+          }
+        } catch {
+          /* best-effort; profile flag already saved */
+        }
         try {
           localStorage.setItem(STORAGE_KEY, nextOn ? 'simulation' : 'live');
         } catch {

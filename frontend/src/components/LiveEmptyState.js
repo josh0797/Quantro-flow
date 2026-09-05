@@ -2,8 +2,12 @@ import React from 'react';
 import { ShieldCheck, Zap, PlugZap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 import { useLanguage } from '../context/LanguageContext';
 import { useBusinessProfile } from '../contexts/BusinessProfileContext';
+import { authFetch } from '../lib/authFetch';
+
+const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
 
 /**
  * LiveEmptyState
@@ -34,6 +38,7 @@ export default function LiveEmptyState({ moduleKey = 'generic', className = '' }
     schedule: t('simulation.live_empty_schedule'),
     activity: t('simulation.live_empty_activity'),
     content: t('simulation.live_empty_content'),
+    onboarding: t('simulation.live_empty_onboarding'),
     generic: t('simulation.live_empty_subtitle'),
   };
   const subtitle = moduleCopyMap[moduleKey] || moduleCopyMap.generic;
@@ -53,8 +58,17 @@ export default function LiveEmptyState({ moduleKey = 'generic', className = '' }
         simulation_mode: true,
         language: profile?.language,
       });
+      // Generate sample data now that simulation mode is on, so the
+      // "Try Simulation Mode" CTA actually populates the screen.
+      const res = await authFetch(`${backendUrl}/api/simulation/generate`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      if (res.ok) {
+        toast.success(t('simulation.toast_on'));
+      }
     } catch (e) {
-      // Surface handled by toggle component toasts in normal flow
+      toast.error(t('simulation.toast_failed'));
     }
   };
 

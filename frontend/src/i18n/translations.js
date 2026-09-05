@@ -591,7 +591,7 @@ export const translations = {
       toast_off: 'Modo Live activado',
       toast_failed: 'No se pudo cambiar el modo',
       // Live mode empty states (shared copy across modules)
-      live_empty_title: 'Modo Live activo',
+      live_empty_title: 'Sin datos reales todavía',
       live_empty_subtitle: 'Aún no hay datos reales en tu espacio de trabajo. Conecta tus integraciones o crea tu primer registro manualmente.',
       live_empty_cta_connect: 'Conectar integraciones',
       live_empty_cta_simulation: 'Activar Simulación para explorar',
@@ -600,6 +600,7 @@ export const translations = {
       live_empty_schedule: 'Tu calendario está vacío. Conecta Google Calendar o crea tu primer evento.',
       live_empty_activity: 'Aún no hay actividad real. La actividad aparecerá aquí cuando empieces a operar.',
       live_empty_content: 'Aún no hay contenido generado. Usa el Motor de Contenido para crear tu primera pieza.',
+      live_empty_onboarding: 'Aún no tienes miembros en proceso de onboarding. Agrega tu primer miembro del equipo para empezar.',
     },
 
     login: {
@@ -616,7 +617,7 @@ export const translations = {
       smart_inbox: 'Bandeja Inteligente',
       schedule: 'Agenda',
       crm: 'CRM',
-      onboarding: 'Onboarding',
+      onboarding: 'Onboarding de Equipo',
       content_engine: 'Motor de Contenido',
       automation: 'Automatización',
       members: 'Miembros',
@@ -805,6 +806,13 @@ export const translations = {
         endpoint_label: 'TU ENDPOINT ENTRANTE',
         shared_secret: 'Secreto Compartido (opcional)',
         secret_placeholder: 'Genera una cadena aleatoria',
+        coming_soon_badge: 'Próximamente',
+        coming_soon_description: 'Los webhooks entrantes todavía no están disponibles. Estamos trabajando en esta función.',
+      },
+      real_connect: {
+        title: 'Conectar Gmail / Calendar',
+        description: 'La conexión real de Gmail y Google Calendar se hace por OAuth, no con un formulario. Usa el flujo de bienvenida para autorizar tu cuenta de Google.',
+        cta: 'Conectar bandeja real',
       },
       toasts: {
         connected: '{{provider}} conectado exitosamente',
@@ -898,6 +906,7 @@ export const translations = {
       title: 'CRM',
       subtitle: 'Contactos y relaciones',
       empty_state: 'Sin contactos aún',
+      select_prompt: 'Selecciona un contacto para ver sus detalles',
       empty_hint: 'Tus contactos sincronizados aparecerán aquí',
       search_placeholder: 'Buscar contactos...',
       add_contact: 'Añadir Contacto',
@@ -1769,7 +1778,7 @@ export const translations = {
       toast_off: 'Live Mode activated',
       toast_failed: 'Failed to switch mode',
       // Live mode empty states (shared copy across modules)
-      live_empty_title: 'Live Mode active',
+      live_empty_title: 'No real data yet',
       live_empty_subtitle: 'No real workspace data yet. Connect your integrations or create your first record manually.',
       live_empty_cta_connect: 'Connect integrations',
       live_empty_cta_simulation: 'Try Simulation Mode',
@@ -1778,6 +1787,7 @@ export const translations = {
       live_empty_schedule: 'Your calendar is empty. Connect Google Calendar or create your first event.',
       live_empty_activity: 'No real activity yet. Activity will appear here as you start operating.',
       live_empty_content: 'No generated content yet. Use the Content Engine to create your first piece.',
+      live_empty_onboarding: 'No team members are onboarding yet. Add your first team member to get started.',
     },
 
     login: {
@@ -1794,7 +1804,7 @@ export const translations = {
       smart_inbox: 'Smart Inbox',
       schedule: 'Schedule',
       crm: 'CRM',
-      onboarding: 'Onboarding',
+      onboarding: 'Team Onboarding',
       content_engine: 'Content Engine',
       automation: 'Automation',
       members: 'Members',
@@ -1981,6 +1991,13 @@ export const translations = {
         endpoint_label: 'YOUR INBOUND ENDPOINT',
         shared_secret: 'Shared Secret (optional)',
         secret_placeholder: 'Generate a random string',
+        coming_soon_badge: 'Coming Soon',
+        coming_soon_description: 'Inbound webhooks are not available yet. We are working on this feature.',
+      },
+      real_connect: {
+        title: 'Connect Gmail / Calendar',
+        description: 'Real Gmail and Google Calendar connection happens via OAuth, not a form. Use the welcome flow to authorize your Google account.',
+        cta: 'Connect real inbox',
       },
       toasts: {
         connected: '{{provider}} connected successfully',
@@ -2074,6 +2091,7 @@ export const translations = {
       title: 'CRM',
       subtitle: 'Contacts and relationships',
       empty_state: 'No contacts yet',
+      select_prompt: 'Select a contact to view their details',
       empty_hint: 'Your synced contacts will appear here',
       search_placeholder: 'Search contacts...',
       add_contact: 'Add Contact',

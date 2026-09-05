@@ -811,11 +811,11 @@ async def seed_database():
     # Onboarding tasks for James Rivera
     james_id = agents[0]["agent_id"]
     onboarding_tasks = [
-        {"task_id": str(uuid.uuid4()), "agent_id": james_id, "title": "Complete compliance training", "description": "Review and sign all compliance documents", "status": "completed", "order": 1, "completed_at": (now - timedelta(days=1)).isoformat(), "auto_generated": True},
-        {"task_id": str(uuid.uuid4()), "agent_id": james_id, "title": "Set up CRM profile", "description": "Configure GoHighLevel profile and sync", "status": "completed", "order": 2, "completed_at": (now - timedelta(hours=12)).isoformat(), "auto_generated": True},
-        {"task_id": str(uuid.uuid4()), "agent_id": james_id, "title": "Configure email signature", "description": "Set up branded email signature template", "status": "in_progress", "order": 3, "completed_at": None, "auto_generated": True},
-        {"task_id": str(uuid.uuid4()), "agent_id": james_id, "title": "Schedule orientation with team lead", "description": "Book 1:1 orientation meeting with Sophia Turner", "status": "pending", "order": 4, "completed_at": None, "auto_generated": True},
-        {"task_id": str(uuid.uuid4()), "agent_id": james_id, "title": "Access granted to listing portal", "description": "Get login credentials for MLS and listing tools", "status": "pending", "order": 5, "completed_at": None, "auto_generated": True},
+        {"task_id": str(uuid.uuid4()), "agent_id": james_id, "title": "Complete compliance training", "description": "Review and sign all compliance documents", "status": "completed", "order": 1, "completed_at": (now - timedelta(days=1)).isoformat(), "auto_generated": True, "workspace_id": DEFAULT_WORKSPACE_ID},
+        {"task_id": str(uuid.uuid4()), "agent_id": james_id, "title": "Set up CRM profile", "description": "Configure GoHighLevel profile and sync", "status": "completed", "order": 2, "completed_at": (now - timedelta(hours=12)).isoformat(), "auto_generated": True, "workspace_id": DEFAULT_WORKSPACE_ID},
+        {"task_id": str(uuid.uuid4()), "agent_id": james_id, "title": "Configure email signature", "description": "Set up branded email signature template", "status": "in_progress", "order": 3, "completed_at": None, "auto_generated": True, "workspace_id": DEFAULT_WORKSPACE_ID},
+        {"task_id": str(uuid.uuid4()), "agent_id": james_id, "title": "Schedule orientation with team lead", "description": "Book 1:1 orientation meeting with Sophia Turner", "status": "pending", "order": 4, "completed_at": None, "auto_generated": True, "workspace_id": DEFAULT_WORKSPACE_ID},
+        {"task_id": str(uuid.uuid4()), "agent_id": james_id, "title": "Access granted to listing portal", "description": "Get login credentials for MLS and listing tools", "status": "pending", "order": 5, "completed_at": None, "auto_generated": True, "workspace_id": DEFAULT_WORKSPACE_ID},
     ]
     await onboarding_col.insert_many(onboarding_tasks)
 
@@ -842,9 +842,9 @@ async def seed_database():
 
     # Content items
     content_items = [
-        {"content_id": str(uuid.uuid4()), "type": "social_post", "title": "New Listing - 789 Lakeshore Dr", "content": {"text": "Discover luxury waterfront living at 789 Lakeshore Drive. This stunning 5-bedroom estate features an infinity pool and smart home system.", "hashtags": ["#LuxuryLiving", "#WaterfrontEstate", "#DreamHome"], "platform": "instagram"}, "status": "draft", "created_at": now - timedelta(hours=6), "created_by": "ai"},
-        {"content_id": str(uuid.uuid4()), "type": "email_draft", "title": "Q4 Market Update", "content": {"subject": "Your Q4 Real Estate Market Update", "body": "Dear valued clients,\n\nAs we close out Q4, the market continues to show strong momentum. Prices are up 3% in our metro area, and inventory remains tight.\n\nThis presents an excellent opportunity for sellers looking to capitalize on current demand. For buyers, acting quickly on well-priced properties is key.\n\nLet's schedule a call to discuss how these trends affect your real estate goals.", "call_to_action": "Schedule a consultation"}, "status": "published", "created_at": now - timedelta(days=2), "created_by": "ai"},
-        {"content_id": str(uuid.uuid4()), "type": "social_post", "title": "Team Spotlight - Aisha Patel", "content": {"text": "Meet Aisha Patel, one of our senior agents with 5+ years of experience. She specializes in helping first-time homebuyers navigate the market with confidence.", "hashtags": ["#MeetTheTeam", "#RealEstateAgent", "#FirstTimeHomeBuyer"], "platform": "linkedin"}, "status": "draft", "created_at": now - timedelta(hours=12), "created_by": "ai"},
+        {"content_id": str(uuid.uuid4()), "type": "social_post", "title": "New Listing - 789 Lakeshore Dr", "content": {"text": "Discover luxury waterfront living at 789 Lakeshore Drive. This stunning 5-bedroom estate features an infinity pool and smart home system.", "hashtags": ["#LuxuryLiving", "#WaterfrontEstate", "#DreamHome"], "platform": "instagram"}, "status": "draft", "created_at": now - timedelta(hours=6), "created_by": "ai", "workspace_id": DEFAULT_WORKSPACE_ID},
+        {"content_id": str(uuid.uuid4()), "type": "email_draft", "title": "Q4 Market Update", "content": {"subject": "Your Q4 Real Estate Market Update", "body": "Dear valued clients,\n\nAs we close out Q4, the market continues to show strong momentum. Prices are up 3% in our metro area, and inventory remains tight.\n\nThis presents an excellent opportunity for sellers looking to capitalize on current demand. For buyers, acting quickly on well-priced properties is key.\n\nLet's schedule a call to discuss how these trends affect your real estate goals.", "call_to_action": "Schedule a consultation"}, "status": "published", "created_at": now - timedelta(days=2), "created_by": "ai", "workspace_id": DEFAULT_WORKSPACE_ID},
+        {"content_id": str(uuid.uuid4()), "type": "social_post", "title": "Team Spotlight - Aisha Patel", "content": {"text": "Meet Aisha Patel, one of our senior agents with 5+ years of experience. She specializes in helping first-time homebuyers navigate the market with confidence.", "hashtags": ["#MeetTheTeam", "#RealEstateAgent", "#FirstTimeHomeBuyer"], "platform": "linkedin"}, "status": "draft", "created_at": now - timedelta(hours=12), "created_by": "ai", "workspace_id": DEFAULT_WORKSPACE_ID},
     ]
     await content_col.insert_many(content_items)
 
@@ -1015,6 +1015,36 @@ DEFAULT_INTEGRATIONS_CATALOG = [
     {"provider": "crm",              "category": "crm",          "display_name": "CRM (HubSpot / GoHighLevel)"},
     {"provider": "openai",           "category": "ai",           "display_name": "OpenAI / LLM Provider"},
     {"provider": "webhook",          "category": "automation",   "display_name": "Webhooks & Endpoints"},
+]
+
+# ─── Default Automation Policies / Escalation Rules / Templates ───────
+# Seeded into every new workspace (and back-filled into existing ones with
+# zero policies) so onboarding never leaves a client with an empty
+# automation setup. Mirrors the shape used by the legacy seed_database().
+DEFAULT_AUTOMATION_POLICIES = [
+    {"intent": "booking", "action": "auto_run", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "auto_run", "medium_action": "require_approval", "low_action": "escalate"},
+    {"intent": "follow_up", "action": "require_approval", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "require_approval", "medium_action": "require_approval", "low_action": "escalate"},
+    {"intent": "onboarding", "action": "require_approval", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "require_approval", "medium_action": "require_approval", "low_action": "escalate"},
+    {"intent": "inquiry", "action": "manual_review", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "manual_review", "medium_action": "manual_review", "low_action": "escalate"},
+    {"intent": "escalation", "action": "escalate", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "escalate", "medium_action": "escalate", "low_action": "escalate"},
+    {"intent": "spam", "action": "auto_run", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "auto_run", "medium_action": "manual_review", "low_action": "manual_review"},
+    {"intent": "needs_review", "action": "manual_review", "confidence_threshold_high": 0.85, "confidence_threshold_medium": 0.6, "high_action": "manual_review", "medium_action": "manual_review", "low_action": "escalate"},
+]
+
+DEFAULT_ESCALATION_RULES = [
+    {"name": "Urgent recruiting leads", "condition_type": "intent", "condition_value": "onboarding", "route_to": "Team Lead", "priority": "high"},
+    {"name": "Incomplete onboarding data", "condition_type": "keyword", "condition_value": "incomplete,missing,setup", "route_to": "Ops/Admin", "priority": "normal"},
+    {"name": "Calendar conflicts", "condition_type": "keyword", "condition_value": "conflict,reschedule,cancel", "route_to": "Manual Review", "priority": "normal"},
+    {"name": "Escalation requests", "condition_type": "intent", "condition_value": "escalation", "route_to": "Team Lead", "priority": "critical"},
+    {"name": "High-value investor inquiries", "condition_type": "keyword", "condition_value": "investor,investment,portfolio", "route_to": "Team Lead", "priority": "high"},
+]
+
+DEFAULT_CONTENT_TEMPLATES = [
+    {"name": "Welcome Email", "category": "welcome", "template_type": "email", "subject_template": "Welcome to our team, {{contact_name}}!", "body_template": "Dear {{contact_name}},\n\nWelcome to the team! We're thrilled to have you on board.\n\n{{situation}}\n\nPlease don't hesitate to reach out if you need anything during your transition. We're here to help you succeed.\n\nBest regards,\nThe Team", "variables": ["contact_name", "situation"], "tags": ["onboarding", "welcome"]},
+    {"name": "Follow-up Message", "category": "follow_up", "template_type": "email", "subject_template": "Following up: {{subject}}", "body_template": "Hi {{contact_name}},\n\nI wanted to follow up on {{subject}}. {{situation}}\n\nPlease let me know if you have any questions or if there's anything else I can help with.\n\nBest,\nThe Team", "variables": ["contact_name", "subject", "situation"], "tags": ["follow-up", "client"]},
+    {"name": "Recruiting Message", "category": "recruiting", "template_type": "email", "subject_template": "Exciting opportunity at our firm", "body_template": "Hi {{contact_name}},\n\nWe're expanding our team and your profile caught our attention. {{situation}}\n\nWe'd love to discuss how you could be a great fit for our growing team. Would you be available for a brief call this week?\n\nLooking forward to connecting", "variables": ["contact_name", "situation"], "tags": ["recruiting"]},
+    {"name": "New Listing Social Post", "category": "social", "template_type": "social_post", "subject_template": None, "body_template": "Just listed! {{property_details}}. {{highlight}}. Contact us today for a private showing. #NewListing #{{location}}", "variables": ["property_details", "highlight", "location"], "tags": ["listing", "social"]},
+    {"name": "Market Update Post", "category": "market_update", "template_type": "social_post", "subject_template": None, "body_template": "Market Update: {{market_data}}. {{insight}}. Whether you're buying or selling, now is the time to strategize. #MarketUpdate", "variables": ["market_data", "insight"], "tags": ["market", "social", "update"]},
 ]
 
 async def ensure_integrations_seeded():
@@ -1223,6 +1253,77 @@ async def seed_workspace_config(workspace_id: str, *, industry: str = "other", l
                 "updated_at": now,
             })
 
+    # Automation policies (default per-intent rules) — idempotent per intent.
+    for p in DEFAULT_AUTOMATION_POLICIES:
+        existing = await policies_col.find_one({"workspace_id": workspace_id, "intent": p["intent"]})
+        if not existing:
+            await policies_col.insert_one({
+                "workspace_id": workspace_id,
+                "policy_id": str(uuid.uuid4()),
+                "intent": p["intent"],
+                "action": p["action"],
+                "confidence_threshold_high": p["confidence_threshold_high"],
+                "confidence_threshold_medium": p["confidence_threshold_medium"],
+                "high_action": p["high_action"],
+                "medium_action": p["medium_action"],
+                "low_action": p["low_action"],
+                "enabled": True,
+                "created_at": now,
+            })
+
+    # Escalation rules — idempotent per rule name.
+    for r in DEFAULT_ESCALATION_RULES:
+        existing = await escalation_col.find_one({"workspace_id": workspace_id, "name": r["name"]})
+        if not existing:
+            await escalation_col.insert_one({
+                "workspace_id": workspace_id,
+                "rule_id": str(uuid.uuid4()),
+                "name": r["name"],
+                "condition_type": r["condition_type"],
+                "condition_value": r["condition_value"],
+                "route_to": r["route_to"],
+                "priority": r["priority"],
+                "enabled": True,
+                "created_at": now,
+            })
+
+    # Content templates — idempotent per template name.
+    for tpl in DEFAULT_CONTENT_TEMPLATES:
+        existing = await templates_col.find_one({"workspace_id": workspace_id, "name": tpl["name"]})
+        if not existing:
+            await templates_col.insert_one({
+                "workspace_id": workspace_id,
+                "template_id": str(uuid.uuid4()),
+                "name": tpl["name"],
+                "category": tpl["category"],
+                "template_type": tpl["template_type"],
+                "subject_template": tpl["subject_template"],
+                "body_template": tpl["body_template"],
+                "variables": tpl["variables"],
+                "tags": tpl["tags"],
+                "status": "active",
+                "created_at": now,
+                "created_by": "system",
+            })
+
+
+async def backfill_workspace_automations():
+    """Startup safety net: any workspace that has zero automation policies
+    (e.g. created before this seeding logic existed, or via an edge case
+    that skipped seed_workspace_config) gets the default policies/rules/
+    templates retro-fitted. Idempotent — safe to run on every startup."""
+    cursor = workspaces_col.find({}, {"_id": 0, "workspace_id": 1})
+    workspace_ids = [w["workspace_id"] async for w in cursor]
+    backfilled = []
+    for wid in workspace_ids:
+        count = await policies_col.count_documents({"workspace_id": wid})
+        if count == 0:
+            await seed_workspace_config(wid)
+            backfilled.append(wid)
+    if backfilled:
+        print(f"[startup] Backfilled default automations for {len(backfilled)} workspace(s): {backfilled}")
+    return backfilled
+
 
 async def claim_or_create_workspace_for_user(user_doc: dict) -> str:
     """On first login, give the user a workspace.
@@ -1405,6 +1506,7 @@ async def lifespan(app: FastAPI):
     await backfill_simulation_flag()
     await backfill_workspace_scoping()
     await migrate_legacy_role_names()
+    await backfill_workspace_automations()
     # Phase 7e — Background sync scheduler. We launch a single asyncio
     # task that wakes up every PERIODIC_SYNC_INTERVAL_SECS and calls the
     # provider-specific sync helpers for every workspace whose
@@ -3184,79 +3286,9 @@ async def system_health(workspace_id: str = Depends(get_current_workspace_id)):
     }
 
 # ─── Plan & Usage ──────────────────────────────────────────────────────
-@app.get("/api/usage")
-async def get_usage(workspace_id: str = Depends(get_current_workspace_id)):
-    """Return Plan + API Usage + Billing snapshot for the current workspace.
-
-    Until we wire billing/metering, we compute *this month's* API call
-    counts from activity + inbox/contact/content volumes so the UI has
-    realistic data to render. The plan + billing blocks return a default
-    'Starter (Trial)' shape that can be replaced once a Stripe (or other)
-    integration is wired up."""
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc)
-    start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-    scope = {"workspace_id": workspace_id}
-    month_scope = dict(scope)
-    month_scope["timestamp"] = {"$gte": start_of_month}
-
-    # Per-module "API calls" proxy — counts how many records were produced
-    # this month by each subsystem. This is illustrative only; once real
-    # metering is in place this endpoint becomes the single source of truth.
-    inbox_calls = await activity_col.count_documents(merge_query({"event_type": "inbox"}, month_scope))
-    crm_calls = await activity_col.count_documents(merge_query({"event_type": {"$in": ["crm", "calendar"]}}, month_scope))
-    content_calls = await activity_col.count_documents(merge_query({"event_type": "content"}, month_scope))
-    automation_calls = await activity_col.count_documents(merge_query({"event_type": {"$in": ["system", "onboarding"]}}, month_scope))
-    total_calls = inbox_calls + crm_calls + content_calls + automation_calls
-
-    monthly_limit = 10000  # default trial limit — can be overridden per-plan later
-    usage_percent = min(100, round((total_calls / monthly_limit) * 100, 1)) if monthly_limit else 0
-    overage = max(0, total_calls - monthly_limit)
-
-    # Breakdown with shares
-    def pct(n):
-        return round((n / total_calls) * 100, 1) if total_calls else 0
-    breakdown = [
-        {"module": "inbox_ai", "label": "Inbox AI", "calls": inbox_calls, "share": pct(inbox_calls)},
-        {"module": "crm", "label": "CRM", "calls": crm_calls, "share": pct(crm_calls)},
-        {"module": "content", "label": "Content Engine", "calls": content_calls, "share": pct(content_calls)},
-        {"module": "automations", "label": "Automations", "calls": automation_calls, "share": pct(automation_calls)},
-    ]
-
-    # Plan + billing placeholder until a real billing integration is wired.
-    workspace_doc = await workspaces_col.find_one({"workspace_id": workspace_id}, {"_id": 0}) or {}
-    trial_start = workspace_doc.get("created_at") or now
-    if isinstance(trial_start, str):
-        from datetime import datetime as _dt
-        trial_start = _dt.fromisoformat(trial_start.replace("Z", "+00:00"))
-    if trial_start.tzinfo is None:
-        trial_start = trial_start.replace(tzinfo=timezone.utc)
-    renewal = trial_start + timedelta(days=30)
-
-    return {
-        "plan": {
-            "name": "Starter",
-            "tier": "trial",
-            "status": "trial",
-            "renewal_date": renewal.isoformat(),
-            "features": ["Smart Inbox", "CRM", "Content Engine", "Automations", "Simulation Mode"],
-        },
-        "usage": {
-            "total_calls": total_calls,
-            "monthly_limit": monthly_limit,
-            "usage_percent": usage_percent,
-            "overage": overage,
-            "period_start": start_of_month.isoformat(),
-            "breakdown": breakdown,
-        },
-        "billing": {
-            "payment_method": None,  # masked last-4 once integrated (e.g. "•••• 4242")
-            "next_billing_date": renewal.isoformat(),
-            "amount_due": 0,
-            "currency": "USD",
-        },
-    }
+# NOTE: /api/usage was removed (P5 cleanup) — it was dead code. The real
+# Plan & Usage screen (frontend/src/pages/PlanAndUsage.js) reads billing
+# and usage data directly from Supabase and never called this endpoint.
 
 
 
@@ -4034,11 +4066,13 @@ async def update_onboarding_task(task_id: str, req: UpdateOnboardingTaskRequest,
     if req.status == "completed":
         update["completed_at"] = datetime.utcnow().isoformat()
     
-    result = await onboarding_col.update_one({"task_id": task_id}, {"$set": update})
+    result = await onboarding_col.update_one(
+        {"task_id": task_id, "workspace_id": workspace_id}, {"$set": update}
+    )
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Task not found")
     
-    task = await onboarding_col.find_one({"task_id": task_id})
+    task = await onboarding_col.find_one({"task_id": task_id, "workspace_id": workspace_id})
     if task:
         await log_activity("onboarding", f"Task {req.status}", f"Onboarding task '{task['title']}' marked as {req.status}", task["agent_id"], "agent")
     
@@ -4112,7 +4146,7 @@ async def generate_content(req: ContentGenerateRequest, workspace_id: str = Depe
 
 @app.delete("/api/content/{content_id}")
 async def delete_content(content_id: str, workspace_id: str = Depends(get_current_workspace_id)):
-    result = await content_col.delete_one({"content_id": content_id})
+    result = await content_col.delete_one({"content_id": content_id, "workspace_id": workspace_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Content not found")
     return {"success": True}
@@ -4518,7 +4552,7 @@ async def update_business_profile(req: BusinessProfileUpdate, workspace_id: str 
         need_regenerate = False
         if not old_simulation_mode:
             # Entering Simulation Mode: seed sandbox if it's empty for this industry.
-            existing_sim = await inbox_col.count_documents({"is_simulation": True})
+            existing_sim = await inbox_col.count_documents({"is_simulation": True, "workspace_id": workspace_id})
             if existing_sim == 0:
                 need_regenerate = True
         elif req.industry != old_industry:
@@ -4526,7 +4560,7 @@ async def update_business_profile(req: BusinessProfileUpdate, workspace_id: str 
             need_regenerate = True
 
         if need_regenerate:
-            await generate_simulation_data(req.industry)
+            await generate_simulation_data(req.industry, workspace_id)
             await log_activity("system", "Simulation data auto-generated", f"Generated {req.industry} data", "simulation", "system")
 
     updated = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
@@ -4551,9 +4585,16 @@ async def get_integration(provider: str, workspace_id: str = Depends(get_current
         raise HTTPException(status_code=404, detail="Integration not found")
     return serialize_doc(integration)
 
+OAUTH_ONLY_PROVIDERS = {"gmail", "google_calendar"}
+
 @app.put("/api/integrations/{provider}")
 async def update_integration(provider: str, req: IntegrationUpdate, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("leader"))):
     """Update an integration configuration."""
+    if provider in OAUTH_ONLY_PROVIDERS and req.status == "connected":
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{provider}' requires real Google OAuth. Use GET /api/integrations/google/start instead of manually marking it as connected.",
+        )
     update_data = {
         "status": req.status,
         "config": req.config,
@@ -4595,16 +4636,22 @@ async def test_integration(provider: str, workspace_id: str = Depends(get_curren
 # ─── Simulation Layer ──────────────────────────────────────────────────────
 # Production-quality simulation system for industry validation
 
-async def generate_simulation_data(industry: str):
-    """Generate realistic operational data for the selected industry."""
+async def generate_simulation_data(industry: str, workspace_id: str):
+    """Generate realistic operational data for the selected industry.
+
+    CRITICAL: every record AND every clear/count operation here MUST be
+    scoped to `workspace_id`. Without this, simulation data from one
+    workspace leaks into (and can be wiped from) every other workspace —
+    a full breakdown of multi-tenant isolation.
+    """
     now = datetime.utcnow()
     
-    # Clear existing simulation data
-    await inbox_col.delete_many({"is_simulation": True})
-    await contacts_col.delete_many({"is_simulation": True})
-    await calendar_col.delete_many({"is_simulation": True})
-    await agents_col.delete_many({"is_simulation": True})
-    await activity_col.delete_many({"is_simulation": True})
+    # Clear existing simulation data — scoped to this workspace only.
+    await inbox_col.delete_many({"is_simulation": True, "workspace_id": workspace_id})
+    await contacts_col.delete_many({"is_simulation": True, "workspace_id": workspace_id})
+    await calendar_col.delete_many({"is_simulation": True, "workspace_id": workspace_id})
+    await agents_col.delete_many({"is_simulation": True, "workspace_id": workspace_id})
+    await activity_col.delete_many({"is_simulation": True, "workspace_id": workspace_id})
     
     simulation_data = {}
     
@@ -4775,17 +4822,21 @@ async def generate_simulation_data(industry: str):
         
         simulation_data = {"contacts": contacts, "inbox": inbox_items, "events": calendar_events, "agents": agents, "activities": activities}
     
-    # Insert all simulation data into database
-    if simulation_data.get("contacts"):
-        await contacts_col.insert_many(simulation_data["contacts"])
-    if simulation_data.get("inbox"):
-        await inbox_col.insert_many(simulation_data["inbox"])
-    if simulation_data.get("events"):
-        await calendar_col.insert_many(simulation_data["events"])
-    if simulation_data.get("agents"):
-        await agents_col.insert_many(simulation_data["agents"])
-    if simulation_data.get("activities"):
-        await activity_col.insert_many(simulation_data["activities"])
+    # Insert all simulation data into database — stamp workspace_id on
+    # every record right before insert so no industry branch above can
+    # accidentally omit it.
+    for key, col in (
+        ("contacts", contacts_col),
+        ("inbox", inbox_col),
+        ("events", calendar_col),
+        ("agents", agents_col),
+        ("activities", activity_col),
+    ):
+        items = simulation_data.get(key)
+        if items:
+            for item in items:
+                item["workspace_id"] = workspace_id
+            await col.insert_many(items)
     
     return {
         "success": True,
@@ -4811,7 +4862,7 @@ async def generate_simulation(workspace_id: str = Depends(get_current_workspace_
         raise HTTPException(status_code=400, detail="Simulation mode is not enabled")
     
     industry = profile.get("industry", "other")
-    result = await generate_simulation_data(industry)
+    result = await generate_simulation_data(industry, workspace_id)
     
     await log_activity("system", "Simulation data generated", f"Generated {industry} operational data", "simulation", "system")
     
@@ -4820,13 +4871,13 @@ async def generate_simulation(workspace_id: str = Depends(get_current_workspace_
 
 @app.post("/api/simulation/clear")
 async def clear_simulation(workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("leader"))):
-    """Clear all simulation data."""
+    """Clear all simulation data — scoped to the current workspace only."""
     deleted_counts = {
-        "contacts": (await contacts_col.delete_many({"is_simulation": True})).deleted_count,
-        "inbox": (await inbox_col.delete_many({"is_simulation": True})).deleted_count,
-        "events": (await calendar_col.delete_many({"is_simulation": True})).deleted_count,
-        "agents": (await agents_col.delete_many({"is_simulation": True})).deleted_count,
-        "activities": (await activity_col.delete_many({"is_simulation": True})).deleted_count,
+        "contacts": (await contacts_col.delete_many({"is_simulation": True, "workspace_id": workspace_id})).deleted_count,
+        "inbox": (await inbox_col.delete_many({"is_simulation": True, "workspace_id": workspace_id})).deleted_count,
+        "events": (await calendar_col.delete_many({"is_simulation": True, "workspace_id": workspace_id})).deleted_count,
+        "agents": (await agents_col.delete_many({"is_simulation": True, "workspace_id": workspace_id})).deleted_count,
+        "activities": (await activity_col.delete_many({"is_simulation": True, "workspace_id": workspace_id})).deleted_count,
     }
     
     await log_activity("system", "Simulation data cleared", "All simulation data removed", "simulation", "system")
@@ -4836,16 +4887,16 @@ async def clear_simulation(workspace_id: str = Depends(get_current_workspace_id)
 
 @app.get("/api/simulation/status")
 async def simulation_status(workspace_id: str = Depends(get_current_workspace_id)):
-    """Get simulation mode status and data counts."""
+    """Get simulation mode status and data counts — scoped to the current workspace only."""
     profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
     simulation_mode = profile.get("simulation_mode", False) if profile else False
     
     counts = {
-        "contacts": await contacts_col.count_documents({"is_simulation": True}),
-        "inbox": await inbox_col.count_documents({"is_simulation": True}),
-        "events": await calendar_col.count_documents({"is_simulation": True}),
-        "agents": await agents_col.count_documents({"is_simulation": True}),
-        "activities": await activity_col.count_documents({"is_simulation": True}),
+        "contacts": await contacts_col.count_documents({"is_simulation": True, "workspace_id": workspace_id}),
+        "inbox": await inbox_col.count_documents({"is_simulation": True, "workspace_id": workspace_id}),
+        "events": await calendar_col.count_documents({"is_simulation": True, "workspace_id": workspace_id}),
+        "agents": await agents_col.count_documents({"is_simulation": True, "workspace_id": workspace_id}),
+        "activities": await activity_col.count_documents({"is_simulation": True, "workspace_id": workspace_id}),
     }
     
     return {
@@ -5694,7 +5745,7 @@ async def complete_welcome_onboarding(
         )
         if existing == 0:
             try:
-                await generate_simulation_data(industry)
+                await generate_simulation_data(industry, workspace_id)
             except Exception:  # noqa: BLE001
                 # Seeding is best-effort — even with zero seeded rows the
                 # rest of the activation screen still works (counters

@@ -1,42 +1,30 @@
 [
   {
-    "content": "Crear componente ProviderConnectModal (modal Google/Microsoft) reutilizable",
+    "content": "P1: IDOR fixes (onboarding task, content delete) + audit + tests",
     "status": "completed"
   },
   {
-    "content": "Actualizar StepInbox.js para usar el modal en handleConnect",
+    "content": "P2: Gmail/Calendar fake integration removed, real OAuth-only enforced",
     "status": "completed"
   },
   {
-    "content": "Actualizar StepCalendar.js para usar el modal en handleConnect",
+    "content": "P3: Simulation generate/clear wired + Sidebar toggle + workspace isolation fix",
     "status": "completed"
   },
   {
-    "content": "Extender OnboardingShell.js para manejar también ?microsoft_connected",
+    "content": "P4: Workspace automation seeding (policies/rules/templates) + backfill",
     "status": "completed"
   },
   {
-    "content": "Añadir traducciones ES/EN para el modal y los nuevos estados",
+    "content": "P5: UI/consistency polish (7 items) + dead endpoint removal",
     "status": "completed"
   },
   {
-    "content": "Verificar compilación frontend (esbuild) y reiniciar servicio",
+    "content": "Testing agent full pass: found & fixed 1 critical bug (simulation workspace_id leak)",
     "status": "completed"
   },
   {
-    "content": "Crear DataModeBanner componente reutilizable",
-    "status": "completed"
-  },
-  {
-    "content": "Integrar banner en SmartInbox y Schedule",
-    "status": "completed"
-  },
-  {
-    "content": "Añadir traducciones ES/EN para el banner",
-    "status": "completed"
-  },
-  {
-    "content": "Tests backend (17/17 PASS)",
+    "content": "Final regression: 14/14 IDOR + 20/20 priorities tests passing",
     "status": "completed"
   }
 ]

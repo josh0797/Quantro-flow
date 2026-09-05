@@ -28,6 +28,7 @@ import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { toast } from 'sonner';
+import { useNavigate } from 'react-router-dom';
 import { useLanguage } from '../context/LanguageContext';
 import { authFetch } from '../lib/authFetch';
 
@@ -61,40 +62,6 @@ const INTEGRATION_MANIFEST = [
           { value: 'gpt-4-turbo', label: 'gpt-4-turbo' },
         ],
         default: 'gpt-4o',
-      },
-    ],
-  },
-  {
-    id: 'gmail',
-    i18nKey: 'integrations.gmail',
-    group: 'email',
-    name: 'Gmail',
-    description: 'Sync incoming email into Smart Inbox and let the system draft replies.',
-    icon: Mail,
-    gradient: 'from-red-500 to-orange-500',
-    connectLabelKey: 'integrations.actions.connect_google',
-    oauth: true,
-    fields: [
-      { key: 'email', labelKey: 'integrations.gmail.account', placeholder: 'you@company.com', required: true },
-    ],
-  },
-  {
-    id: 'google_calendar',
-    i18nKey: 'integrations.calendar',
-    group: 'email',
-    name: 'Google Calendar',
-    description: 'Two-way sync events, bookings, and availability windows.',
-    icon: Calendar,
-    gradient: 'from-blue-500 to-indigo-500',
-    connectLabelKey: 'integrations.actions.connect_google',
-    oauth: true,
-    fields: [
-      {
-        key: 'calendar_id',
-        labelKey: 'integrations.calendar.calendar_id',
-        placeholder: 'primary',
-        default: 'primary',
-        required: true,
       },
     ],
   },
@@ -139,6 +106,7 @@ const INTEGRATION_MANIFEST = [
     icon: Webhook,
     gradient: 'from-amber-500 to-yellow-500',
     connectLabelKey: 'integrations.actions.enable_webhooks',
+    comingSoon: true,
     fields: [
       {
         key: 'secret',
@@ -388,6 +356,36 @@ function CopyableEndpoint({ url, testId }) {
   );
 }
 
+function RealConnectCard({ t }) {
+  const navigate = useNavigate();
+  return (
+    <Card
+      data-testid="email-real-connect-card"
+      className="p-6 bg-[hsl(var(--card))] border-[hsl(var(--border))]"
+    >
+      <div className="flex items-start gap-4">
+        <div className="w-11 h-11 shrink-0 rounded-lg bg-gradient-to-br from-red-500 to-orange-500 flex items-center justify-center text-white shadow-sm">
+          <Mail size={20} />
+        </div>
+        <div className="flex-1 min-w-0 space-y-3">
+          <div>
+            <h3 className="text-base font-semibold text-foreground">{t('integrations.real_connect.title')}</h3>
+            <p className="text-xs text-muted-foreground mt-0.5">{t('integrations.real_connect.description')}</p>
+          </div>
+          <Button
+            size="sm"
+            onClick={() => navigate('/welcome/inbox')}
+            data-testid="email-real-connect-button"
+          >
+            <ExternalLink size={14} className="mr-2" />
+            {t('integrations.real_connect.cta')}
+          </Button>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTest, testingProvider, t }) {
   const Icon = manifest.icon;
   const status = backendState?.status || 'disconnected';
@@ -454,7 +452,16 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
               <p className="text-xs text-muted-foreground mt-0.5">{localDescription}</p>
             </div>
             <div className="flex items-center gap-2 shrink-0">
-              <StatusBadge status={status} t={t} />
+              {manifest.comingSoon ? (
+                <Badge
+                  data-testid={`status-badge-${manifest.id}-coming-soon`}
+                  className="bg-[hsl(var(--warning)/0.15)] text-[hsl(var(--warning))] border border-[hsl(var(--warning)/0.3)]"
+                >
+                  {t('integrations.webhook.coming_soon_badge')}
+                </Badge>
+              ) : (
+                <StatusBadge status={status} t={t} />
+              )}
               {backendState?.last_sync_at && (
                 <span className="text-[11px] text-muted-foreground">
                   {t('integrations.status.last_sync', { time: new Date(backendState.last_sync_at).toLocaleString() })}
@@ -463,6 +470,13 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
             </div>
           </div>
 
+          {manifest.comingSoon && (
+            <div className="flex gap-2 items-start rounded-md border border-[hsl(var(--warning)/0.25)] bg-[hsl(var(--warning)/0.06)] px-3 py-2">
+              <AlertCircle size={14} className="text-[hsl(var(--warning))] mt-0.5 shrink-0" />
+              <p className="text-xs text-muted-foreground leading-relaxed">{t('integrations.webhook.coming_soon_description')}</p>
+            </div>
+          )}
+
           {localHelper && (
             <div className="flex gap-2 items-start rounded-md border border-[hsl(var(--primary)/0.2)] bg-[hsl(var(--primary)/0.05)] px-3 py-2">
               <AlertCircle size={14} className="text-[hsl(var(--primary))] mt-0.5 shrink-0" />
@@ -470,7 +484,7 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
             </div>
           )}
 
-          {endpoint && (
+          {endpoint && !manifest.comingSoon && (
             <div className="space-y-2">
               <Label className="text-xs text-muted-foreground uppercase tracking-wide">
                 {t('integrations.webhook.endpoint_label')}
@@ -480,7 +494,7 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
           )}
 
           {/* Config form */}
-          {manifest.fields && manifest.fields.length > 0 && (
+          {!manifest.comingSoon && manifest.fields && manifest.fields.length > 0 && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {manifest.fields.map((f) => {
                 const inputId = `${manifest.id}-${f.key}`;
@@ -549,7 +563,7 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
           )}
 
           <div className="flex flex-wrap gap-2 pt-1">
-            {isConnected ? (
+            {manifest.comingSoon ? null : isConnected ? (
               <>
                 <Button
                   variant="outline"
@@ -737,7 +751,7 @@ export default function IntegrationsPanel() {
 
       {GROUPS.map((group) => {
         const items = INTEGRATION_MANIFEST.filter((m) => m.group === group.key);
-        if (items.length === 0) return null;
+        if (items.length === 0 && group.key !== 'email') return null;
         const GroupIcon = group.icon;
         return (
           <section
@@ -753,6 +767,7 @@ export default function IntegrationsPanel() {
               <Separator className="flex-1 bg-[hsl(var(--border))]" />
             </div>
             <div className="space-y-3">
+              {group.key === 'email' && <RealConnectCard t={t} />}
               {items.map((m) => (
                 <IntegrationCard
                   key={m.id}

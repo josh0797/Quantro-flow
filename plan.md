@@ -1,255 +1,213 @@
-# plan.md (Updated)
+# Plan de fixes (Quantro Flow | Business OS)
 
-## 1. Objectives
-- Deliver a modern, premium **dark-first**, OS-like SaaS web app: **Quantro Flow | Business OS**.
-- Ship a connected, production-feeling workflow engine:
-  **Smart Inbox → AI triage (single + batch) → automation policy evaluation → (auto-run OR review & control) → Calendar/CRM updates → activity + execution trail**.
-- Maintain **multi-industry adaptability** via configuration (Business Profile) — no industry-specific rewrites.
-- Make Settings the **operational control center** where the system becomes real:
-  - API keys (OpenAI/LLM)
-  - Email + Calendar integrations (Google + Microsoft OAuth)
-  - CRM connections (future)
-  - Webhooks/endpoints (future)
-  - Automation governance
-- Keep previews honest and trust-building:
-  - **Preview → Connect** onboarding pattern (never claim real data unless connected)
-  - Clear “Modo demo / Datos reales” labeling everywhere it matters
-- **Guarantee strict Simulation vs Live data isolation (critical trust requirement)**:
-  - Demo/Simulation Mode → sandbox dataset only
-  - Live Mode → real workspace dataset only (`is_simulation != True`)
-  - **Zero mixing** and **zero ambiguity** about which dataset is visible
-- **Ship SaaS foundation with strict tenant isolation**:
-  - **Supabase Auth** (shared project with https://quantro.technology landing)
-  - Multi-workspace per user
-  - Workspace-scoped operational model
-  - Billing/plan truth in Supabase (`profiles`)
-  - Audit logging foundation for trust and compliance
-- **Enforce AI cost controls (no free AI bleeding)**:
-  - Internal **USD-based AI Credits** system
-  - Block coupon/trial users from Quantro credits; require their own OpenAI key
-  - Force **`gpt-4o-mini`** when using Quantro credits
-  - Debit credits after successful generations and log per-request usage
+## Objetivos
+- Eliminar vulnerabilidades IDOR (scope por `workspace_id`) en endpoints críticos.
+- Arreglar el flujo de integraciones Google (Gmail/Calendar) evitando estados “connected” manuales y removiendo UI falsa.
+- Reparar Modo Simulación para que genere/limpie datos al activar/desactivar, **y asegurar aislamiento multi-tenant** (toda data simulada con `workspace_id`).
+- Asegurar que workspaces nuevos (y existentes) queden sembrados con `policies/escalations/templates` (idempotente) + backfill.
+- Mejorar consistencia/claridad en UI (idioma, copy, estados vacíos, features duplicadas) y remover código muerto.
 
-**Current status (as of this update):**
-- ✅ **Phases 1–6 complete** (core app + workflow engine + policies/escalations + templates + auto-execution + Business OS transformation).
-- ✅ **Phase 7a-sup complete:** Supabase Auth + workspace scoping
-  - Frontend uses Supabase Auth (email/password)
-  - Backend verifies Supabase JWTs (JWKS ES256 + HS256 fallback)
-  - Mongo operational data stays workspace-scoped
-  - Plan & Usage reads real data from Supabase (`profiles`, `ai_usage`)
-- ✅ **Phase 7d-pre complete (P0): AI Credits wrapper enforcement**
-- ✅ **Phase 7b complete:** RBAC + invitations + multi-workspace UX (pending live multi-user matrix verification)
-- ✅ **Phase 7c complete:** MongoDB → Supabase backfill executed + cleanup + workspace rename + audit export
-- ✅ **Phase 7e complete (P0): Real OAuth integrations (Google + Microsoft) + background sync**
-  - Backend + frontend integrated, dual-provider UX in onboarding
-  - Tokens encrypted at rest, refresh supported
-  - 15-minute background sync scheduler implemented
-  - Backend tests: **17/17 PASS** (`iteration_16.json`)
-- ✅ **Phase 7e.3 complete (P1): Persistent “Modo demo / Datos reales” banner**
-  - Smart Inbox + Schedule show clear mode and allow manual sync
+> **Estado global:** Todas las prioridades (P1–P5) están **COMPLETADAS** y verificadas con tests automatizados + smoke tests HTTP.
 
 ---
 
-## Phase 7e — Real OAuth Integrations (Google + Microsoft) + Sync
+## Fase 1 — P0 Seguridad (IDOR) ✅ COMPLETADA
 
-### ✅ Implementado (Backend)
-- **`/app/backend/google_oauth.py`**
-  - Fernet encryption for access/refresh tokens at rest
-  - `build_authorization_url`, `exchange_code_for_tokens`, `credentials_from_tokens`, `maybe_refresh`
-  - Fetch helpers: Gmail + Calendar, revoke token
-  - `is_oauth_configured()` + `resolve_redirect_uri()` to fail cleanly when credentials are missing
-- **`/app/backend/microsoft_oauth.py`**
-  - MSAL-based auth code flow for Microsoft Graph
-  - Encryption + refresh + revoke support mirroring Google
-- **REST endpoints** (both providers):
-  - `GET /api/integrations/{provider}/status`
-  - `GET /api/integrations/{provider}/start?return_to=`
-  - `GET /api/integrations/{provider}/callback?code&state`
-  - `POST /api/integrations/{provider}/sync`
-  - `POST /api/integrations/{provider}/auto-sync` with `{ paused: true|false }`
-  - `DELETE /api/integrations/{provider}/disconnect`
-- **Background scheduler**
-  - 15-minute sync loop created in FastAPI lifespan
-  - Provider-aware sync
+**User stories (mín. 5)**
+1. Como líder, quiero actualizar una tarea de onboarding sin riesgo de modificar tareas de otro workspace.
+2. Como líder, quiero borrar contenido solo dentro de mi workspace.
+3. Como usuario, quiero que un ID externo/copypasteado no me deje ver/modificar recursos ajenos.
+4. Como auditor, quiero pruebas automáticas que detecten regresiones de aislamiento por workspace.
+5. Como devops, quiero deploy inmediato con cambios mínimos y tests verdes.
 
-### ✅ Implementado (Frontend onboarding)
-- **Preview → Connect UX** in `/welcome/*`:
-  - Primary CTA opens a **modal provider picker** (Google / Microsoft)
-  - Full-page redirect to provider consent screen (Safari/mobile-safe)
-- **`ProviderConnectModal`** (new)
-  - One modal, two providers, consistent error toasts
-- **Onboarding callback handler** updated to be provider-aware:
-  - Handles `?google_connected=...` and `?microsoft_connected=...`
-  - Triggers provider-specific `/sync`
-  - Marks inbox + calendar steps as real-connected
-  - Clears query params to avoid repeat sync on refresh
+**Implementación (realizada)**
+1) `backend/server.py`:
+- `update_onboarding_task` (`PUT /api/onboarding/{task_id}`):
+  - `update_one` y `find_one` ahora filtran por `{"task_id": task_id, "workspace_id": workspace_id}`.
+  - Se mantiene `404` si no matchea.
+- `delete_content` (`DELETE /api/content/{content_id}`):
+  - `delete_one` ahora filtra por `{"content_id": content_id, "workspace_id": workspace_id}`.
+- Auditoría endpoints `{id}`: confirmados ya correctos (scoping por `workspace_id`) para:
+  - `/api/contacts/{id}`, `/api/calendar/{id}`, `/api/policies/{id}`, `/api/templates/{id}`, `/api/escalation-rules/{id}`.
+- Salvaguarda: se reforzó que el seed coloque `workspace_id` en tasks/content de seed (defensivo).
 
-### ✅ Phase 7e.3 — Persistent “Modo demo / Datos reales” banner
-- New component: **`/app/frontend/src/components/DataModeBanner.js`**
-  - Polls integration status every 60s
-  - Shows DEMO state with CTA to connect (routes to `/welcome/inbox` or `/welcome/calendar`)
-  - Shows REAL state with:
-    - provider label + account email
-    - last sync relative time
-    - manual “Sync now” action
-    - surfaces last sync error + paused badge
-- Integrated in:
-  - `/app/frontend/src/pages/SmartInbox.js`
-  - `/app/frontend/src/pages/Schedule.js`
-- i18n: ES + EN keys added (`data_mode_banner.*`, `welcome.connect_modal.*`, plus provider-parameterized toasts)
+**Tests (agregados y pasando)**
+- Nuevo: `/app/backend_test_idor.py` (14/14 passing)
+  - Crea recursos en Workspace A y valida que Workspace B reciba `404` en intentos de update/delete/read.
+  - Incluye spot-check de calendar delete y contact read.
 
-### ✅ Testing
-- Backend test suite report: `/app/test_reports/iteration_16.json`
-  - **17/17 PASS**
-  - Correct behaviors verified:
-    - OAuth endpoints require auth (401 without token)
-    - Missing credentials returns 503 with helpful detail
-    - Sync without connection returns 400 (informative, not 500)
-    - Disconnect idempotent
-    - Auto-sync endpoint exists and behaves correctly
-
-### ⚠️ Pendiente del lado del usuario (one-off)
-To activate real OAuth in production, credentials must be provided in `/app/backend/.env`:
-- Google:
-  - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
-  - Redirect URI: `https://<host>/api/integrations/google/callback`
-- Microsoft:
-  - `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`
-  - Redirect URI: `https://<host>/api/integrations/microsoft/callback`
+**Verificación manual (realizada vía smoke HTTP)**
+- Confirmado con dos workspaces sintéticos que update/delete cross-workspace falla.
 
 ---
 
-## 2. Implementation Steps
+## Fase 2 — P2 Integración Gmail/Calendar rota (UI + hardening) ✅ COMPLETADA
 
-### Phase 1 — Core AI POC (isolation; do not proceed until stable)
-**Status: ✅ Completed**
+**User stories (mín. 5)**
+1. Como usuario, quiero conectar Gmail/Calendar desde un flujo real OAuth (sin formularios falsos).
+2. Como usuario, quiero ver claramente dónde conectar la bandeja desde Configuración.
+3. Como sistema, quiero impedir que alguien “marque conectado” Gmail/Calendar sin OAuth real.
+4. Como usuario, no quiero botones de “Probar conexión” que solo simulen salud para OAuth.
+5. Como soporte, quiero que el estado de conexión venga de `/api/integrations/google/status`.
 
----
+**Implementación (realizada)**
+4) `frontend/src/components/IntegrationsPanel.js` (Opción A):
+- Removidas tarjetas falsas `gmail` y `google_calendar` del `INTEGRATION_MANIFEST`.
+- Agregada `RealConnectCard` con CTA que navega a `/welcome/inbox` (flujo real OAuth).
+- Tarjeta `webhook` marcada como `comingSoon`:
+  - Badge “Próximamente/Coming Soon”
+  - Oculta form/endpoint/botones para evitar prometer `/api/webhooks/*` que no existe.
 
-### Phase 2 — V1 App Development (build around proven core; no auth)
-**Status: ✅ Completed**
+4b) Backend hardening:
+- `PUT /api/integrations/{provider}`:
+  - Bloquea `status="connected"` para `provider in (gmail, google_calendar)` devolviendo `400` con mensaje claro.
+  - Permite `status="disconnected"`.
+  - Mantiene comportamiento normal para `crm`/otros.
 
----
+5) `/api/integrations/{provider}/test`:
+- Se mantiene simulado para providers no-OAuth. Gmail/calendar ya no dependen de este botón desde Settings.
 
-### Phase 3 — Workflow Engine Upgrade (Batch Triage + Manual Control Layer)
-**Status: ✅ Completed**
+6) Limpieza ws_e1bf...:
+- N/A en este entorno (no existía el doc basura en esta DB).
 
----
+**Tests (agregados y pasando)**
+- Incluido en `/app/backend_test_priorities.py`:
+  - Gmail/calendar connect manual → `400`.
+  - Gmail disconnect → `200`.
+  - CRM connect manual → `200`.
 
-### Phase 4 — Workflow Governance + Communication Layer (Automation Policies + Templates)
-**Status: ✅ Completed**
-
----
-
-### Phase 5 — Automation Engine Upgrade (Auto-Execution + Advanced Escalations)
-**Status: ✅ Completed**
-
----
-
-### Phase 6 — Business OS Transformation (Rebrand + Configurability + Settings)
-**Status: ✅ Completed (production-ready)**
-
----
-
-### Phase 7 — SaaS Foundation (Auth + Multi-tenant + RBAC + Audit Logs)
-
-#### Phase 7a-sup — Supabase Auth + Workspace Creation + Strict Workspace Scoping
-**Status: ✅ Completed / ⏳ pending production E2E validation**
-
----
-
-#### Phase 7d-pre — AI Credits System + Backend Wrapper Enforcement (Cost Control)
-**Status: ✅ Implemented / ⏳ pending deployed E2E verification**
+**Verificación manual**
+- Validación de compilación frontend (esbuild) y comportamiento backend por HTTP.
+- Nota: OAuth real requiere credenciales Google/Azure del usuario (fuera del scope de estos fixes).
 
 ---
 
-#### Phase 7b — RBAC + Invitations + Multi-workspace UX
-**Status: ✅ Completed (backend verified) / ⏳ pending live multi-user matrix verification**
+## Fase 3 — P3 Modo Simulación (generación/limpieza + acceso) ✅ COMPLETADA
+
+**User stories (mín. 5)**
+1. Como usuario, al activar Simulación quiero que se generen datos de ejemplo automáticamente.
+2. Como usuario, al volver a Live quiero que se limpien datos simulados.
+3. Como usuario, quiero poder togglear Simulación desde un lugar siempre accesible.
+4. Como usuario, quiero que las pantallas vacías me guíen correctamente a conectar o simular.
+5. Como QA, quiero tests que validen generate/clear vía API al togglear.
+
+**Implementación (realizada)**
+7) Frontend:
+- `LiveEmptyState.js`: tras activar `simulation_mode: true`, llama `POST /api/simulation/generate`.
+- `SimulationModeToggle.js`:
+  - ON: llama `POST /api/simulation/generate`.
+  - OFF: llama `POST /api/simulation/clear`.
+- `Sidebar.js`: re-montado `SimulationModeToggle` en footer (variant `compact`).
+
+**Corrección crítica adicional (hallazgo de testing) — multi-tenant isolation**
+- `backend/server.py`:
+  - `generate_simulation_data(industry, workspace_id)` ahora:
+    - Limpia solo simulación del workspace actual.
+    - Inserta **toda** data simulada con `workspace_id`.
+  - `POST /api/simulation/clear` y `GET /api/simulation/status` ahora están scopeados por `workspace_id`.
+  - Se corrigieron 2 call sites adicionales:
+    - Auto-regeneración en `PUT /api/business-profile`.
+    - Seed en `/api/onboarding/welcome/complete`.
+
+**Tests (agregados y pasando)**
+- `/app/backend_test_priorities.py`: pruebas generate/clear.
+- Verificación adicional manual con 2 workspaces sintéticos:
+  - Generar en A no crea data en B.
+  - Clear en B no borra data de A.
 
 ---
 
-#### Phase 7c — Migration + Cleanup + Export
-**Status: ✅ Completed**
+## Fase 4 — P4 Seed/backfill de automatizaciones para workspaces ✅ COMPLETADA
+
+**User stories (mín. 5)**
+1. Como cliente nuevo, quiero tener policies por defecto sin configurar nada.
+2. Como cliente nuevo, quiero reglas de escalamiento listas para usar.
+3. Como cliente nuevo, quiero templates disponibles al entrar.
+4. Como admin, quiero que el seed sea idempotente (sin duplicados).
+5. Como operador, quiero backfill automático para workspaces existentes con 0 policies.
+
+**Implementación (realizada)**
+10) `seed_workspace_config(workspace_id, ...)`:
+- Ahora crea defaults por workspace:
+  - `automation_policies`: 7 intents.
+  - `escalation_rules`: 5 reglas.
+  - `content_templates`: 5 templates.
+- Idempotencia por item:
+  - Policies: por `intent`.
+  - Rules: por `name`.
+  - Templates: por `name`.
+
+11) Backfill:
+- Añadido `backfill_workspace_automations()` al startup (`lifespan`).
+- Aplica a cualquier workspace con `0` policies.
+- Confirmado que workspaces huérfanos (ej. `ws_6f20be48bd44` en esta DB) quedan sembrados.
+- Se corrigió un caso de duplicados generados durante hot-reload (limpieza de duplicados en el entorno de pruebas).
+
+**Tests (agregados y pasando)**
+- `/app/backend_test_priorities.py` valida:
+  - Counts esperados (7/5/5).
+  - Idempotencia (sin duplicados tras re-seed).
 
 ---
 
-#### Phase 7e — OAuth real (Google + Microsoft) + background sync
-**Status: ✅ Completed**
+## Fase 5 — P5 UI/consistencia + limpieza ✅ COMPLETADA
+
+**User stories (mín. 5)**
+1. Como usuario, si elijo español manualmente, el backend no debe sobreescribir mi elección.
+2. Como usuario, quiero copy consistente entre “Demo/Live” en banners/empty states.
+3. Como usuario, en CRM quiero un mensaje distinto cuando hay contactos pero no seleccioné uno.
+4. Como usuario, quiero fechas formateadas en mi locale real.
+5. Como usuario, si no hay agentes en Onboarding quiero un empty state útil.
+
+**Implementación (realizada)**
+12) `LanguageContext.js`:
+- Agregado flag explícito `quantro_lang_user_set='1'`.
+- Solo se escribe cuando el usuario usa el selector.
+- Hidratación desde backend solo sobreescribe si el usuario **no** eligió manualmente.
+
+13) Copy Demo/Live:
+- `simulation.live_empty_title` actualizado a texto neutral:
+  - ES: “Sin datos reales todavía”
+  - EN: “No real data yet”
+  (evita choque semántico con `DataModeBanner` Demo/Real).
+
+14) `CRM.js`:
+- Si hay contactos pero ninguno seleccionado → `crm.select_prompt`.
+
+15) `Members.js`:
+- `formatStepDate` ahora usa locale explícito: `es-ES` / `en-US` según `useLanguage()`.
+
+16) `Onboarding.js`:
+- Agregado empty state (`LiveEmptyState moduleKey="onboarding"`) si no hay agents.
+
+17) Renombre de feature para evitar colisión:
+- Sidebar: “Onboarding” → “Onboarding de Equipo” / “Team Onboarding”.
+- Members tab mantiene “Onboarding” (people onboarding).
+
+18) Webhook card:
+- Marcada como “Próximamente” + sin endpoint/form activo.
+
+19) Endpoint muerto `/api/usage`:
+- Eliminado de `backend/server.py` (confirmado no usado por `PlanAndUsage.js`).
+
+**Tests / checks**
+- `GET /api/usage` ahora retorna `404` (validado en `/app/backend_test_priorities.py`).
+- Compilación frontend validada con esbuild.
 
 ---
 
-#### Phase 7e.3 — Persistent “Modo demo / Datos reales” banner
-**Status: ✅ Completed**
+## Próximas acciones (orden operativo)
+1) ✅ (Hecho) Ejecutar suites de tests y confirmar verde:
+   - `/app/backend_test_idor.py` (14/14)
+   - `/app/backend_test_priorities.py` (20/20)
+2) ✅ (Hecho) Smoke tests HTTP para endpoints críticos.
+3) (Opcional, fuera de scope) QA con credenciales reales OAuth Google/Microsoft para validar el flujo completo en navegador.
 
 ---
 
-## 3. Next Actions
-
-**Immediate (P0): Validate OAuth end-to-end with real credentials**
-1) Add Google OAuth credentials in `/app/backend/.env`.
-2) Add Microsoft OAuth credentials in `/app/backend/.env`.
-3) Restart backend.
-4) Login, go to `/welcome/inbox` and connect each provider.
-5) Verify:
-   - Sync occurs (emails/events counts in toast)
-   - Smart Inbox + Schedule banner flips to “Datos reales”
-   - Manual sync button works
-
-**Immediate (P0): Validate Phase 7b end-to-end with real Supabase users (still pending)**
-6) Members + invites + role matrix + ownership transfer
-
-**Immediate (P0): Validate AI Credits wrapper end-to-end on Supabase (still pending)**
-7) Ensure migration `20260425_ai_credits_schema.sql` is applied.
-8) Confirm credits decrement + usage logging.
-
-**Next (P2 hardening): Refactor complexity + split monoliths**
-9) Backend:
-   - Refactor `server.py` high cyclomatic functions (`evaluate_advanced_escalation`, `_verify_supabase_jwt`).
-10) Frontend:
-   - Split monolithic pages (`SmartInbox.js`, `Dashboard.js`, `ContentEngine.js`).
-
----
-
-## 4. Success Criteria
-
-**Achieved (Phases 1–6):**
-- Workflow engine: Inbox → AI triage → policies → auto-run or manual control → downstream actions → transparent execution trail.
-- Premium dark UI across modules.
-
-**Phase 7a-sup (Auth + workspace scoping):**
-- ✅ Shared Supabase project (no new DB)
-- ✅ Frontend auth via Supabase
-- ✅ Backend verifies Supabase JWTs
-- ✅ Mongo operational data remains workspace-scoped
-- ⏳ Production E2E validation with real landing accounts
-
-**Phase 7d-pre (AI Credits enforcement):**
-- ✅ All backend AI endpoints routed through `run_ai_request`
-- ✅ Quantro-credit usage forces `gpt-4o-mini`
-- ✅ Coupon/trial users cannot consume Quantro credits
-- ⏳ Credits decremented + usage logged in live Supabase (schema + optional service-role key)
-
-**Phase 7b (RBAC + invitations + multi-workspace UX):**
-- ✅ Role hierarchy implemented
-- ✅ Member CRUD + invite token flow implemented
-- ✅ RBAC enforced on governance/admin endpoints
-- ✅ Frontend workspace switcher + Members page + join page shipped
-- ⏳ Live multi-user verification completed
-
-**Phase 7c (migration + export):**
-- ✅ Mongo → Supabase core relationships migrated
-- ✅ Legacy Mongo workspaces cleaned
-- ✅ Audit export shipped
-
-**Phase 7e (OAuth + sync):**
-- ✅ Google OAuth implemented end-to-end (tokens encrypted + refresh)
-- ✅ Microsoft OAuth implemented end-to-end (tokens encrypted + refresh)
-- ✅ Provider picker modal in onboarding
-- ✅ Provider-aware callback handler and sync
-- ✅ 15-minute scheduler for background sync
-- ✅ Backend test suite passes (17/17)
-
-**Phase 7e.3 (mode banner):**
-- ✅ Smart Inbox + Schedule clearly label “Modo demo / Datos reales”
-- ✅ Manual sync available when connected
-- ✅ Status polling keeps UI honest
+## Criterios de éxito (cumplidos)
+- ✅ No existe update/delete cross-workspace en onboarding/content (tests IDOR pasan).
+- ✅ Gmail/Calendar solo conectan vía OAuth real; no se puede forzar `connected` por PUT.
+- ✅ Simulación genera y limpia datos; toggle accesible; y **sin leak multi-tenant** (todo scopeado por `workspace_id`).
+- ✅ Workspaces nuevos y existentes con 0 policies quedan sembrados (idempotente).
+- ✅ UI consistente (idioma, copy, empty states) y sin endpoint `/api/usage` muerto.

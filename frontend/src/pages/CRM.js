@@ -324,7 +324,9 @@ export default function CRM() {
             <Card className="h-full flex items-center justify-center min-h-[300px]">
               <CardContent className="text-center">
                 <Users size={32} className="mx-auto text-muted-foreground mb-3" />
-                <p className="text-sm text-muted-foreground">{t('crm.empty_state')}</p>
+                <p className="text-sm text-muted-foreground">
+                  {contacts.length > 0 ? t('crm.select_prompt') : t('crm.empty_state')}
+                </p>
               </CardContent>
             </Card>
           )}

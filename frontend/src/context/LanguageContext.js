@@ -30,6 +30,7 @@ import {
  */
 
 const STORAGE_KEY = 'quantro_lang';
+const USER_SET_KEY = 'quantro_lang_user_set';
 const SUPPORTED_CODES = SUPPORTED_LANGUAGES.map((l) => l.code);
 
 const LanguageContext = createContext(null);
@@ -46,6 +47,29 @@ function readLocalLang() {
 function writeLocalLang(v) {
   try {
     if (typeof window !== 'undefined') localStorage.setItem(STORAGE_KEY, v);
+  } catch {
+    /* ignore quota / privacy mode */
+  }
+}
+
+/**
+ * Whether the user has EXPLICITLY chosen a language via the switcher
+ * (as opposed to just inheriting the DEFAULT_LANGUAGE on first paint).
+ * This is the flag that should gate whether backend hydration is allowed
+ * to override the local choice — comparing against DEFAULT_LANGUAGE alone
+ * can't distinguish "never chose" from "chose Spanish on purpose".
+ */
+function readUserSetFlag() {
+  try {
+    return typeof window !== 'undefined' && localStorage.getItem(USER_SET_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function writeUserSetFlag() {
+  try {
+    if (typeof window !== 'undefined') localStorage.setItem(USER_SET_KEY, '1');
   } catch {
     /* ignore quota / privacy mode */
   }
@@ -92,10 +116,13 @@ export function LanguageProvider({ children }) {
         const profile = await res.json();
         const remote = profile?.language;
         if (!cancelled && remote && SUPPORTED_CODES.includes(remote)) {
-          // Backend wins on first hydration ONLY if user hasn't explicitly chosen locally.
-          // We prefer a local override because the user just clicked the switcher.
-          const local = readLocalLang();
-          if (!local || local === DEFAULT_LANGUAGE) {
+          // Backend wins on first hydration ONLY if the user has never
+          // explicitly picked a language via the switcher. We track this
+          // with a dedicated flag instead of comparing against
+          // DEFAULT_LANGUAGE, because "never chose" and "chose Spanish on
+          // purpose" both look identical under the old check.
+          const userSet = readUserSetFlag();
+          if (!userSet) {
             setLangState(remote);
             writeLocalLang(remote);
           }
@@ -143,6 +170,10 @@ export function LanguageProvider({ children }) {
       if (!SUPPORTED_CODES.includes(next)) return;
       setLangState(next);
       writeLocalLang(next);
+      // Mark this as an explicit user choice so future backend hydrations
+      // (e.g. after re-login, or the business profile changing) never
+      // silently override it again.
+      writeUserSetFlag();
       // Only push to backend once the app has hydrated — avoids overwriting the
       // backend-preferred value on the very first render.
       if (hydrated) {

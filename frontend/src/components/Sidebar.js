@@ -16,6 +16,7 @@ import {
 import { toast } from 'sonner';
 import { authFetch } from '../lib/authFetch';
 import { authCreateWorkspace } from '../lib/api';
+import SimulationModeToggle from './SimulationModeToggle';
 
 const navItems = [
   { to: '/dashboard', icon: LayoutDashboard, labelKey: 'sidebar.dashboard', testId: 'nav-dashboard' },
@@ -150,9 +151,14 @@ export default function Sidebar() {
         })}
       </nav>
 
-      {/* Footer: language switcher + integrations + user menu. No system
-          status / simulation toggle — removed per cleanup spec. */}
+      {/* Footer: language switcher + simulation toggle + integrations + user menu. */}
       <div className="px-3 pb-4 space-y-2">
+        {!collapsed && (
+          <div data-testid="sidebar-simulation-footer">
+            <SimulationModeToggle variant="compact" />
+          </div>
+        )}
+
         {!collapsed && (
           <div data-testid="sidebar-language-footer" className="px-1">
             <LanguageSwitcher variant="compact" />

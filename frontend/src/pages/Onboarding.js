@@ -18,6 +18,7 @@ import { format, parseISO } from 'date-fns';
 import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 import { getEntityLabel } from '../config/industryConfig';
 import { useLanguage } from '../context/LanguageContext';
+import LiveEmptyState from '../components/LiveEmptyState';
 
 const statusColors = {
   onboarding: 'bg-[hsl(var(--warning)/0.15)] text-[hsl(var(--warning))]',
@@ -132,6 +133,8 @@ export default function Onboarding() {
         <div className="space-y-4">
           {[1,2,3].map(i => <Skeleton key={i} className="h-24 rounded-xl" />)}
         </div>
+      ) : onboardingAgents.length === 0 && activeAgents.length === 0 ? (
+        <LiveEmptyState moduleKey="onboarding" />
       ) : (
         <div data-testid="onboarding-agent-list" className="space-y-6">
           {/* Onboarding Agents */}
