@@ -79,7 +79,7 @@ class Phase7eOAuthTester:
                 try:
                     resp_json = response.json()
                     self.log(f"   Response: {json.dumps(resp_json, indent=2)[:200]}", "DEBUG")
-                except:
+                except Exception:
                     self.log(f"   Response: {response.text[:200]}", "DEBUG")
                 return True, response
             else:
@@ -170,7 +170,7 @@ class Phase7eOAuthTester:
                     self.log("   ✓ Correctly reports configured=false, connected=false", "PASS")
                 else:
                     self.log(f"   ⚠ Unexpected status: {data}", "WARN")
-            except:
+            except Exception:
                 pass
         
         success, resp = self.test("Microsoft status (no credentials)", "GET", "api/integrations/microsoft/status", 200)
@@ -181,7 +181,7 @@ class Phase7eOAuthTester:
                     self.log("   ✓ Correctly reports configured=false, connected=false", "PASS")
                 else:
                     self.log(f"   ⚠ Unexpected status: {data}", "WARN")
-            except:
+            except Exception:
                 pass
         
         # Test 6-7: Start endpoints without credentials (should return 503)
@@ -194,7 +194,7 @@ class Phase7eOAuthTester:
                     self.log("   ✓ Returns helpful detail about missing credentials", "PASS")
                 else:
                     self.log(f"   ⚠ Detail message could be more helpful: {data.get('detail', '')}", "WARN")
-            except:
+            except Exception:
                 pass
         
         success, resp = self.test("Microsoft start (no credentials - expect 503)", "GET", "api/integrations/microsoft/start", 503)
@@ -205,7 +205,7 @@ class Phase7eOAuthTester:
                     self.log("   ✓ Returns helpful detail about missing credentials", "PASS")
                 else:
                     self.log(f"   ⚠ Detail message could be more helpful: {data.get('detail', '')}", "WARN")
-            except:
+            except Exception:
                 pass
         
         # Test 8-9: Sync endpoints without connection (should return 400/404, NOT 500)
@@ -216,7 +216,7 @@ class Phase7eOAuthTester:
                 data = resp.json()
                 if 'detail' in data:
                     self.log(f"   ✓ Returns informative detail: {data['detail']}", "PASS")
-            except:
+            except Exception:
                 pass
         
         success, resp = self.test("Microsoft sync (no connection - expect 400/404)", "POST", "api/integrations/microsoft/sync", [400, 404])
@@ -225,7 +225,7 @@ class Phase7eOAuthTester:
                 data = resp.json()
                 if 'detail' in data:
                     self.log(f"   ✓ Returns informative detail: {data['detail']}", "PASS")
-            except:
+            except Exception:
                 pass
         
         # Test 10-11: Disconnect endpoints (should be idempotent - 200 or 404)
@@ -267,7 +267,7 @@ class Phase7eOAuthTester:
                 workspace_id = data.get('current_workspace_id')
                 if workspace_id:
                     self.log(f"   Found workspace: {workspace_id}", "DEBUG")
-            except:
+            except Exception:
                 pass
         
         if workspace_id:
