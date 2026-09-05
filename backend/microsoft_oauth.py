@@ -81,16 +81,23 @@ def decrypt_token(value: Optional[str]) -> Optional[str]:
 
 
 def resolve_redirect_uri(request_base_url: Optional[str] = None) -> str:
+    """Mirrors google_oauth.resolve_redirect_uri's priority order:
+    MS_OAUTH_REDIRECT_URI override > BACKEND_PUBLIC_URL (shared source of
+    truth with Google) > request base URL (dev fallback) >
+    REACT_APP_BACKEND_URL (legacy fallback)."""
     if MS_OAUTH_REDIRECT_URI:
         return MS_OAUTH_REDIRECT_URI
+    backend_public_url = (os.environ.get("BACKEND_PUBLIC_URL") or "").strip()
+    if backend_public_url:
+        return backend_public_url.rstrip("/") + "/api/integrations/microsoft/callback"
     if request_base_url:
         return request_base_url.rstrip("/") + "/api/integrations/microsoft/callback"
     backend_url = (os.environ.get("REACT_APP_BACKEND_URL") or "").strip()
     if backend_url:
         return backend_url.rstrip("/") + "/api/integrations/microsoft/callback"
     raise RuntimeError(
-        "Cannot resolve redirect URI: set MS_OAUTH_REDIRECT_URI or "
-        "REACT_APP_BACKEND_URL."
+        "Cannot resolve redirect URI: set MS_OAUTH_REDIRECT_URI, "
+        "BACKEND_PUBLIC_URL, or REACT_APP_BACKEND_URL."
     )
 
 

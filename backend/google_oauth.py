@@ -69,6 +69,20 @@ _TOKEN_URI = "https://oauth2.googleapis.com/token"
 _AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
 _REVOKE_URI = "https://oauth2.googleapis.com/revoke"
 
+
+def missing_required_scopes(granted_scopes: Optional[List[str]]) -> List[str]:
+    """Diff what Google actually granted against ``GOOGLE_SCOPES`` (what
+    we asked for). Returns the subset of required scopes the user did
+    NOT grant — e.g. because they unchecked a permission on the Google
+    consent screen. An empty list means the connection is fully usable;
+    a non-empty list means the caller must treat the workspace as not
+    connected and prompt for re-authorization.
+
+    Used right after the OAuth callback (and again whenever we read a
+    stored integration doc) so we never silently trust a partial grant."""
+    granted = set(granted_scopes or [])
+    return [s for s in GOOGLE_SCOPES if s not in granted]
+
 _ENCRYPTION_KEY = (os.environ.get("GOOGLE_TOKENS_ENCRYPTION_KEY") or "").encode()
 
 
@@ -119,23 +133,37 @@ def _client_config() -> Dict[str, Any]:
 def resolve_redirect_uri(request_base_url: Optional[str] = None) -> str:
     """Pick the redirect URI Google will call back to.
 
-    Priority order:
-      1. ``GOOGLE_OAUTH_REDIRECT_URI`` env var (explicit override).
-      2. The request base URL (FastAPI gives us scheme+host) +
-         ``/api/integrations/google/callback``.
-      3. ``REACT_APP_BACKEND_URL`` env var (set in frontend/.env, often
-         mirrored into backend/.env on Emergent).
+    Priority order (highest wins):
+      1. ``GOOGLE_OAUTH_REDIRECT_URI`` env var — explicit, provider-specific
+         override. Use this if Google's registered callback ever needs to
+         diverge from the shared backend domain.
+      2. ``BACKEND_PUBLIC_URL`` — the single source of truth for "what is
+         our production backend's public domain" (e.g.
+         ``https://quantro-os.emergent.host`` or a custom
+         ``https://api.quantroflow.online``). Shared with Microsoft so
+         both providers always agree on the canonical domain without
+         duplicating it in two env vars.
+      3. The request base URL (FastAPI gives us scheme+host) — dev/preview
+         fallback only; never rely on this in production because a proxy
+         or preview subdomain could differ from what's registered with
+         Google.
+      4. ``REACT_APP_BACKEND_URL`` — legacy fallback (frontend/.env, often
+         mirrored into backend/.env on Emergent's preview environments).
     """
     if GOOGLE_OAUTH_REDIRECT_URI:
         return GOOGLE_OAUTH_REDIRECT_URI
+    backend_public_url = (os.environ.get("BACKEND_PUBLIC_URL") or "").strip()
+    if backend_public_url:
+        return backend_public_url.rstrip("/") + "/api/integrations/google/callback"
     if request_base_url:
         return request_base_url.rstrip("/") + "/api/integrations/google/callback"
     backend_url = (os.environ.get("REACT_APP_BACKEND_URL") or "").strip()
     if backend_url:
         return backend_url.rstrip("/") + "/api/integrations/google/callback"
     raise RuntimeError(
-        "Cannot resolve redirect URI: set GOOGLE_OAUTH_REDIRECT_URI or "
-        "REACT_APP_BACKEND_URL, or pass request_base_url explicitly."
+        "Cannot resolve redirect URI: set GOOGLE_OAUTH_REDIRECT_URI, "
+        "BACKEND_PUBLIC_URL, or REACT_APP_BACKEND_URL, or pass "
+        "request_base_url explicitly."
     )
 
 

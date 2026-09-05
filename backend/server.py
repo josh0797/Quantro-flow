@@ -4931,15 +4931,35 @@ async def google_integration_status(
     doc = await google_integrations_col.find_one(
         {"workspace_id": workspace_id},
         {"_id": 0, "account_email": 1, "scopes": 1, "connected_at": 1,
-         "last_sync_at": 1, "expires_at": 1, "auto_sync_paused": 1, "last_sync_error": 1},
+         "last_sync_at": 1, "expires_at": 1, "auto_sync_paused": 1, "last_sync_error": 1,
+         "connected": 1, "status": 1, "reauthorization_required": 1, "missing_scopes": 1},
     )
     if not doc:
         return {"configured": True, "connected": False}
+
+    # Older docs (saved before scope verification existed) won't carry
+    # these fields — re-derive them from the stored scopes so we never
+    # regress an existing connection to "missing" on a code deploy.
+    stored_scopes = doc.get("scopes") or []
+    if "connected" in doc:
+        is_connected = bool(doc.get("connected"))
+        missing_scopes = doc.get("missing_scopes") or []
+    else:
+        missing_scopes = goog.missing_required_scopes(stored_scopes)
+        is_connected = not missing_scopes
+    status_value = doc.get("status") or ("ok" if is_connected else "permission_missing")
+    reauthorization_required = doc.get("reauthorization_required")
+    if reauthorization_required is None:
+        reauthorization_required = not is_connected
+
     return {
         "configured": True,
-        "connected": True,
+        "connected": is_connected,
+        "status": status_value,
+        "reauthorization_required": bool(reauthorization_required),
+        "missing_scopes": missing_scopes,
         "account_email": doc.get("account_email"),
-        "scopes": doc.get("scopes") or [],
+        "scopes": stored_scopes,
         "connected_at": doc.get("connected_at"),
         "last_sync_at": doc.get("last_sync_at"),
         "auto_sync_paused": bool(doc.get("auto_sync_paused")),
@@ -5053,6 +5073,16 @@ async def google_oauth_callback(
     if isinstance(expires_at, datetime) and expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
 
+    # Google only grants what the user actually approved on the consent
+    # screen — if they unchecked a permission, ``creds.scopes`` will be
+    # missing it even though we requested it. Compare against what we
+    # require so we never mark a partial grant as fully connected.
+    granted_scopes = list(creds.scopes or [])
+    missing_scopes = goog.missing_required_scopes(granted_scopes)
+    is_connected = not missing_scopes
+    integration_status = "ok" if is_connected else "permission_missing"
+    reauthorization_required = not is_connected
+
     await google_integrations_col.update_one(
         {"workspace_id": workspace_id},
         {
@@ -5062,7 +5092,11 @@ async def google_oauth_callback(
                 "access_token": goog.encrypt_token(creds.token),
                 "refresh_token": goog.encrypt_token(creds.refresh_token),
                 "expires_at": expires_at,
-                "scopes": list(creds.scopes or goog.GOOGLE_SCOPES),
+                "scopes": granted_scopes or goog.GOOGLE_SCOPES,
+                "connected": is_connected,
+                "status": integration_status,
+                "reauthorization_required": reauthorization_required,
+                "missing_scopes": missing_scopes,
                 "account_email": (profile or {}).get("email"),
                 "account_name": (profile or {}).get("name"),
                 "google_user_id": (profile or {}).get("google_user_id"),
@@ -5076,15 +5110,23 @@ async def google_oauth_callback(
     try:
         await log_audit(
             "integration.google_connected",
-            f"Google account connected ({(profile or {}).get('email') or 'unknown'})",
+            f"Google account connected ({(profile or {}).get('email') or 'unknown'})"
+            if is_connected
+            else f"Google account connected with missing scopes ({(profile or {}).get('email') or 'unknown'})",
             user_id=user_id,
             workspace_id=workspace_id,
-            metadata={"scopes": list(creds.scopes or [])[:8]},
+            metadata={"scopes": granted_scopes[:8], "missing_scopes": missing_scopes},
         )
     except Exception:  # noqa: BLE001
         pass
 
-    qs = f"google_connected=success&account={(profile or {}).get('email') or ''}&return_to={return_to}"
+    if not is_connected:
+        qs = (
+            f"google_connected=permission_missing&account={(profile or {}).get('email') or ''}"
+            f"&missing_scopes={','.join(missing_scopes)}&return_to={return_to}"
+        )
+    else:
+        qs = f"google_connected=success&account={(profile or {}).get('email') or ''}&return_to={return_to}"
     return _bounce(qs)
 
 
@@ -5139,6 +5181,15 @@ async def google_oauth_sync(
     creds, doc = await _load_google_credentials(workspace_id)
     if not creds:
         raise HTTPException(status_code=400, detail="Google not connected for this workspace")
+    if doc and doc.get("reauthorization_required"):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "permission_missing",
+                "reauthorization_required": True,
+                "missing_scopes": doc.get("missing_scopes") or [],
+            },
+        )
 
     counts = {"emails": 0, "events": 0}
 

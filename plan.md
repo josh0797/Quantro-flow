@@ -6,8 +6,16 @@
 - Reparar Modo Simulación para que genere/limpie datos al activar/desactivar, **y asegurar aislamiento multi-tenant** (toda data simulada con `workspace_id`).
 - Asegurar que workspaces nuevos (y existentes) queden sembrados con `policies/escalations/templates` (idempotente) + backfill.
 - Mejorar consistencia/claridad en UI (idioma, copy, estados vacíos, features duplicadas) y remover código muerto.
+- **(NUEVO — PRIORIDAD PRODUCCIÓN/SEGURIDAD/MULTI-TENANT)** Cerrar definitivamente OAuth real de **Google + Microsoft** (dos providers, cuatro variantes de cuenta), con:
+  - Authorization Code Flow **server-side**
+  - refresh tokens **offline**
+  - scopes mínimos
+  - validación de scopes otorgados vs requeridos
+  - almacenamiento cifrado de tokens
+  - scheduler de sincronización real
+  - multi-tenant estricto por `workspace_id`
 
-> **Estado global:** Todas las prioridades (P1–P5) están **COMPLETADAS** y verificadas con tests automatizados + smoke tests HTTP.
+> **Estado global:** Prioridades P1–P5 **COMPLETADAS** (tests verdes). **Nueva Fase OAuth real (P6)** en progreso: **Google listo/configurado en este entorno**, **Microsoft bloqueado por credenciales**.
 
 ---
 
@@ -78,7 +86,6 @@
 
 **Verificación manual**
 - Validación de compilación frontend (esbuild) y comportamiento backend por HTTP.
-- Nota: OAuth real requiere credenciales Google/Azure del usuario (fuera del scope de estos fixes).
 
 ---
 
@@ -140,8 +147,8 @@
 11) Backfill:
 - Añadido `backfill_workspace_automations()` al startup (`lifespan`).
 - Aplica a cualquier workspace con `0` policies.
-- Confirmado que workspaces huérfanos (ej. `ws_6f20be48bd44` en esta DB) quedan sembrados.
-- Se corrigió un caso de duplicados generados durante hot-reload (limpieza de duplicados en el entorno de pruebas).
+- Confirmado que workspaces huérfanos quedan sembrados.
+- Se corrigió un caso de duplicados generados durante hot-reload (limpieza en el entorno de pruebas).
 
 **Tests (agregados y pasando)**
 - `/app/backend_test_priorities.py` valida:
@@ -169,7 +176,6 @@
 - `simulation.live_empty_title` actualizado a texto neutral:
   - ES: “Sin datos reales todavía”
   - EN: “No real data yet”
-  (evita choque semántico con `DataModeBanner` Demo/Real).
 
 14) `CRM.js`:
 - Si hay contactos pero ninguno seleccionado → `crm.select_prompt`.
@@ -191,23 +197,122 @@
 - Eliminado de `backend/server.py` (confirmado no usado por `PlanAndUsage.js`).
 
 **Tests / checks**
-- `GET /api/usage` ahora retorna `404` (validado en `/app/backend_test_priorities.py`).
+- `GET /api/usage` ahora retorna `404`.
 - Compilación frontend validada con esbuild.
 
 ---
 
-## Próximas acciones (orden operativo)
-1) ✅ (Hecho) Ejecutar suites de tests y confirmar verde:
-   - `/app/backend_test_idor.py` (14/14)
-   - `/app/backend_test_priorities.py` (20/20)
-2) ✅ (Hecho) Smoke tests HTTP para endpoints críticos.
-3) (Opcional, fuera de scope) QA con credenciales reales OAuth Google/Microsoft para validar el flujo completo en navegador.
+## Fase 6 — OAuth REAL Google + Microsoft (Producción / Seguridad / Multi-tenant) 🚧 EN PROGRESO
+
+### 0) Regla de trabajo (audit first) ✅ CUMPLIDA
+**Inspección completa realizada** antes de modificar código (según tu Regla 0). Se revisaron:
+- `backend/server.py`
+- `backend/google_oauth.py`
+- `backend/microsoft_oauth.py`
+- `frontend/src/pages/welcome/StepInbox.js`
+- `frontend/src/pages/welcome/components/ProviderConnectModal.js`
+- `frontend/src/components/IntegrationsPanel.js`
+- referencias a endpoints `/api/integrations/{provider}/{start,callback,status,sync,disconnect}`
+- variables `.env`: `GOOGLE_CLIENT_ID/SECRET`, `MS_CLIENT_ID/SECRET`, redirect URIs
+
+**Hallazgos del audit (estado real):**
+- Ya existía una implementación madura y correcta para ambos providers:
+  - Authorization Code Flow **server-side**
+  - Tokens cifrados con Fernet
+  - Validación CSRF por `state` con TTL
+  - Scheduler de sync periódico (`_periodic_provider_sync_loop`)
+  - Un consentimiento por provider conecta Mail + Calendar (Google: Gmail+Calendar, Microsoft: Outlook+Calendar)
+  - Microsoft usa MSAL oficial con `tenant=common` (soporta MSA personal + Entra/365 con una sola App)
+- **Gaps reales detectados** antes del fix:
+  1) Redirect URIs no estaban centralizados para producción.
+  2) No se verificaba “scopes otorgados vs requeridos” post-callback.
+
+### 1) Progreso implementado ✅
+**P6.1 Google — scope validation post-callback (artefacto patch) ✅**
+- Patch aplicado: `0001-Google-OAuth-compare-granted-vs-required-scopes...patch`
+  - `google_oauth.missing_required_scopes(granted_scopes)`
+  - `GET /api/integrations/google/status` ahora expone:
+    - `connected`, `status`, `reauthorization_required`, `missing_scopes`
+    - backward-compat: re-deriva el estado si el doc es viejo.
+  - `GET /api/integrations/google/callback` ahora guarda:
+    - `connected`, `status`, `reauthorization_required`, `missing_scopes`
+    - y hace bounce `google_connected=permission_missing` si aplica.
+  - `POST /api/integrations/google/sync` devuelve `403` con `missing_scopes` si la conexión requiere reautorización.
+
+**P6.2 Redirect URIs — single source of truth ✅**
+- Introducido `BACKEND_PUBLIC_URL` como fuente única de dominio canónico.
+- `google_oauth.resolve_redirect_uri` y `microsoft_oauth.resolve_redirect_uri` ahora usan prioridad:
+  1) provider override (`GOOGLE_OAUTH_REDIRECT_URI` / `MS_OAUTH_REDIRECT_URI`)
+  2) `BACKEND_PUBLIC_URL`
+  3) request base URL (dev/preview fallback)
+  4) `REACT_APP_BACKEND_URL` (legacy fallback)
+- `backend/.env` actualizado:
+  - `BACKEND_PUBLIC_URL=https://quantro-os.emergent.host`
+  - `GOOGLE_OAUTH_REDIRECT_URI=https://quantro-os.emergent.host/api/integrations/google/callback`
+  - `MS_OAUTH_REDIRECT_URI=https://quantro-os.emergent.host/api/integrations/microsoft/callback`
+
+**P6.3 Google OAuth credentials (reales) ✅ (en este entorno)**
+- Se cargaron `GOOGLE_CLIENT_ID` y `GOOGLE_CLIENT_SECRET` desde el JSON aportado por ti.
+- El JSON confirma que el redirect URI registrado en Google Cloud Console es:
+  - `https://quantro-os.emergent.host/api/integrations/google/callback`
+
+### 2) Verificaciones ejecutadas ✅
+- `GET /api/integrations/google/status` → `configured:true`.
+- `GET /api/integrations/google/start` → URL real de Google con:
+  - `client_id` correcto
+  - `redirect_uri` EXACTO (match)
+  - scopes mínimos
+  - `access_type=offline`
+  - `prompt=consent`
+- Microsoft sigue `configured:false` porque faltan `MS_CLIENT_ID/SECRET`.
+- No regressions:
+  - `/app/backend_test_idor.py` → 14/14
+  - `/app/backend_test_priorities.py` → 20/20
+
+### 3) Pendiente / bloqueado (para cerrar producción) ⛔
+**P6.4 Microsoft credentials (bloqueante)**
+- Faltan:
+  - `MS_CLIENT_ID`
+  - `MS_CLIENT_SECRET`
+- Requisito externo: App Registration con:
+  - Supported account types: **AzureADandPersonalMicrosoftAccount**
+  - Redirect URI (Web): `https://quantro-os.emergent.host/api/integrations/microsoft/callback`
+  - Delegated permissions mínimas: `Mail.Read`, `Calendars.Read`, `offline_access`, `User.Read`
+
+**P6.5 Pruebas E2E reales de los 4 escenarios (bloqueante operativo)**
+- A) Gmail personal — listo para ejecutar cuando hagas login y completes el consentimiento.
+- B) Google Workspace — requiere cuenta Workspace de prueba.
+- C) Microsoft personal — requiere MS creds + cuenta MSA.
+- D) Microsoft 365/Entra — requiere MS creds + cuenta org.
+
+**P6.6 Deploy a producción (bloqueante operativo)**
+- Estos cambios están aplicados en este repo/entorno; para que se reflejen en:
+  - Frontend: https://quantroflow.online
+  - Backend: https://quantro-os.emergent.host
+  necesitas ejecutar tu proceso de deploy/redeploy.
 
 ---
 
-## Criterios de éxito (cumplidos)
-- ✅ No existe update/delete cross-workspace en onboarding/content (tests IDOR pasan).
-- ✅ Gmail/Calendar solo conectan vía OAuth real; no se puede forzar `connected` por PUT.
-- ✅ Simulación genera y limpia datos; toggle accesible; y **sin leak multi-tenant** (todo scopeado por `workspace_id`).
-- ✅ Workspaces nuevos y existentes con 0 policies quedan sembrados (idempotente).
-- ✅ UI consistente (idioma, copy, empty states) y sin endpoint `/api/usage` muerto.
+## Próximas acciones (orden operativo)
+1) ✅ (Hecho) Suites de tests y smoke HTTP:
+   - `/app/backend_test_idor.py` (14/14)
+   - `/app/backend_test_priorities.py` (20/20)
+2) 🚧 (En curso) Completar Microsoft OAuth:
+   - Recibir `MS_CLIENT_ID` + `MS_CLIENT_SECRET`.
+   - Setearlos en `backend/.env` (gitignored) + reiniciar backend.
+   - Validar `/api/integrations/microsoft/start` y callback.
+3) 🚧 Pruebas E2E reales (obligatorias para cerrar):
+   - Ejecutar A/B/C/D (o dejar preparado el checklist exacto de credenciales faltantes).
+4) 🚧 Deploy a producción:
+   - Confirmar que `BACKEND_PUBLIC_URL` y redirect URIs registrados coinciden **exactamente**.
+   - Confirmar que `/api/integrations/{provider}/status` y `sync` funcionan desde producción.
+
+---
+
+## Criterios de éxito (actualizados)
+- ✅ No existe update/delete cross-workspace en onboarding/content.
+- ✅ Gmail/Calendar no se pueden marcar “connected” a mano.
+- ✅ (P6) Google OAuth start/callback/scope-validation listos y con credenciales reales en este entorno.
+- ⛔ (P6) Microsoft OAuth pendiente por credenciales.
+- ⛔ (P6) No se considera “cerrado definitivamente” hasta ejecutar pruebas reales A–D (o dejar E2E preparado + especificar credenciales externas faltantes).
+- ✅ Sin regresiones en suites (14/14 + 20/20).
