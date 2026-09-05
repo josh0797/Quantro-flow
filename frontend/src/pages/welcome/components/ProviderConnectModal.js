@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Loader2, ArrowRight } from 'lucide-react';
+import { Loader2, ArrowRight, Lock } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   Dialog,
@@ -8,8 +8,9 @@ import {
   DialogTitle,
   DialogDescription,
 } from '@/components/ui/dialog';
+import { Badge } from '@/components/ui/badge';
 import { useLanguage } from '../../../context/LanguageContext';
-import { startGoogleOAuth, startMicrosoftOAuth } from '../../../lib/api';
+import { startGoogleOAuth } from '../../../lib/api';
 
 /**
  * ProviderConnectModal — single, opinionated picker for the
@@ -40,13 +41,18 @@ export default function ProviderConnectModal({
   const [redirecting, setRedirecting] = useState(null); // 'google' | 'microsoft' | null
 
   const handlePick = async (provider) => {
+    if (provider === 'microsoft') {
+      // Microsoft is intentionally not wired up yet (PENDING) — never
+      // call startMicrosoftOAuth even if this somehow gets triggered.
+      // The card itself is disabled + shows "Próximamente" below.
+      return;
+    }
     setRedirecting(provider);
     try {
-      const startFn = provider === 'google' ? startGoogleOAuth : startMicrosoftOAuth;
-      const { auth_url } = await startFn(returnTo);
+      const { auth_url } = await startGoogleOAuth(returnTo);
       if (!auth_url) throw new Error('no auth_url returned');
       // Top-level redirect — provider callback bounces back to
-      // returnTo with ?google_connected=success / ?microsoft_connected=success.
+      // returnTo with ?google_connected=success.
       window.location.href = auth_url;
       // Keep the spinner active until the browser actually navigates;
       // the modal will be unmounted by the route change.
@@ -94,11 +100,13 @@ export default function ProviderConnectModal({
           />
           <ProviderCard
             provider="microsoft"
-            disabled={redirecting !== null}
-            redirecting={redirecting === 'microsoft'}
+            disabled
+            comingSoon
+            comingSoonLabel={t('welcome.connect_modal.coming_soon_badge')}
+            redirecting={false}
             title={t('welcome.connect_modal.microsoft_title')}
             subtitle={t('welcome.connect_modal.microsoft_subtitle')}
-            onClick={() => handlePick('microsoft')}
+            onClick={() => {}}
             testid="provider-pick-microsoft"
           />
 
@@ -118,30 +126,48 @@ export default function ProviderConnectModal({
  * to the brand cyan; selected state shows a spinner replacing the
  * arrow.
  */
-function ProviderCard({ provider, title, subtitle, onClick, disabled, redirecting, testid }) {
+function ProviderCard({ provider, title, subtitle, onClick, disabled, redirecting, comingSoon, comingSoonLabel, testid }) {
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
+      aria-disabled={disabled}
       data-testid={testid}
       className={[
         'w-full text-left flex items-center gap-4 rounded-xl border px-4 py-3.5',
         'bg-[hsl(var(--background))] border-[hsl(var(--border))]',
         'transition-all duration-200 ease-out',
-        'hover:border-[hsl(var(--primary)/0.55)] hover:-translate-y-0.5 hover:bg-[hsl(var(--primary)/0.04)]',
-        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--primary)/0.55)]',
-        'disabled:opacity-60 disabled:cursor-wait disabled:hover:translate-y-0 disabled:hover:bg-transparent',
+        comingSoon
+          ? 'opacity-60 cursor-not-allowed'
+          : [
+              'hover:border-[hsl(var(--primary)/0.55)] hover:-translate-y-0.5 hover:bg-[hsl(var(--primary)/0.04)]',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--primary)/0.55)]',
+              'disabled:opacity-60 disabled:cursor-wait disabled:hover:translate-y-0 disabled:hover:bg-transparent',
+            ].join(' '),
       ].join(' ')}
     >
       <span className="shrink-0 size-10 rounded-lg bg-[hsl(var(--muted)/0.7)] border border-[hsl(var(--border))] flex items-center justify-center">
         {provider === 'google' ? <GoogleGlyph /> : <MicrosoftGlyph />}
       </span>
       <span className="flex-1 min-w-0">
-        <span className="block text-sm font-semibold text-foreground">{title}</span>
+        <span className="flex items-center gap-2">
+          <span className="block text-sm font-semibold text-foreground">{title}</span>
+          {comingSoon && (
+            <Badge
+              variant="outline"
+              className="text-[10px] font-medium px-1.5 py-0 border-[hsl(var(--warning)/0.35)] text-[hsl(var(--warning))] bg-[hsl(var(--warning)/0.08)]"
+              data-testid="provider-pick-microsoft-coming-soon-badge"
+            >
+              {comingSoonLabel}
+            </Badge>
+          )}
+        </span>
         <span className="block text-[11px] text-muted-foreground tracking-wide">{subtitle}</span>
       </span>
-      {redirecting ? (
+      {comingSoon ? (
+        <Lock size={14} className="text-muted-foreground/60" />
+      ) : redirecting ? (
         <Loader2 size={16} className="text-[hsl(var(--primary))] animate-spin" />
       ) : (
         <ArrowRight size={16} className="text-muted-foreground" />

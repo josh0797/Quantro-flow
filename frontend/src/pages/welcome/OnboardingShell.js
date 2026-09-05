@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 import { useAuth } from '../../contexts/AuthContext';
 import { useLanguage } from '../../context/LanguageContext';
 import { OnboardingProvider, useOnboarding } from './OnboardingContext';
-import { syncGoogleData, syncMicrosoftData } from '../../lib/api';
+import { syncGoogleData, syncMicrosoftData, startGoogleOAuth } from '../../lib/api';
 import { Zap, LogOut } from 'lucide-react';
 
 /**
@@ -148,6 +148,14 @@ export default function OnboardingShell() {
  *
  * Errors (?<provider>_connected=error&reason=...) only show a toast
  * and leave the user where they were — we never trap them.
+ *
+ * permission_missing (?google_connected=permission_missing&missing_scopes=...)
+ * means the user authorized SOME but not all required scopes (e.g.
+ * unchecked Calendar access on the consent screen). We must NOT mark
+ * inbox/calendar as 'real' in that case — the connection exists but is
+ * unusable for sync. Instead we surface exactly which permission is
+ * missing and offer a "Reauthorize" action that restarts the OAuth
+ * flow with prompt=consent so the user can grant the rest.
  */
 function ProviderCallbackHandler() {
   const [params, setParams] = useSearchParams();
@@ -169,6 +177,7 @@ function ProviderCallbackHandler() {
 
     // Strip the query params immediately so any re-render or refresh
     // doesn't re-fire the side effects.
+    const missingScopesRaw = params.get('missing_scopes') || '';
     const nextParams = new URLSearchParams(params);
     nextParams.delete('google_connected');
     nextParams.delete('microsoft_connected');
@@ -176,6 +185,7 @@ function ProviderCallbackHandler() {
     nextParams.delete('return_to');
     nextParams.delete('reason');
     nextParams.delete('detail');
+    nextParams.delete('missing_scopes');
     setParams(nextParams, { replace: true });
 
     if (status === 'error') {
@@ -184,6 +194,32 @@ function ProviderCallbackHandler() {
         t(`welcome.connect_modal.${provider}_failed_title`),
         { description: reason }
       );
+      return;
+    }
+
+    if (status === 'permission_missing') {
+      // Connection exists but is unusable — never claim it's real.
+      const providerLabel = provider === 'google' ? 'Google' : 'Microsoft';
+      const scopesLabel = missingScopesRaw
+        .split(',')
+        .filter(Boolean)
+        .map((s) => s.split('/').pop().replace(/\./g, ' '))
+        .join(', ') || t('welcome.connect_modal.microsoft_subtitle');
+      toast.warning(t('welcome.connect_modal.permission_missing_title'), {
+        description: t('welcome.connect_modal.permission_missing_desc', {
+          provider: providerLabel,
+          scopes: scopesLabel,
+        }),
+        action: {
+          label: t('welcome.connect_modal.reauthorize_cta'),
+          onClick: () => {
+            if (provider !== 'google') return; // Microsoft not wired up yet.
+            startGoogleOAuth(location.pathname).then(({ auth_url }) => {
+              if (auth_url) window.location.href = auth_url;
+            });
+          },
+        },
+      });
       return;
     }
 

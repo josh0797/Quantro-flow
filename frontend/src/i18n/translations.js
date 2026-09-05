@@ -384,6 +384,10 @@ export const translations = {
         microsoft_failed_title: 'No pudimos conectar con Microsoft',
         google_unavailable_desc: 'La integración con Google aún no está configurada en tu workspace. Avísale a tu administrador.',
         microsoft_unavailable_desc: 'La integración con Microsoft aún no está configurada en tu workspace. Avísale a tu administrador.',
+        coming_soon_badge: 'Próximamente',
+        permission_missing_title: 'Falta un permiso para completar la conexión',
+        permission_missing_desc: 'Autorizaste {{provider}} pero falta: {{scopes}}. Sin esto no podemos sincronizar datos reales.',
+        reauthorize_cta: 'Autorizar nuevamente',
         footnote: 'Solo accedemos a lo necesario y nunca enviamos correos sin tu permiso. Puedes desconectar cuando quieras.',
       },
       start: {
@@ -1571,6 +1575,10 @@ export const translations = {
         microsoft_failed_title: 'We couldn\u2019t connect with Microsoft',
         google_unavailable_desc: 'Google integration isn\u2019t configured for this workspace yet. Ping your admin.',
         microsoft_unavailable_desc: 'Microsoft integration isn\u2019t configured for this workspace yet. Ping your admin.',
+        coming_soon_badge: 'Coming soon',
+        permission_missing_title: 'A permission is missing to finish connecting',
+        permission_missing_desc: 'You authorized {{provider}} but this is missing: {{scopes}}. Without it we can\u2019t sync real data.',
+        reauthorize_cta: 'Authorize again',
         footnote: 'We only access what\u2019s necessary and never send emails without your permission. You can disconnect anytime.',
       },
       start: {

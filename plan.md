@@ -6,7 +6,7 @@
 - Reparar Modo Simulación para que genere/limpie datos al activar/desactivar, **y asegurar aislamiento multi-tenant** (toda data simulada con `workspace_id`).
 - Asegurar que workspaces nuevos (y existentes) queden sembrados con `policies/escalations/templates` (idempotente) + backfill.
 - Mejorar consistencia/claridad en UI (idioma, copy, estados vacíos, features duplicadas) y remover código muerto.
-- **(NUEVO — PRIORIDAD PRODUCCIÓN/SEGURIDAD/MULTI-TENANT)** Cerrar definitivamente OAuth real de **Google + Microsoft** (dos providers, cuatro variantes de cuenta), con:
+- **(PRIORIDAD PRODUCCIÓN/SEGURIDAD/MULTI-TENANT)** Cerrar definitivamente OAuth real de **Google + Microsoft** (dos providers, cuatro variantes de cuenta), con:
   - Authorization Code Flow **server-side**
   - refresh tokens **offline**
   - scopes mínimos
@@ -14,8 +14,9 @@
   - almacenamiento cifrado de tokens
   - scheduler de sincronización real
   - multi-tenant estricto por `workspace_id`
+  - **redirects seguros** (sin confiar en Origin/Referer)
 
-> **Estado global:** Prioridades P1–P5 **COMPLETADAS** (tests verdes). **Nueva Fase OAuth real (P6)** en progreso: **Google listo/configurado en este entorno**, **Microsoft bloqueado por credenciales**.
+> **Estado global:** Prioridades P1–P5 **COMPLETADAS** (tests verdes). **Fase OAuth (P6)**: **Google endurecido y listo para producción tras deploy**, **Microsoft intencionalmente oculto ("Próximamente") hasta nuevo aviso**.
 
 ---
 
@@ -202,117 +203,148 @@
 
 ---
 
-## Fase 6 — OAuth REAL Google + Microsoft (Producción / Seguridad / Multi-tenant) 🚧 EN PROGRESO
+## Fase 6 — OAuth REAL (Producción / Seguridad / Multi-tenant) ✅ Hardening aplicado / ⛔ cierre final pendiente de deploy
 
 ### 0) Regla de trabajo (audit first) ✅ CUMPLIDA
-**Inspección completa realizada** antes de modificar código (según tu Regla 0). Se revisaron:
-- `backend/server.py`
-- `backend/google_oauth.py`
-- `backend/microsoft_oauth.py`
-- `frontend/src/pages/welcome/StepInbox.js`
-- `frontend/src/pages/welcome/components/ProviderConnectModal.js`
-- `frontend/src/components/IntegrationsPanel.js`
-- referencias a endpoints `/api/integrations/{provider}/{start,callback,status,sync,disconnect}`
-- variables `.env`: `GOOGLE_CLIENT_ID/SECRET`, `MS_CLIENT_ID/SECRET`, redirect URIs
+**Inspección completa realizada** antes de modificar código. Revisados:
+- `backend/server.py`, `backend/google_oauth.py`, `backend/microsoft_oauth.py`
+- `frontend/src/pages/welcome/StepInbox.js`, `ProviderConnectModal.js`, `IntegrationsPanel.js`
+- endpoints `/api/integrations/{provider}/{start,callback,status,sync,disconnect}`
+- variables: `GOOGLE_CLIENT_ID/SECRET`, `GOOGLE_TOKENS_ENCRYPTION_KEY`, `MS_CLIENT_ID/SECRET`, `BACKEND_PUBLIC_URL`, `FRONTEND_PUBLIC_URL`
 
 **Hallazgos del audit (estado real):**
-- Ya existía una implementación madura y correcta para ambos providers:
-  - Authorization Code Flow **server-side**
-  - Tokens cifrados con Fernet
-  - Validación CSRF por `state` con TTL
-  - Scheduler de sync periódico (`_periodic_provider_sync_loop`)
-  - Un consentimiento por provider conecta Mail + Calendar (Google: Gmail+Calendar, Microsoft: Outlook+Calendar)
-  - Microsoft usa MSAL oficial con `tenant=common` (soporta MSA personal + Entra/365 con una sola App)
-- **Gaps reales detectados** antes del fix:
-  1) Redirect URIs no estaban centralizados para producción.
-  2) No se verificaba “scopes otorgados vs requeridos” post-callback.
+- Ya existía una implementación correcta para ambos providers:
+  - Authorization Code Flow server-side
+  - Tokens cifrados (Fernet)
+  - `state` con TTL (anti-CSRF)
+  - Sync scheduler periódico
+  - Microsoft con MSAL (`tenant=common`) para cuentas personales + empresariales en **una sola app**
 
-### 1) Progreso implementado ✅
-**P6.1 Google — scope validation post-callback (artefacto patch) ✅**
-- Patch aplicado: `0001-Google-OAuth-compare-granted-vs-required-scopes...patch`
-  - `google_oauth.missing_required_scopes(granted_scopes)`
-  - `GET /api/integrations/google/status` ahora expone:
-    - `connected`, `status`, `reauthorization_required`, `missing_scopes`
-    - backward-compat: re-deriva el estado si el doc es viejo.
-  - `GET /api/integrations/google/callback` ahora guarda:
-    - `connected`, `status`, `reauthorization_required`, `missing_scopes`
-    - y hace bounce `google_connected=permission_missing` si aplica.
-  - `POST /api/integrations/google/sync` devuelve `403` con `missing_scopes` si la conexión requiere reautorización.
+### 1) Hardening aplicado (lista de 9 fixes) ✅ COMPLETADO
 
-**P6.2 Redirect URIs — single source of truth ✅**
-- Introducido `BACKEND_PUBLIC_URL` como fuente única de dominio canónico.
-- `google_oauth.resolve_redirect_uri` y `microsoft_oauth.resolve_redirect_uri` ahora usan prioridad:
-  1) provider override (`GOOGLE_OAUTH_REDIRECT_URI` / `MS_OAUTH_REDIRECT_URI`)
-  2) `BACKEND_PUBLIC_URL`
-  3) request base URL (dev/preview fallback)
-  4) `REACT_APP_BACKEND_URL` (legacy fallback)
-- `backend/.env` actualizado:
+**P6.1 Microsoft “PENDIENTE” en UI (sin tocar backend) ✅**
+- `ProviderConnectModal.js`:
+  - Microsoft se muestra como **“Próximamente / Coming soon”**.
+  - Visualmente deshabilitado + badge.
+  - **Nunca llama** `startMicrosoftOAuth`.
+- `microsoft_oauth.py` y endpoints se mantienen intactos (no borrados ni reescritos).
+
+**P6.2 Diagnóstico granular seguro de configuración Google ✅**
+- `google_oauth.config_status()` expone solo booleans:
+  - `client_id_configured`
+  - `client_secret_configured`
+  - `encryption_key_configured`
+  - `backend_public_url_configured`
+  - `redirect_uri_configured`
+- `google_oauth.is_oauth_configured()` ahora deriva de `config_status()` (una sola fuente de verdad).
+- `/api/integrations/google/start` devuelve un error 503 con mensaje de “qué falta” **sin exponer valores**.
+
+**P6.3 Secrets de producción (no asumir preview) ✅ (documentado)**
+- Se documentó explícitamente: producción debe configurar secrets/env vars en el deployment (no depende de `backend/.env`).
+- Producción debe tener:
+  - `GOOGLE_CLIENT_ID`
+  - `GOOGLE_CLIENT_SECRET`
+  - `GOOGLE_TOKENS_ENCRYPTION_KEY`
   - `BACKEND_PUBLIC_URL=https://quantro-os.emergent.host`
-  - `GOOGLE_OAUTH_REDIRECT_URI=https://quantro-os.emergent.host/api/integrations/google/callback`
-  - `MS_OAUTH_REDIRECT_URI=https://quantro-os.emergent.host/api/integrations/microsoft/callback`
+  - `FRONTEND_PUBLIC_URL=https://quantroflow.online`
 
-**P6.3 Google OAuth credentials (reales) ✅ (en este entorno)**
-- Se cargaron `GOOGLE_CLIENT_ID` y `GOOGLE_CLIENT_SECRET` desde el JSON aportado por ti.
-- El JSON confirma que el redirect URI registrado en Google Cloud Console es:
-  - `https://quantro-os.emergent.host/api/integrations/google/callback`
+**P6.4 FRONTEND_PUBLIC_URL como retorno canónico + open-redirect hardening ✅**
+- Eliminado `_frontend_url_from()` (no confiar en `Origin/Referer`, ni usar `REACT_APP_BACKEND_URL` como fallback de frontend).
+- Nuevo `_frontend_base_url()`:
+  - Solo lee `FRONTEND_PUBLIC_URL`
+  - **Fail-closed** (500) si no está configurado.
+- Return path safe:
+  - `ALLOWED_OAUTH_RETURN_PATHS = {"/welcome/inbox", "/welcome/calendar"}`
+  - `_sanitize_return_to()` evita open redirect por `return_to`.
 
-### 2) Verificaciones ejecutadas ✅
-- `GET /api/integrations/google/status` → `configured:true`.
-- `GET /api/integrations/google/start` → URL real de Google con:
-  - `client_id` correcto
-  - `redirect_uri` EXACTO (match)
-  - scopes mínimos
-  - `access_type=offline`
-  - `prompt=consent`
-- Microsoft sigue `configured:false` porque faltan `MS_CLIENT_ID/SECRET`.
+**P6.5 ProviderCallbackHandler: permission_missing ✅**
+- `OnboardingShell.js` ahora maneja:
+  - `google_connected=permission_missing`
+  - muestra permisos faltantes
+  - CTA “Autorizar nuevamente” que reinicia `/api/integrations/google/start`
+  - **NO marca** inbox/calendar como “real” si faltan scopes.
+
+**P6.6 Preservar refresh_token si Google no lo devuelve ✅**
+- Callback Google ahora:
+  - lee `refresh_token` cifrado existente
+  - si `creds.refresh_token` viene vacío → conserva el anterior (nunca lo nulifica).
+
+**P6.7 No filtrar excepciones internas a URLs/frontend ✅**
+- Callback Google ya no incluye `str(exc)` en query params.
+- Solo envía `reason` con códigos controlados.
+- Detalles quedan solo en logs (server-side).
+
+**P6.8 Diagnóstico adicional en /google/status ✅**
+- `GET /api/integrations/google/status` ahora devuelve:
+  - `configured`, `connected`, `status`, `missing_scopes`, etc.
+  - + flags de `config_status()` (sin secretos).
+
+**P6.9 Criterio de cierre: NO preview-only ✅ (documentado)**
+- Se dejó explícito: **no se declara cerrado** hasta validar contra:
+  - `https://quantro-os.emergent.host`
+
+### 2) Verificaciones ejecutadas (preview, no cuentan como cierre final) ✅
+- `GET /api/integrations/google/status` devuelve `configured:true` + flags de diagnóstico.
+- `GET /api/integrations/google/start` genera `auth_url` real.
+- `return_to` whitelist probado:
+  - path permitido se preserva
+  - URL externa se sanea a default
+- `error` param sanitizado:
+  - payload malicioso colapsa a `oauth_error`.
+- Fail-closed probado:
+  - sin `FRONTEND_PUBLIC_URL` el callback devuelve 500 y no redirige a dominio adivinado.
 - No regressions:
-  - `/app/backend_test_idor.py` → 14/14
-  - `/app/backend_test_priorities.py` → 20/20
+  - `backend_test_idor.py` 14/14
+  - `backend_test_priorities.py` 20/20
+  - esbuild OK
 
-### 3) Pendiente / bloqueado (para cerrar producción) ⛔
-**P6.4 Microsoft credentials (bloqueante)**
-- Faltan:
-  - `MS_CLIENT_ID`
-  - `MS_CLIENT_SECRET`
-- Requisito externo: App Registration con:
-  - Supported account types: **AzureADandPersonalMicrosoftAccount**
-  - Redirect URI (Web): `https://quantro-os.emergent.host/api/integrations/microsoft/callback`
-  - Delegated permissions mínimas: `Mail.Read`, `Calendars.Read`, `offline_access`, `User.Read`
+> Nota operativa: se intentó login browser automatizado con credenciales aportadas para pruebas reales, pero el flujo no fue concluyente en este entorno (401 repetidos a `/api/business-profile` tras submit). No se trató como bug resuelto/introducido porque estos cambios no tocan Auth.
 
-**P6.5 Pruebas E2E reales de los 4 escenarios (bloqueante operativo)**
-- A) Gmail personal — listo para ejecutar cuando hagas login y completes el consentimiento.
-- B) Google Workspace — requiere cuenta Workspace de prueba.
-- C) Microsoft personal — requiere MS creds + cuenta MSA.
-- D) Microsoft 365/Entra — requiere MS creds + cuenta org.
+### 3) Pendiente para cierre definitivo (obligatorio) ⛔
 
-**P6.6 Deploy a producción (bloqueante operativo)**
-- Estos cambios están aplicados en este repo/entorno; para que se reflejen en:
-  - Frontend: https://quantroflow.online
-  - Backend: https://quantro-os.emergent.host
-  necesitas ejecutar tu proceso de deploy/redeploy.
+**P6.10 Deploy de producción (bloqueante)**
+- Configurar en el deployment **de producción** (Secrets/env vars):
+  - `GOOGLE_CLIENT_ID`
+  - `GOOGLE_CLIENT_SECRET`
+  - `GOOGLE_TOKENS_ENCRYPTION_KEY`
+  - `BACKEND_PUBLIC_URL=https://quantro-os.emergent.host`
+  - `FRONTEND_PUBLIC_URL=https://quantroflow.online`
+
+**P6.11 Prueba final obligatoria (post-deploy) — Google**
+Validar contra **producción**:
+- `GET https://quantro-os.emergent.host/api/integrations/google/status` → `configured:true`
+- `GET https://quantro-os.emergent.host/api/integrations/google/start` → devuelve `auth_url` real
+- Completar consentimiento en Google, volver al frontend y confirmar:
+  - `connected:true` solo si no hay `missing_scopes`
+  - si hay `permission_missing`, UI muestra faltantes + CTA reautorizar
+
+**P6.12 Microsoft (intencionalmente PENDIENTE)**
+- No se expone al usuario aún.
+- No se modifica lógica Microsoft más allá de la seguridad del redirect base (ya no existe `_frontend_url_from`).
 
 ---
 
 ## Próximas acciones (orden operativo)
-1) ✅ (Hecho) Suites de tests y smoke HTTP:
-   - `/app/backend_test_idor.py` (14/14)
-   - `/app/backend_test_priorities.py` (20/20)
-2) 🚧 (En curso) Completar Microsoft OAuth:
-   - Recibir `MS_CLIENT_ID` + `MS_CLIENT_SECRET`.
-   - Setearlos en `backend/.env` (gitignored) + reiniciar backend.
-   - Validar `/api/integrations/microsoft/start` y callback.
-3) 🚧 Pruebas E2E reales (obligatorias para cerrar):
-   - Ejecutar A/B/C/D (o dejar preparado el checklist exacto de credenciales faltantes).
-4) 🚧 Deploy a producción:
-   - Confirmar que `BACKEND_PUBLIC_URL` y redirect URIs registrados coinciden **exactamente**.
-   - Confirmar que `/api/integrations/{provider}/status` y `sync` funcionan desde producción.
+1) ✅ (Hecho) Hardening de OAuth Google + seguridad de redirects (9 puntos)
+2) ⛔ Deploy producción con Secrets correctos (sin depender de `.env` local)
+3) ⛔ Ejecutar pruebas reales contra `https://quantro-os.emergent.host`:
+   - `/google/status` y `/google/start`
+   - completar callback y verificar scopes
+4) (Futuro) Re-habilitar Microsoft en UI cuando se autorice el rollout (sin crear apps duplicadas)
 
 ---
 
 ## Criterios de éxito (actualizados)
 - ✅ No existe update/delete cross-workspace en onboarding/content.
 - ✅ Gmail/Calendar no se pueden marcar “connected” a mano.
-- ✅ (P6) Google OAuth start/callback/scope-validation listos y con credenciales reales en este entorno.
-- ⛔ (P6) Microsoft OAuth pendiente por credenciales.
-- ⛔ (P6) No se considera “cerrado definitivamente” hasta ejecutar pruebas reales A–D (o dejar E2E preparado + especificar credenciales externas faltantes).
+- ✅ Google OAuth endurecido:
+  - diagnóstico granular sin secretos
+  - return redirects seguros (sin Origin/Referer)
+  - scopes validados (permission_missing)
+  - refresh_token preservado si Google no lo devuelve
+  - no se filtran excepciones a URLs
+- ✅ Microsoft NO expuesto en UI (Próximamente) sin borrar endpoints.
+- ⛔ **No se considera cerrado** hasta verificación real post-deploy en:
+  - `https://quantro-os.emergent.host/api/integrations/google/status` → `configured:true`
+  - `https://quantro-os.emergent.host/api/integrations/google/start` → `auth_url` real
 - ✅ Sin regresiones en suites (14/14 + 20/20).

@@ -15,7 +15,7 @@ import httpx
 import jwt as pyjwt
 from jwt import PyJWKClient, InvalidTokenError, ExpiredSignatureError
 from fastapi import FastAPI, HTTPException, Query, Request, Response, Depends
-from fastapi.responses import StreamingResponse, RedirectResponse
+from fastapi.responses import StreamingResponse, RedirectResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
@@ -4925,9 +4925,17 @@ async def google_integration_status(
 ):
     """Return whether the active workspace has a usable Google
     connection. The frontend uses this on the inbox/calendar steps to
-    decide whether to render `Datos reales` or stay in demo mode."""
+    decide whether to render `Datos reales` or stay in demo mode.
+
+    Also exposes a granular, secret-free config diagnostic
+    (`client_id_configured`, `client_secret_configured`,
+    `encryption_key_configured`, `backend_public_url_configured`,
+    `redirect_uri_configured`) so an admin can tell exactly which piece
+    is missing in a given deployment (preview vs. production commonly
+    have different secrets set) — never the actual values."""
+    diag = goog.config_status()
     if not goog.is_oauth_configured():
-        return {"configured": False, "connected": False}
+        return {"configured": False, "connected": False, **diag}
     doc = await google_integrations_col.find_one(
         {"workspace_id": workspace_id},
         {"_id": 0, "account_email": 1, "scopes": 1, "connected_at": 1,
@@ -4935,7 +4943,7 @@ async def google_integration_status(
          "connected": 1, "status": 1, "reauthorization_required": 1, "missing_scopes": 1},
     )
     if not doc:
-        return {"configured": True, "connected": False}
+        return {"configured": True, "connected": False, **diag}
 
     # Older docs (saved before scope verification existed) won't carry
     # these fields — re-derive them from the stored scopes so we never
@@ -4964,6 +4972,7 @@ async def google_integration_status(
         "last_sync_at": doc.get("last_sync_at"),
         "auto_sync_paused": bool(doc.get("auto_sync_paused")),
         "last_sync_error": doc.get("last_sync_error"),
+        **diag,
     }
 
 
@@ -4982,9 +4991,21 @@ async def google_oauth_start(
     to the user, so the callback can verify nothing was tampered with.
     """
     if not goog.is_oauth_configured():
+        cfg = goog.config_status()
+        missing = [
+            name.replace("_configured", "")
+            for name, ok in cfg.items()
+            if name.endswith("_configured") and not ok and name in (
+                "client_id_configured", "client_secret_configured", "encryption_key_configured",
+            )
+        ]
         raise HTTPException(
             status_code=503,
-            detail="Google OAuth is not configured. Set GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET in backend/.env.",
+            detail=(
+                "Google OAuth is not configured. Missing: "
+                + (", ".join(missing) or "unknown")
+                + ". Set the corresponding env var(s) in this deployment's secrets."
+            ),
         )
 
     base_url = str(request.base_url).rstrip("/")
@@ -4996,7 +5017,7 @@ async def google_oauth_start(
             "state": state,
             "user_id": user.user_id,
             "workspace_id": workspace_id,
-            "return_to": return_to or "/welcome/inbox",
+            "return_to": _sanitize_return_to(return_to),
             "redirect_uri": redirect_uri,
             "created_at": datetime.now(timezone.utc),
             # State documents auto-expire after 10 min via TTL index
@@ -5009,19 +5030,55 @@ async def google_oauth_start(
     return {"auth_url": auth_url, "state": state}
 
 
-def _frontend_url_from(request: Request) -> str:
-    """Best-effort guess of the frontend origin so the callback can
-    bounce the browser back. Prefers the Origin/Referer headers, falls
-    back to REACT_APP_BACKEND_URL because in this preview environment
-    the same host serves both."""
-    origin = request.headers.get("origin") or request.headers.get("referer")
-    if origin:
-        # Strip path/query if it's a referer.
-        from urllib.parse import urlparse
+def _frontend_base_url() -> str:
+    """Canonical frontend origin OAuth callbacks bounce the browser back
+    to. This is the ONLY source of truth — do not add fallbacks here.
 
-        p = urlparse(origin)
-        return f"{p.scheme}://{p.netloc}"
-    return (os.environ.get("REACT_APP_BACKEND_URL") or "").rstrip("/")
+    SECURITY: this used to trust the incoming request's Origin/Referer
+    headers, and fell back to REACT_APP_BACKEND_URL (the backend's own
+    domain) if those were absent. Both are wrong:
+      - Origin/Referer are fully attacker-controlled request headers —
+        trusting them to build a redirect target is a textbook open
+        redirect vulnerability (an attacker crafts a link that starts
+        the OAuth dance with a forged Referer, and the victim's browser
+        gets bounced to the attacker's domain with the auth result in
+        the query string).
+      - REACT_APP_BACKEND_URL is the backend's public URL, not the
+        frontend's; using it as a "frontend fallback" silently redirects
+        the user to the wrong app.
+
+    FRONTEND_PUBLIC_URL must be set explicitly in every environment
+    (preview and production). If it's missing, callers must fail closed
+    (see the 500 response in the OAuth callbacks below) instead of
+    guessing a domain.
+    """
+    return (os.environ.get("FRONTEND_PUBLIC_URL") or "").strip().rstrip("/")
+
+
+# Only these paths may be used as the OAuth "return_to" destination.
+# Keeps /start + the callback from ever building a redirect to an
+# arbitrary attacker-supplied path (open redirect via ?return_to=).
+ALLOWED_OAUTH_RETURN_PATHS = {"/welcome/inbox", "/welcome/calendar"}
+DEFAULT_OAUTH_RETURN_PATH = "/welcome/inbox"
+
+
+def _sanitize_return_to(value: Optional[str]) -> str:
+    return value if value in ALLOWED_OAUTH_RETURN_PATHS else DEFAULT_OAUTH_RETURN_PATH
+
+
+# Google (and Microsoft) can pass arbitrary strings through ?error= on
+# the callback. Only forward the handful of well-known OAuth error codes
+# to the frontend verbatim; anything else collapses to a generic code so
+# we never reflect unsanitized provider input straight into a redirect URL.
+_KNOWN_OAUTH_ERROR_CODES = {
+    "access_denied", "invalid_scope", "server_error", "temporarily_unavailable",
+    "invalid_request", "unauthorized_client", "consent_required",
+}
+
+
+def _safe_oauth_error_code(raw: Optional[str]) -> str:
+    code = (raw or "").strip().lower()
+    return code if code in _KNOWN_OAUTH_ERROR_CODES else "oauth_error"
 
 
 @app.get("/api/integrations/google/callback")
@@ -5039,15 +5096,26 @@ async def google_oauth_callback(
     redirect with ``?google_connected=error&reason=<short>`` so the UI
     can keep the user in demo mode without throwing.
     """
-    fe = _frontend_url_from(request) or ""
-    base_redirect = (fe or "").rstrip("/")
+    fe = _frontend_base_url()
+    if not fe:
+        # Fail closed: never guess the frontend domain from client-controlled
+        # headers. A misconfigured FRONTEND_PUBLIC_URL must be loud, not a
+        # silent open redirect.
+        print("[google_oauth_callback] FRONTEND_PUBLIC_URL is not set — cannot bounce back safely.")
+        return PlainTextResponse(
+            "OAuth misconfiguration: FRONTEND_PUBLIC_URL is not set on the backend. "
+            "Contact the workspace administrator.",
+            status_code=500,
+        )
+    base_redirect = fe
+    return_path = DEFAULT_OAUTH_RETURN_PATH  # updated once we trust state_doc below
 
     def _bounce(qs: str) -> RedirectResponse:
-        target = (base_redirect or "") + "/welcome/inbox" + ("?" + qs if qs else "")
+        target = base_redirect + return_path + ("?" + qs if qs else "")
         return RedirectResponse(url=target, status_code=303)
 
     if error:
-        return _bounce(f"google_connected=error&reason={error}")
+        return _bounce(f"google_connected=error&reason={_safe_oauth_error_code(error)}")
     if not code or not state:
         return _bounce("google_connected=error&reason=missing_code_or_state")
 
@@ -5062,12 +5130,18 @@ async def google_oauth_callback(
     redirect_uri = state_doc.get("redirect_uri") or goog.resolve_redirect_uri(str(request.base_url))
     workspace_id = state_doc.get("workspace_id")
     user_id = state_doc.get("user_id")
-    return_to = state_doc.get("return_to") or "/welcome/inbox"
+    return_to = _sanitize_return_to(state_doc.get("return_to"))
+    return_path = return_to  # now safe to use the real destination
 
     try:
         creds, profile = goog.exchange_code_for_tokens(code, redirect_uri)
     except Exception as exc:  # noqa: BLE001
-        return _bounce(f"google_connected=error&reason=exchange_failed&detail={str(exc)[:80]}")
+        # Log the real exception server-side only — never put exception
+        # text in a URL the browser will carry around (it can leak into
+        # browser history, proxy logs, referrer headers of whatever page
+        # loads next, etc.).
+        print(f"[google_oauth_callback] token exchange failed for workspace={workspace_id}: {exc}")
+        return _bounce("google_connected=error&reason=exchange_failed")
 
     expires_at = creds.expiry
     if isinstance(expires_at, datetime) and expires_at.tzinfo is None:
@@ -5083,6 +5157,15 @@ async def google_oauth_callback(
     integration_status = "ok" if is_connected else "permission_missing"
     reauthorization_required = not is_connected
 
+    # Google does not always return a fresh refresh_token on every grant
+    # (e.g. some reconnect edge cases even with prompt=consent). Never let
+    # a missing new token overwrite a previously valid encrypted one.
+    existing_doc = await google_integrations_col.find_one(
+        {"workspace_id": workspace_id}, {"_id": 0, "refresh_token": 1}
+    )
+    new_refresh_token = goog.encrypt_token(creds.refresh_token)
+    refresh_token_to_store = new_refresh_token or (existing_doc or {}).get("refresh_token")
+
     await google_integrations_col.update_one(
         {"workspace_id": workspace_id},
         {
@@ -5090,7 +5173,7 @@ async def google_oauth_callback(
                 "workspace_id": workspace_id,
                 "user_id": user_id,
                 "access_token": goog.encrypt_token(creds.token),
-                "refresh_token": goog.encrypt_token(creds.refresh_token),
+                "refresh_token": refresh_token_to_store,
                 "expires_at": expires_at,
                 "scopes": granted_scopes or goog.GOOGLE_SCOPES,
                 "connected": is_connected,
@@ -5424,7 +5507,12 @@ async def microsoft_oauth_callback(
     error: Optional[str] = None,
     error_description: Optional[str] = None,
 ):
-    fe = _frontend_url_from(request) or ""
+    # NOTE: Microsoft OAuth business logic (scopes, tokens, return_to
+    # handling) is intentionally left untouched per this task's scope —
+    # only the frontend URL resolution is swapped to the safe helper
+    # since the old `_frontend_url_from` (Origin/Referer trust) no
+    # longer exists.
+    fe = _frontend_base_url() or ""
     base_redirect = (fe or "").rstrip("/")
 
     def _bounce(qs: str) -> RedirectResponse:

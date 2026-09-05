@@ -86,9 +86,38 @@ def missing_required_scopes(granted_scopes: Optional[List[str]]) -> List[str]:
 _ENCRYPTION_KEY = (os.environ.get("GOOGLE_TOKENS_ENCRYPTION_KEY") or "").encode()
 
 
+def config_status() -> Dict[str, bool]:
+    """Granular OAuth readiness diagnostic.
+
+    SECURITY: this function returns ONLY booleans — never the actual
+    client_id/secret/key values. Safe to expose through an authenticated
+    API response (e.g. GET /api/integrations/google/status) so an admin
+    can tell exactly which piece of config is missing in a given
+    deployment (preview vs. production often have different env vars
+    set) without ever leaking a secret over the wire.
+    """
+    backend_public_url = (os.environ.get("BACKEND_PUBLIC_URL") or "").strip()
+    return {
+        "client_id_configured": bool(GOOGLE_CLIENT_ID),
+        "client_secret_configured": bool(GOOGLE_CLIENT_SECRET),
+        "encryption_key_configured": bool(_ENCRYPTION_KEY),
+        "backend_public_url_configured": bool(backend_public_url),
+        # True if resolve_redirect_uri() can produce a URI without
+        # needing to fall back to the incoming request's own host.
+        "redirect_uri_configured": bool(GOOGLE_OAUTH_REDIRECT_URI or backend_public_url),
+    }
+
+
 def is_oauth_configured() -> bool:
-    """True iff the deploy has a usable client_id/secret pair."""
-    return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and _ENCRYPTION_KEY)
+    """True iff the deploy has a usable client_id/secret/encryption-key
+    triple. Kept as the single source of truth `config_status()` derives
+    the aggregate `configured` flag from — never duplicate this check."""
+    cfg = config_status()
+    return bool(
+        cfg["client_id_configured"]
+        and cfg["client_secret_configured"]
+        and cfg["encryption_key_configured"]
+    )
 
 
 def _fernet() -> Fernet:

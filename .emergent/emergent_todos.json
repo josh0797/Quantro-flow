@@ -1,30 +1,42 @@
 [
   {
-    "content": "P1: IDOR fixes (onboarding task, content delete) + audit + tests",
+    "content": "1. Microsoft -> Proximamente en ProviderConnectModal, sin llamar startMicrosoftOAuth",
     "status": "completed"
   },
   {
-    "content": "P2: Gmail/Calendar fake integration removed, real OAuth-only enforced",
+    "content": "2. Diagnostico granular config_status() sin exponer secretos",
     "status": "completed"
   },
   {
-    "content": "P3: Simulation generate/clear wired + Sidebar toggle + workspace isolation fix",
+    "content": "3. Documentar que produccion necesita secrets propios (no asumir .env preview)",
     "status": "completed"
   },
   {
-    "content": "P4: Workspace automation seeding (policies/rules/templates) + backfill",
+    "content": "4. FRONTEND_PUBLIC_URL como fuente canonica, eliminar Origin/Referer, whitelist de return_to",
     "status": "completed"
   },
   {
-    "content": "P5: UI/consistency polish (7 items) + dead endpoint removal",
+    "content": "5. ProviderCallbackHandler maneja permission_missing con CTA reautorizar",
     "status": "completed"
   },
   {
-    "content": "Testing agent full pass: found & fixed 1 critical bug (simulation workspace_id leak)",
+    "content": "6. Preservar refresh_token existente si Google no devuelve uno nuevo (callback)",
     "status": "completed"
   },
   {
-    "content": "Final regression: 14/14 IDOR + 20/20 priorities tests passing",
+    "content": "7. No exponer str(exc) en URLs, solo log server-side + codigos seguros",
+    "status": "completed"
+  },
+  {
+    "content": "8. Exponer diagnostico via /google/status mejorado",
+    "status": "completed"
+  },
+  {
+    "content": "9. Aclarar que prueba final debe ser post-deploy contra produccion",
+    "status": "completed"
+  },
+  {
+    "content": "Verificar regresion completa (IDOR 14/14 + priorities 20/20) + esbuild",
     "status": "completed"
   }
 ]
