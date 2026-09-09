@@ -54,8 +54,9 @@ import {
  *   • "Actualizar plan"  → open PlanSelectorDialog → startCheckout() →
  *     Supabase Edge Function `create-checkout-session` → Stripe Checkout.
  *   • "Ver mi plan" / "Gestionar suscripción" → openCustomerPortal() →
- *     Supabase Edge Function `create-customer-portal-session` → Stripe
- *     Customer Portal.
+ *     Supabase Edge Function `create-portal-session` → Stripe
+ *     Customer Portal. (Was calling `create-customer-portal-session`,
+ *     which 404'd — that name never existed on the live project.)
  *
  * After returning from Checkout we honour the ?checkout=success query
  * param to show a toast + re-fetch the profile so the new plan shows up

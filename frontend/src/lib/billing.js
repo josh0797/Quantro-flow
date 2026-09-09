@@ -299,7 +299,14 @@ export async function startCheckout({ priceId, planKey, period = 'monthly' }) {
 
 export async function openCustomerPortal() {
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
-  const { data, error } = await supabase.functions.invoke('create-customer-portal-session', {
+  // NOTE: this used to call 'create-customer-portal-session', a name that
+  // only ever existed in this repo's own (unused) supabase/functions copy.
+  // The Quantro billing Edge Functions are shared across Quantro OS and
+  // Quantro Flow on one Supabase project (see supabase/functions/README.md
+  // in this repo), and the function actually deployed there is named
+  // 'create-portal-session' — every call to the old name 404'd, so
+  // "Gestionar suscripción" never worked in production.
+  const { data, error } = await supabase.functions.invoke('create-portal-session', {
     body: { returnUrl: `${origin}/plan`, return_url: `${origin}/plan` },
   });
   if (error) {
