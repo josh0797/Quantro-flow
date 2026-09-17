@@ -394,6 +394,69 @@ def fetch_upcoming_calendar(creds: Credentials, days: int = 30) -> List[Dict[str
     return out
 
 
+# ─── Quantro Actions — incremental write-scope authorization ──────────
+# Scopes an Action may need beyond the read-only GOOGLE_SCOPES every
+# workspace gets at first connect (see the module docstring on why we
+# never request these up front). Keyed by the Action id that needs them.
+ACTION_SCOPES = {
+    "google.gmail.send": "https://www.googleapis.com/auth/gmail.send",
+    "google.calendar.event.create": "https://www.googleapis.com/auth/calendar.events",
+}
+
+
+def build_incremental_authorization_url(state: str, redirect_uri: str, additional_scopes: List[str]) -> str:
+    """Same OAuth dance as build_authorization_url(), but requesting the
+    existing GOOGLE_SCOPES PLUS the extra scope(s) an Action needs.
+    include_granted_scopes='true' is what makes this "incremental" —
+    Google keeps whatever the user already granted and only prompts for
+    the delta."""
+    scopes = list(GOOGLE_SCOPES) + [s for s in additional_scopes if s not in GOOGLE_SCOPES]
+    flow = Flow.from_client_config(_client_config(), scopes=scopes, redirect_uri=redirect_uri)
+    url, _ = flow.authorization_url(
+        access_type="offline", prompt="consent", include_granted_scopes="true", state=state,
+    )
+    return url
+
+
+def send_gmail(creds: Credentials, to: str, subject: str, body: str) -> str:
+    """Send a plain-text email via Gmail. Requires the gmail.send scope
+    — callers MUST verify it's present in the workspace's stored scopes
+    before calling this (see actions/handlers/google.py, which returns
+    a structured reauthorization_required error instead of calling this
+    when the scope is missing, rather than letting Google's 403 bubble
+    up as an opaque failure)."""
+    import base64
+    from email.mime.text import MIMEText
+
+    service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+    message = MIMEText(body)
+    message["to"] = to
+    message["subject"] = subject
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    sent = service.users().messages().send(userId="me", body={"raw": raw}).execute()
+    return sent.get("id")
+
+
+def create_calendar_event(
+    creds: Credentials, title: str, start_iso: str, end_iso: str,
+    description: str = "", location: str = "", attendees: Optional[List[str]] = None,
+) -> str:
+    """Create a real Google Calendar event. Requires the calendar.events
+    scope — see send_gmail()'s docstring for the same scope-check rule."""
+    service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+    body: Dict[str, Any] = {
+        "summary": title,
+        "description": description,
+        "location": location,
+        "start": {"dateTime": start_iso},
+        "end": {"dateTime": end_iso},
+    }
+    if attendees:
+        body["attendees"] = [{"email": a} for a in attendees]
+    created = service.events().insert(calendarId="primary", body=body).execute()
+    return created.get("id")
+
+
 def revoke_token(refresh_or_access_token: str) -> bool:
     """Best-effort token revocation. Google accepts either token; we hit
     the revoke endpoint and trust the 200/400 response. Returns True if
