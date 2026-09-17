@@ -16,9 +16,16 @@ from errors import QuantroError
 
 
 def make_executor(fake_collection, is_simulation=False, audit_log=None):
+    from actions.policy_engine import PolicyEngine
     async def is_simulation_mode(workspace_id):
         return is_simulation
-    gate = PolicyGate(fake_collection, fake_collection, is_simulation_mode)
+    engine = PolicyEngine(
+        automation_policies_col=fake_collection,
+        action_policies_col=fake_collection,
+        action_executions_col=fake_collection,
+        is_simulation_mode_fn=is_simulation_mode,
+    )
+    gate = PolicyGate(engine)
 
     async def log_audit(event_type, description, workspace_id=None, metadata=None):
         if audit_log is not None:
@@ -73,7 +80,7 @@ async def test_low_risk_action_succeeds_immediately(fake_collection, monkeypatch
     register(monkeypatch, "test.action", RiskLevel.LOW, handler)
     executor = make_executor(fake_collection)
 
-    result = await executor.execute(workspace_id="ws1", action_id="test.action", input={"value": "hi"})
+    result = await executor.execute(workspace_id="ws1", action_id="test.action", input={"value": "hi"}, actor_role="member")
     assert result["status"] == "succeeded"
     assert result["result_metadata"]["echo"] == "hi"
     assert len(calls) == 1
@@ -110,23 +117,28 @@ async def test_high_risk_action_waits_for_approval_then_runs_on_approve(fake_col
     register(monkeypatch, "facturapi.invoice.create", RiskLevel.HIGH, handler)
     executor = make_executor(fake_collection)
 
-    pending = await executor.execute(workspace_id="ws1", action_id="facturapi.invoice.create", input={"value": "x"})
+    pending = await executor.execute(workspace_id="ws1", action_id="facturapi.invoice.create", input={"value": "x"}, actor_role="leader")
     assert pending["status"] == "pending_approval"
     assert len(calls) == 0, "handler must not run before approval"
 
     approved = await executor.approve("ws1", pending["execution_id"], approver_user_id="u1")
     assert approved["status"] == "succeeded"
+    assert approved["execution_id"] == pending["execution_id"], "approve must continue the same execution"
     assert len(calls) == 1
 
 
-async def test_cannot_approve_an_already_executed_action(fake_collection, monkeypatch):
+async def test_approve_on_already_executed_returns_same_record_without_rerun(fake_collection, monkeypatch):
+    calls = []
     async def handler(ctx, input):
+        calls.append(1)
         return ActionResult(status="succeeded")
     register(monkeypatch, "test.action", RiskLevel.LOW, handler)
     executor = make_executor(fake_collection)
-    done = await executor.execute(workspace_id="ws1", action_id="test.action", input={"value": "x"})
-    with pytest.raises(QuantroError):
-        await executor.approve("ws1", done["execution_id"], approver_user_id="u1")
+    done = await executor.execute(workspace_id="ws1", action_id="test.action", input={"value": "x"}, actor_role="member")
+    again = await executor.approve("ws1", done["execution_id"], approver_user_id="u1")
+    assert again["execution_id"] == done["execution_id"]
+    assert again["status"] == "succeeded"
+    assert len(calls) == 1
 
 
 async def test_simulation_mode_forces_simulated_status_and_dry_run_context(fake_collection, monkeypatch):

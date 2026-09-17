@@ -38,6 +38,8 @@ from integrations.providers.facturapi import FacturapiAdapter
 from integrations.providers.quantro_internal import QuantroInternalAdapter
 from actions.executor import ActionExecutor
 from actions.policy_gate import PolicyGate
+from actions.policy_engine import PolicyEngine
+from actions.indexes import ensure_action_indexes
 from actions.registry import get_action, list_actions
 from actions.bootstrap import register_all_actions
 
@@ -1550,6 +1552,7 @@ async def lifespan(app: FastAPI):
     await backfill_simulation_flag()
     await backfill_workspace_scoping()
     await migrate_legacy_role_names()
+    await ensure_action_indexes(action_executions_col)
     await backfill_workspace_automations()
     # Phase 7e — Background sync scheduler. We launch a single asyncio
     # task that wakes up every PERIODIC_SYNC_INTERVAL_SECS and calls the
@@ -6178,7 +6181,14 @@ connect_service = ConnectService()
 
 register_all_actions()
 
-policy_gate = PolicyGate(action_policies_col, action_executions_col, is_simulation_mode)
+policy_engine = PolicyEngine(
+    automation_policies_col=policies_col,
+    action_policies_col=action_policies_col,
+    action_executions_col=action_executions_col,
+    is_simulation_mode_fn=is_simulation_mode,
+    escalation_col=escalation_col,
+)
+policy_gate = PolicyGate(policy_engine)
 
 action_executor = ActionExecutor(
     action_executions_col, policy_gate, log_audit,
@@ -6342,6 +6352,7 @@ def _serialize_action_definition(d, connection_status: Optional[str]) -> Dict[st
         "required_scopes": d.required_scopes,
         "supports_dry_run": d.supports_dry_run,
         "idempotent": d.idempotent,
+        "minimum_role": d.minimum_role,
         "connection_status": connection_status,
     }
 
@@ -6381,10 +6392,13 @@ async def actions_execute(
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
 ):
+    me = await _membership_for(user.user_id, workspace_id)
+    actor_role = _normalize_role(me.get("role")) if me else "viewer"
     return await action_executor.execute(
         workspace_id=workspace_id, action_id=action_id, input=req.input,
         requested_by=user.user_id, source=req.source,
         idempotency_key=req.idempotency_key, dry_run=req.dry_run,
+        actor_role=actor_role,
     )
 
 

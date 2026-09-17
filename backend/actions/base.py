@@ -72,6 +72,9 @@ class ActionDefinition:
     required_scopes: List[str] = field(default_factory=list)
     supports_dry_run: bool = True
     idempotent: bool = False
+    # Minimum workspace role required to *request* this Action (RBAC).
+    # Policy Engine may still require approval even when role is sufficient.
+    minimum_role: Optional[str] = None
 
     def validate_input(self, payload: Dict[str, Any]) -> List[str]:
         """Returns a list of validation error strings (empty = valid).

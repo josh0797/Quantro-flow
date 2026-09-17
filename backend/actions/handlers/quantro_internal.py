@@ -14,25 +14,32 @@ Deps expected in ActionContext.deps:
     log_activity — async fn(event_type, title, description, related_id=None, related_type=None, workspace_id=None)
     is_simulation_mode — async fn(workspace_id) -> bool
 
-Simulation Mode note: unlike an external provider call, an internal
-Mongo write is never "dangerous" to skip/keep — the app's existing
-Simulation Mode already isolates these writes into a sandboxed dataset
-via the `is_simulation` flag on every row. So these handlers always
-perform their write (tagged is_simulation appropriately) and only
-differ in the *status* they report (`simulated` vs `succeeded`) based
-on ctx.dry_run, which the Policy Gate sets to True for a workspace in
-Simulation Mode.
+Simulation Mode note: internal Mongo writes are allowed during
+Simulation Mode (sandbox data), but MUST always be tagged
+`is_simulation=true` when effective_simulation is true.
+
+Canonical rule:
+    effective_simulation = ctx.dry_run OR bool(input.get("is_simulation"))
+
+Never write Live rows (is_simulation=false) while Simulation Mode /
+dry_run is active.
 """
 from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta
+from typing import Any, Dict
 
 from ..base import ActionContext, ActionResult
 
 
 def _now_iso() -> str:
     return datetime.utcnow().isoformat()
+
+
+def _effective_simulation(ctx: ActionContext, input: Dict[str, Any]) -> bool:
+    """True when this write must be sandbox-tagged."""
+    return bool(ctx.dry_run) or bool(input.get("is_simulation"))
 
 
 async def calendar_event_create(ctx: ActionContext, input: dict) -> ActionResult:
@@ -52,7 +59,7 @@ async def calendar_event_create(ctx: ActionContext, input: dict) -> ActionResult
         "source": f"ai_{ctx.source}",
         "created_at": _now_iso(),
         "contact_id": input.get("contact_id"),
-        "is_simulation": bool(input.get("is_simulation", False)),
+        "is_simulation": _effective_simulation(ctx, input),
         "workspace_id": ctx.workspace_id,
     }
     await calendar_col.insert_one(event)
@@ -83,7 +90,7 @@ async def crm_contact_create(ctx: ActionContext, input: dict) -> ActionResult:
         "created_at": now_iso,
         "updated_at": now_iso,
         "notes": input.get("notes", ""),
-        "is_simulation": bool(input.get("is_simulation", False)),
+        "is_simulation": _effective_simulation(ctx, input),
         "workspace_id": ctx.workspace_id,
     }
     await contacts_col.insert_one(contact)
@@ -101,7 +108,7 @@ async def onboarding_start(ctx: ActionContext, input: dict) -> ActionResult:
     onboarding_col = ctx.dep("onboarding_col")
     log_activity = ctx.dep("log_activity")
 
-    is_simulation = bool(input.get("is_simulation", False))
+    is_simulation = _effective_simulation(ctx, input)
     agent = {
         "agent_id": str(uuid.uuid4()),
         "name": input.get("name") or "New Agent",

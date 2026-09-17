@@ -70,6 +70,16 @@ class FakeAsyncCollection:
             new_doc.update(update.get("$set", {}))
             self._docs.append(new_doc)
 
+
+    async def find_one_and_update(self, query: Dict[str, Any], update: Dict[str, Any], projection: Optional[Dict[str, int]] = None, return_document=None):
+        for doc in self._docs:
+            if _match(doc, query):
+                doc.update(update.get("$set", {}))
+                for key in update.get("$unset", {}):
+                    doc.pop(key, None)
+                return _project(copy.deepcopy(doc), projection)
+        return None
+
     async def delete_one(self, query: Dict[str, Any]):
         for i, doc in enumerate(self._docs):
             if _match(doc, query):
