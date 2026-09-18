@@ -43,6 +43,11 @@ from actions.policy_engine import PolicyEngine
 from actions.indexes import ensure_action_indexes
 from actions.registry import get_action, list_actions
 from actions.bootstrap import register_all_actions
+from actions.store import (
+    wrap_executions_col,
+    wrap_automation_policies_col,
+    wrap_action_policies_col,
+)
 
 # ─── Config ────────────────────────────────────────────────────────────
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
@@ -90,7 +95,9 @@ agents_col = db["agents"]
 onboarding_col = db["onboarding_tasks"]
 content_col = db["content_items"]
 activity_col = db["activity_events"]
-policies_col = db["automation_policies"]
+# Phase 3: automation_policies dual-write / optional Supabase SoT
+# (QUANTRO_ACTIONS_PRIMARY). escalation_rules remain Mongo-only this phase.
+policies_col = wrap_automation_policies_col(db["automation_policies"])
 escalation_col = db["escalation_rules"]
 templates_col = db["content_templates"]
 business_profile_col = db["business_profile"]
@@ -120,9 +127,10 @@ microsoft_oauth_state_col = db["microsoft_oauth_state"]
 # Quantro Connect — Facturapi (CFDI México)
 facturapi_connections_col = db["facturapi_connections"]
 facturapi_webhook_events_col = db["facturapi_webhook_events"]
-# Quantro Actions
-action_executions_col = db["action_executions"]
-action_policies_col = db["action_policies"]  # workspace-level auto-approve overrides for high/critical-risk actions
+# Quantro Actions — Phase 3 dual-write (default primary=mongo)
+# See docs/phase3-actions-postgres.md (QUANTRO_ACTIONS_PRIMARY).
+action_executions_col = wrap_executions_col(db["action_executions"])
+action_policies_col = wrap_action_policies_col(db["action_policies"])  # legacy auto-approve overrides
 
 # The workspace_id used by pre-auth seed + backfill. The first user to
 # log in claims this workspace (rename + become Owner). Subsequent users
