@@ -50,6 +50,10 @@ from actions.store import (
     wrap_action_policies_col,
 )
 from inbox_store import wrap_inbox_col
+from product_domain_store import (
+    wrap_activity_col, wrap_content_items_col, wrap_content_templates_col,
+    wrap_contacts_col, wrap_calendar_col, product_domains_health,
+)
 
 # ─── Config ────────────────────────────────────────────────────────────
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
@@ -98,17 +102,17 @@ db = client[DB_NAME]
 # Phase 6.1: inbox_items dual-write / optional Supabase SoT
 # (QUANTRO_INBOX_PRIMARY, default mongo). See docs/phase6-inbox-items.md.
 inbox_col = wrap_inbox_col(db["inbox_items"])
-calendar_col = db["calendar_events"]
-contacts_col = db["contacts"]
+calendar_col = wrap_calendar_col(db["calendar_events"])
+contacts_col = wrap_contacts_col(db["contacts"])
 agents_col = db["agents"]
 onboarding_col = db["onboarding_tasks"]
-content_col = db["content_items"]
-activity_col = db["activity_events"]
+content_col = wrap_content_items_col(db["content_items"])
+activity_col = wrap_activity_col(db["activity_events"])
 # Phase 3: automation_policies dual-write / optional Supabase SoT
 # (QUANTRO_ACTIONS_PRIMARY). escalation_rules remain Mongo-only this phase.
 policies_col = wrap_automation_policies_col(db["automation_policies"])
 escalation_col = db["escalation_rules"]
-templates_col = db["content_templates"]
+templates_col = wrap_content_templates_col(db["content_templates"])
 business_profile_col = db["business_profile"]
 integrations_config_col = db["integrations_config"]
 system_health_col = db["system_health_events"]
@@ -849,6 +853,9 @@ async def seed_database():
         {"contact_id": str(uuid.uuid4()), "name": "Emily Rodriguez", "email": "emily.r@homes.com", "phone": "555-0199", "type": "lead", "lifecycle_stage": "nurturing", "source": "open_house", "ghl_sync_status": "synced", "ghl_last_sync": now - timedelta(minutes=45), "created_at": now - timedelta(days=14), "updated_at": now - timedelta(hours=6), "notes": "Attended open house at Maple Ridge. Interested in similar properties."},
         {"contact_id": str(uuid.uuid4()), "name": "Robert Kim", "email": "r.kim@business.net", "phone": "555-0177", "type": "investor", "lifecycle_stage": "active", "source": "network", "ghl_sync_status": "synced", "ghl_last_sync": now - timedelta(minutes=8), "created_at": now - timedelta(days=90), "updated_at": now - timedelta(hours=1), "notes": "Looking for multi-family investment properties. Budget $3-5M."},
     ]
+    for _c in contacts:
+        _c.setdefault("workspace_id", DEFAULT_WORKSPACE_ID)
+        _c.setdefault("is_simulation", True)
     await contacts_col.insert_many(contacts)
 
     # Agents
@@ -904,6 +911,8 @@ async def seed_database():
         {"content_id": str(uuid.uuid4()), "type": "email_draft", "title": "Q4 Market Update", "content": {"subject": "Your Q4 Real Estate Market Update", "body": "Dear valued clients,\n\nAs we close out Q4, the market continues to show strong momentum. Prices are up 3% in our metro area, and inventory remains tight.\n\nThis presents an excellent opportunity for sellers looking to capitalize on current demand. For buyers, acting quickly on well-priced properties is key.\n\nLet's schedule a call to discuss how these trends affect your real estate goals.", "call_to_action": "Schedule a consultation"}, "status": "published", "created_at": now - timedelta(days=2), "created_by": "ai", "workspace_id": DEFAULT_WORKSPACE_ID},
         {"content_id": str(uuid.uuid4()), "type": "social_post", "title": "Team Spotlight - Aisha Patel", "content": {"text": "Meet Aisha Patel, one of our senior agents with 5+ years of experience. She specializes in helping first-time homebuyers navigate the market with confidence.", "hashtags": ["#MeetTheTeam", "#RealEstateAgent", "#FirstTimeHomeBuyer"], "platform": "linkedin"}, "status": "draft", "created_at": now - timedelta(hours=12), "created_by": "ai", "workspace_id": DEFAULT_WORKSPACE_ID},
     ]
+    for _ci in content_items:
+        _ci.setdefault("is_simulation", True)
     await content_col.insert_many(content_items)
 
     # Activity events
@@ -919,6 +928,9 @@ async def seed_database():
         {"event_id": str(uuid.uuid4()), "event_type": "calendar", "title": "Event scheduled", "description": "Property viewing at 456 Pine Ave confirmed for today", "related_id": calendar_events[0]["event_id"], "related_type": "calendar", "timestamp": now - timedelta(days=2)},
         {"event_id": str(uuid.uuid4()), "event_type": "system", "title": "All systems running", "description": "Gmail sync active. Calendar sync active. CRM sync healthy.", "related_id": None, "related_type": None, "timestamp": now - timedelta(minutes=1)},
     ]
+    for _a in activity_events:
+        _a.setdefault("workspace_id", DEFAULT_WORKSPACE_ID)
+        _a.setdefault("is_simulation", True)
     await activity_col.insert_many(activity_events)
 
     # Automation Policies (per-intent rules)
@@ -3449,7 +3461,12 @@ async def export_audit(
 # ─── Health ────────────────────────────────────────────────────────────
 @app.get("/api/health")
 async def health():
-    return {"status": "running", "service": "Quantro Flow | Business OS", "timestamp": datetime.utcnow().isoformat()}
+    return {
+        "status": "running",
+        "service": "Quantro Flow | Business OS",
+        "timestamp": datetime.utcnow().isoformat(),
+        "product_domains": product_domains_health(),
+    }
 
 # ─── System Health / Self-Healing Surface ─────────────────────────────
 @app.get("/api/system/health")
