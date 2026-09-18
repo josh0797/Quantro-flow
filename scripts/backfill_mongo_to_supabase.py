@@ -27,7 +27,7 @@ Safety guarantees
 * **Idempotent.** Re-running after a partial run picks up where it
   left off. No row is updated; only inserted-if-missing.
 * **Granular --table flag.** You can run only the table you want
-  (``members``, ``invites``, ``audit``, ``all``).
+  (``members``, ``invites``, ``audit``, ``provider_connections``, ``all``).
 
 Examples
 --------
@@ -506,6 +506,121 @@ async def migrate_audit(
             )
 
 
+
+# ── Phase 2: provider OAuth connections ───────────────────────────────
+async def migrate_provider_connections(
+    db, sb: SupabaseClient, ws_org: Dict[str, str], reporter: Reporter, *,
+    execute: bool, limit: Optional[int],
+) -> None:
+    """Copy encrypted Google/Microsoft tokens into provider_connections.
+
+    Ciphertext is copied as-is (Fernet). Never logs token values.
+    Dry-run by default. Dedup on (workspace_id, provider).
+    """
+    print("\n--- google/microsoft_integrations → provider_connections ---")
+    sources = (
+        ("google", "google_integrations"),
+        ("microsoft", "microsoft_integrations"),
+    )
+    seen = 0
+    dry_seen: set[Tuple[str, str]] = set()
+
+    def _iso(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc).isoformat()
+        if isinstance(value, str):
+            return value
+        return str(value)
+
+    for provider, coll_name in sources:
+        cursor = db[coll_name].find({})
+        async for row in cursor:
+            if limit and seen >= limit:
+                break
+            seen += 1
+            wid = row.get("workspace_id")
+            if not wid:
+                reporter.bump("provider_connections", "skip:no_workspace")
+                continue
+
+            # Dedup against Supabase
+            status, body = await sb.get(
+                "/rest/v1/provider_connections",
+                {
+                    "workspace_id": f"eq.{wid}",
+                    "provider": f"eq.{provider}",
+                    "select": "id",
+                    "limit": "1",
+                },
+            )
+            if status == 200 and isinstance(body, list) and body:
+                print(f"  [skip:duplicate] {provider} ws={wid}")
+                reporter.bump("provider_connections", "skip:duplicate")
+                continue
+            if (wid, provider) in dry_seen:
+                reporter.bump("provider_connections", "skip:duplicate_in_run")
+                continue
+
+            org_id = ws_org.get(wid) or (DEFAULT_ORG_ID or None)
+            provider_user_id = row.get("google_user_id") or row.get("ms_user_id")
+            payload: Dict[str, Any] = {
+                "workspace_id": wid,
+                "provider": provider,
+                "org_id": org_id if org_id and is_uuid(org_id) else None,
+                "account_email": row.get("account_email"),
+                "account_name": row.get("account_name"),
+                "provider_user_id": provider_user_id,
+                "user_id": row.get("user_id"),
+                "scopes": list(row.get("scopes") or []),
+                "access_token_enc": row.get("access_token"),
+                "refresh_token_enc": row.get("refresh_token"),
+                "expires_at": _iso(row.get("expires_at")),
+                "connected": bool(row.get("connected", True)),
+                "status": row.get("status") or "ok",
+                "reauthorization_required": bool(row.get("reauthorization_required") or False),
+                "missing_scopes": list(row.get("missing_scopes") or []),
+                "connected_at": _iso(row.get("connected_at")),
+                "last_sync_at": _iso(row.get("last_sync_at")),
+                "last_sync_attempt_at": _iso(row.get("last_sync_attempt_at")),
+                "auto_sync_paused": bool(row.get("auto_sync_paused") or False),
+                "last_sync_error": row.get("last_sync_error"),
+            }
+            # Drop null org_id so we don't send invalid uuid
+            if payload["org_id"] is None:
+                payload.pop("org_id")
+
+            email_hint = (row.get("account_email") or "?")[:40]
+            if not execute:
+                print(f"  [dry] would upsert {provider} ws={wid} account={email_hint}")
+                reporter.bump("provider_connections", "dry:would_insert")
+                dry_seen.add((wid, provider))
+                continue
+
+            # Prefer upsert so re-runs refresh ciphertext / metadata.
+            url_path = "/rest/v1/provider_connections"
+            # Use POST with on_conflict via raw client headers
+            status, body = await sb.post(
+                url_path + "?on_conflict=workspace_id,provider",
+                payload,
+                prefer="resolution=merge-duplicates,return=minimal",
+            )
+            if status < 400:
+                print(f"  [ok] upserted {provider} ws={wid} account={email_hint}")
+                reporter.bump("provider_connections", "upserted")
+                dry_seen.add((wid, provider))
+            else:
+                print(f"  [error:{status}] {provider} ws={wid} body={str(body)[:160]}")
+                reporter.bump("provider_connections", f"error:{status}")
+                reporter.error(
+                    "provider_connections",
+                    f"{provider}/{wid}",
+                    f"http {status}: {str(body)[:120]}",
+                )
+
+
 # ── Main ─────────────────────────────────────────────────────────────
 async def main(args: argparse.Namespace) -> None:
     sb = SupabaseClient()
@@ -549,6 +664,10 @@ async def main(args: argparse.Namespace) -> None:
         await migrate_invites(db, sb, ws_org, reporter, execute=args.execute, limit=args.limit)
     if table in ("audit", "all"):
         await migrate_audit(db, sb, ws_org, reporter, execute=args.execute, limit=args.limit)
+    if table in ("provider_connections", "all"):
+        await migrate_provider_connections(
+            db, sb, ws_org, reporter, execute=args.execute, limit=args.limit,
+        )
 
     reporter.print_summary()
 
@@ -578,7 +697,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--table",
-        choices=["members", "invites", "audit", "all"],
+        choices=["members", "invites", "audit", "provider_connections", "all"],
         default="all",
         help="Restrict which collection to process (default: all).",
     )

@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Tuple
 from ai_billing import run_ai_request
 import supabase_admin
+import provider_secrets_store as secrets_store
 
 # ─── Config ────────────────────────────────────────────────────────────
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
@@ -88,10 +89,12 @@ workspaces_col = db["workspaces"]
 workspace_members_col = db["workspace_members"]
 workspace_invites_col = db["workspace_invites"]
 audit_log_col = db["audit_log"]
-# Phase 7e — Google OAuth (Gmail + Calendar)
+# Phase 7e / Phase 2 — Google OAuth (Gmail + Calendar)
+# Mongo cols remain the default read primary until QUANTRO_SECRETS_PRIMARY=supabase.
+# Dual-write via provider_secrets_store (see docs/phase2-oauth-secrets.md).
 google_integrations_col = db["google_integrations"]
 google_oauth_state_col = db["google_oauth_state"]
-# Phase 7e.2 — Microsoft Outlook OAuth (Mail + Calendar)
+# Phase 7e.2 / Phase 2 — Microsoft Outlook OAuth (Mail + Calendar)
 microsoft_integrations_col = db["microsoft_integrations"]
 microsoft_oauth_state_col = db["microsoft_oauth_state"]
 
@@ -1584,15 +1587,19 @@ async def _perform_google_sync_for_workspace(workspace_id: str) -> Dict[str, Any
                 upsert=True,
             )
             counts["events"] += 1
-        await google_integrations_col.update_one(
-            {"workspace_id": workspace_id},
-            {"$set": {"last_sync_at": now, "last_sync_error": None}},
+        await secrets_store.patch_connection(
+            provider="google",
+            workspace_id=workspace_id,
+            mongo_col=google_integrations_col,
+            fields={"last_sync_at": now, "last_sync_error": None},
         )
         return {"workspace_id": workspace_id, "ok": True, "counts": counts}
     except Exception as exc:  # noqa: BLE001
-        await google_integrations_col.update_one(
-            {"workspace_id": workspace_id},
-            {"$set": {"last_sync_error": str(exc)[:200], "last_sync_attempt_at": now}},
+        await secrets_store.patch_connection(
+            provider="google",
+            workspace_id=workspace_id,
+            mongo_col=google_integrations_col,
+            fields={"last_sync_error": str(exc)[:200], "last_sync_attempt_at": now},
         )
         return {"workspace_id": workspace_id, "error": str(exc)[:200]}
 
@@ -1606,28 +1613,18 @@ async def _periodic_provider_sync_loop() -> None:
     while True:
         try:
             # --- Google
-            cursor = google_integrations_col.find(
-                {"auto_sync_paused": {"$ne": True}},
-                {"_id": 0, "workspace_id": 1},
-            )
-            async for row in cursor:
-                wid = row.get("workspace_id")
-                if not wid:
-                    continue
+            for wid in await secrets_store.list_autosync_workspace_ids(
+                provider="google", mongo_col=google_integrations_col,
+            ):
                 res = await _perform_google_sync_for_workspace(wid)
                 if res.get("error"):
                     print(f"[sync:google] {wid} failed: {res['error']}")
             # --- Microsoft (registered only if module is loaded)
             ms_sync = globals().get("_perform_microsoft_sync_for_workspace")
             if ms_sync is not None:
-                cursor_ms = microsoft_integrations_col.find(
-                    {"auto_sync_paused": {"$ne": True}},
-                    {"_id": 0, "workspace_id": 1},
-                )
-                async for row in cursor_ms:
-                    wid = row.get("workspace_id")
-                    if not wid:
-                        continue
+                for wid in await secrets_store.list_autosync_workspace_ids(
+                    provider="microsoft", mongo_col=microsoft_integrations_col,
+                ):
                     try:
                         res = await ms_sync(wid)
                         if res.get("error"):
@@ -5083,11 +5080,15 @@ async def google_integration_status(
     diag = goog.config_status()
     if not goog.is_oauth_configured():
         return {"configured": False, "connected": False, **diag}
-    doc = await google_integrations_col.find_one(
-        {"workspace_id": workspace_id},
-        {"_id": 0, "account_email": 1, "scopes": 1, "connected_at": 1,
-         "last_sync_at": 1, "expires_at": 1, "auto_sync_paused": 1, "last_sync_error": 1,
-         "connected": 1, "status": 1, "reauthorization_required": 1, "missing_scopes": 1},
+    doc = await secrets_store.get_connection(
+        provider="google",
+        workspace_id=workspace_id,
+        mongo_col=google_integrations_col,
+        projection={
+            "_id": 0, "account_email": 1, "scopes": 1, "connected_at": 1,
+            "last_sync_at": 1, "expires_at": 1, "auto_sync_paused": 1, "last_sync_error": 1,
+            "connected": 1, "status": 1, "reauthorization_required": 1, "missing_scopes": 1,
+        },
     )
     if not doc:
         return {"configured": True, "connected": False, **diag}
@@ -5159,18 +5160,16 @@ async def google_oauth_start(
     redirect_uri = goog.resolve_redirect_uri(base_url)
     state = uuid.uuid4().hex
 
-    await google_oauth_state_col.insert_one(
-        {
-            "state": state,
-            "user_id": user.user_id,
-            "workspace_id": workspace_id,
-            "return_to": _sanitize_return_to(return_to),
-            "redirect_uri": redirect_uri,
-            "created_at": datetime.now(timezone.utc),
-            # State documents auto-expire after 10 min via TTL index
-            # configured at startup (see google_oauth_state_col below).
-            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
-        }
+    await secrets_store.put_oauth_state(
+        provider="google",
+        mongo_col=google_oauth_state_col,
+        state=state,
+        user_id=user.user_id,
+        workspace_id=workspace_id,
+        return_to=_sanitize_return_to(return_to),
+        redirect_uri=redirect_uri,
+        created_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
     )
 
     auth_url = goog.build_authorization_url(state=state, redirect_uri=redirect_uri)
@@ -5266,7 +5265,9 @@ async def google_oauth_callback(
     if not code or not state:
         return _bounce("google_connected=error&reason=missing_code_or_state")
 
-    state_doc = await google_oauth_state_col.find_one_and_delete({"state": state})
+    state_doc = await secrets_store.consume_oauth_state(
+        provider="google", mongo_col=google_oauth_state_col, state=state,
+    )
     if not state_doc:
         return _bounce("google_connected=error&reason=invalid_state")
 
@@ -5307,34 +5308,36 @@ async def google_oauth_callback(
     # Google does not always return a fresh refresh_token on every grant
     # (e.g. some reconnect edge cases even with prompt=consent). Never let
     # a missing new token overwrite a previously valid encrypted one.
-    existing_doc = await google_integrations_col.find_one(
-        {"workspace_id": workspace_id}, {"_id": 0, "refresh_token": 1}
+    existing_doc = await secrets_store.get_connection(
+        provider="google",
+        workspace_id=workspace_id,
+        mongo_col=google_integrations_col,
+        projection={"_id": 0, "refresh_token": 1},
     )
     new_refresh_token = goog.encrypt_token(creds.refresh_token)
     refresh_token_to_store = new_refresh_token or (existing_doc or {}).get("refresh_token")
 
-    await google_integrations_col.update_one(
-        {"workspace_id": workspace_id},
-        {
-            "$set": {
-                "workspace_id": workspace_id,
-                "user_id": user_id,
-                "access_token": goog.encrypt_token(creds.token),
-                "refresh_token": refresh_token_to_store,
-                "expires_at": expires_at,
-                "scopes": granted_scopes or goog.GOOGLE_SCOPES,
-                "connected": is_connected,
-                "status": integration_status,
-                "reauthorization_required": reauthorization_required,
-                "missing_scopes": missing_scopes,
-                "account_email": (profile or {}).get("email"),
-                "account_name": (profile or {}).get("name"),
-                "google_user_id": (profile or {}).get("google_user_id"),
-                "connected_at": datetime.now(timezone.utc),
-                "updated_at": datetime.now(timezone.utc),
-            }
+    await secrets_store.upsert_connection(
+        provider="google",
+        workspace_id=workspace_id,
+        mongo_col=google_integrations_col,
+        fields={
+            "workspace_id": workspace_id,
+            "user_id": user_id,
+            "access_token": goog.encrypt_token(creds.token),
+            "refresh_token": refresh_token_to_store,
+            "expires_at": expires_at,
+            "scopes": granted_scopes or goog.GOOGLE_SCOPES,
+            "connected": is_connected,
+            "status": integration_status,
+            "reauthorization_required": reauthorization_required,
+            "missing_scopes": missing_scopes,
+            "account_email": (profile or {}).get("email"),
+            "account_name": (profile or {}).get("name"),
+            "google_user_id": (profile or {}).get("google_user_id"),
+            "connected_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
         },
-        upsert=True,
     )
 
     try:
@@ -5364,7 +5367,9 @@ async def _load_google_credentials(workspace_id: str):
     """Decrypt + auto-refresh credentials for a workspace, persisting
     rotated tokens. Returns ``(creds, integration_doc)`` or
     ``(None, None)`` if the workspace isn't connected."""
-    doc = await google_integrations_col.find_one({"workspace_id": workspace_id})
+    doc = await secrets_store.get_connection(
+        provider="google", workspace_id=workspace_id, mongo_col=google_integrations_col,
+    )
     if not doc:
         return None, None
     access_token = goog.decrypt_token(doc.get("access_token"))
@@ -5383,15 +5388,15 @@ async def _load_google_credentials(workspace_id: str):
         new_expiry = creds.expiry
         if isinstance(new_expiry, datetime) and new_expiry.tzinfo is None:
             new_expiry = new_expiry.replace(tzinfo=timezone.utc)
-        await google_integrations_col.update_one(
-            {"workspace_id": workspace_id},
-            {
-                "$set": {
-                    "access_token": goog.encrypt_token(creds.token),
-                    "refresh_token": goog.encrypt_token(creds.refresh_token) or doc.get("refresh_token"),
-                    "expires_at": new_expiry,
-                    "updated_at": datetime.now(timezone.utc),
-                }
+        await secrets_store.patch_connection(
+            provider="google",
+            workspace_id=workspace_id,
+            mongo_col=google_integrations_col,
+            fields={
+                "access_token": goog.encrypt_token(creds.token),
+                "refresh_token": goog.encrypt_token(creds.refresh_token) or doc.get("refresh_token"),
+                "expires_at": new_expiry,
+                "updated_at": datetime.now(timezone.utc),
             },
         )
     return creds, doc
@@ -5514,9 +5519,11 @@ async def google_oauth_sync(
         upsert=True,
     )
 
-    await google_integrations_col.update_one(
-        {"workspace_id": workspace_id},
-        {"$set": {"last_sync_at": now}},
+    await secrets_store.patch_connection(
+        provider="google",
+        workspace_id=workspace_id,
+        mongo_col=google_integrations_col,
+        fields={"last_sync_at": now},
     )
     try:
         await log_audit(
@@ -5543,7 +5550,9 @@ async def google_oauth_disconnect(
     end up with an empty inbox/calendar, and re-enables simulation_mode
     so the UI returns to demo state cleanly.
     """
-    doc = await google_integrations_col.find_one({"workspace_id": workspace_id})
+    doc = await secrets_store.get_connection(
+        provider="google", workspace_id=workspace_id, mongo_col=google_integrations_col,
+    )
     if not doc:
         return {"success": True, "already": "disconnected"}
 
@@ -5554,7 +5563,9 @@ async def google_oauth_disconnect(
     elif access:
         goog.revoke_token(access)
 
-    await google_integrations_col.delete_one({"workspace_id": workspace_id})
+    await secrets_store.delete_connection(
+        provider="google", workspace_id=workspace_id, mongo_col=google_integrations_col,
+    )
 
     # Wipe any rows we synced from Google so the user doesn't see stale
     # data after disconnecting.
@@ -5600,10 +5611,14 @@ async def microsoft_integration_status(
 ):
     if not msoa.is_oauth_configured():
         return {"configured": False, "connected": False}
-    doc = await microsoft_integrations_col.find_one(
-        {"workspace_id": workspace_id},
-        {"_id": 0, "account_email": 1, "scopes": 1, "connected_at": 1,
-         "last_sync_at": 1, "auto_sync_paused": 1, "last_sync_error": 1},
+    doc = await secrets_store.get_connection(
+        provider="microsoft",
+        workspace_id=workspace_id,
+        mongo_col=microsoft_integrations_col,
+        projection={
+            "_id": 0, "account_email": 1, "scopes": 1, "connected_at": 1,
+            "last_sync_at": 1, "auto_sync_paused": 1, "last_sync_error": 1,
+        },
     )
     if not doc:
         return {"configured": True, "connected": False}
@@ -5634,13 +5649,16 @@ async def microsoft_oauth_start(
     base_url = str(request.base_url).rstrip("/")
     redirect_uri = msoa.resolve_redirect_uri(base_url)
     state = uuid.uuid4().hex
-    await microsoft_oauth_state_col.insert_one(
-        {
-            "state": state, "user_id": user.user_id, "workspace_id": workspace_id,
-            "return_to": return_to or "/welcome/inbox", "redirect_uri": redirect_uri,
-            "created_at": datetime.now(timezone.utc),
-            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
-        }
+    await secrets_store.put_oauth_state(
+        provider="microsoft",
+        mongo_col=microsoft_oauth_state_col,
+        state=state,
+        user_id=user.user_id,
+        workspace_id=workspace_id,
+        return_to=return_to or "/welcome/inbox",
+        redirect_uri=redirect_uri,
+        created_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
     )
     auth_url = msoa.build_authorization_url(state=state, redirect_uri=redirect_uri)
     return {"auth_url": auth_url, "state": state}
@@ -5671,7 +5689,9 @@ async def microsoft_oauth_callback(
     if not code or not state:
         return _bounce("microsoft_connected=error&reason=missing_code_or_state")
 
-    state_doc = await microsoft_oauth_state_col.find_one_and_delete({"state": state})
+    state_doc = await secrets_store.consume_oauth_state(
+        provider="microsoft", mongo_col=microsoft_oauth_state_col, state=state,
+    )
     if not state_doc:
         return _bounce("microsoft_connected=error&reason=invalid_state")
     expires = state_doc.get("expires_at")
@@ -5692,23 +5712,25 @@ async def microsoft_oauth_callback(
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
     granted_scopes = (token_payload.get("scope") or "").split()
 
-    await microsoft_integrations_col.update_one(
-        {"workspace_id": workspace_id},
-        {
-            "$set": {
-                "workspace_id": workspace_id, "user_id": user_id,
-                "access_token": msoa.encrypt_token(token_payload.get("access_token")),
-                "refresh_token": msoa.encrypt_token(token_payload.get("refresh_token")),
-                "expires_at": expires_at,
-                "scopes": granted_scopes or msoa.MS_SCOPES,
-                "account_email": (profile or {}).get("email"),
-                "account_name": (profile or {}).get("name"),
-                "ms_user_id": (profile or {}).get("ms_user_id"),
-                "connected_at": datetime.now(timezone.utc),
-                "updated_at": datetime.now(timezone.utc),
-            }
+    await secrets_store.upsert_connection(
+        provider="microsoft",
+        workspace_id=workspace_id,
+        mongo_col=microsoft_integrations_col,
+        fields={
+            "workspace_id": workspace_id,
+            "user_id": user_id,
+            "access_token": msoa.encrypt_token(token_payload.get("access_token")),
+            "refresh_token": msoa.encrypt_token(token_payload.get("refresh_token")),
+            "expires_at": expires_at,
+            "scopes": granted_scopes or msoa.MS_SCOPES,
+            "connected": True,
+            "status": "ok",
+            "account_email": (profile or {}).get("email"),
+            "account_name": (profile or {}).get("name"),
+            "ms_user_id": (profile or {}).get("ms_user_id"),
+            "connected_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
         },
-        upsert=True,
     )
 
     try:
@@ -5729,7 +5751,9 @@ async def _load_microsoft_credentials(workspace_id: str) -> Tuple[Optional[str],
     """Decrypt + auto-refresh the Microsoft access token. Returns
     ``(access_token_plain, doc)`` or ``(None, None)`` if not connected
     or unrecoverable."""
-    doc = await microsoft_integrations_col.find_one({"workspace_id": workspace_id})
+    doc = await secrets_store.get_connection(
+        provider="microsoft", workspace_id=workspace_id, mongo_col=microsoft_integrations_col,
+    )
     if not doc:
         return None, None
     access_plain = msoa.decrypt_token(doc.get("access_token"))
@@ -5748,14 +5772,16 @@ async def _load_microsoft_credentials(workspace_id: str) -> Tuple[Optional[str],
             access_plain = fresh.get("access_token") or access_plain
             new_refresh = fresh.get("refresh_token") or refresh_plain
             new_expiry = datetime.now(timezone.utc) + timedelta(seconds=int(fresh.get("expires_in") or 3600))
-            await microsoft_integrations_col.update_one(
-                {"workspace_id": workspace_id},
-                {"$set": {
+            await secrets_store.patch_connection(
+                provider="microsoft",
+                workspace_id=workspace_id,
+                mongo_col=microsoft_integrations_col,
+                fields={
                     "access_token": msoa.encrypt_token(access_plain),
                     "refresh_token": msoa.encrypt_token(new_refresh),
                     "expires_at": new_expiry,
                     "updated_at": datetime.now(timezone.utc),
-                }},
+                },
             )
         except Exception:  # noqa: BLE001
             return None, doc
@@ -5808,15 +5834,19 @@ async def _perform_microsoft_sync_for_workspace(workspace_id: str) -> Dict[str, 
                 upsert=True,
             )
             counts["events"] += 1
-        await microsoft_integrations_col.update_one(
-            {"workspace_id": workspace_id},
-            {"$set": {"last_sync_at": now, "last_sync_error": None}},
+        await secrets_store.patch_connection(
+            provider="microsoft",
+            workspace_id=workspace_id,
+            mongo_col=microsoft_integrations_col,
+            fields={"last_sync_at": now, "last_sync_error": None},
         )
         return {"workspace_id": workspace_id, "ok": True, "counts": counts}
     except Exception as exc:  # noqa: BLE001
-        await microsoft_integrations_col.update_one(
-            {"workspace_id": workspace_id},
-            {"$set": {"last_sync_error": str(exc)[:200], "last_sync_attempt_at": now}},
+        await secrets_store.patch_connection(
+            provider="microsoft",
+            workspace_id=workspace_id,
+            mongo_col=microsoft_integrations_col,
+            fields={"last_sync_error": str(exc)[:200], "last_sync_attempt_at": now},
         )
         return {"workspace_id": workspace_id, "error": str(exc)[:200]}
 
@@ -5863,7 +5893,9 @@ async def microsoft_oauth_disconnect(
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
 ):
-    doc = await microsoft_integrations_col.find_one({"workspace_id": workspace_id})
+    doc = await secrets_store.get_connection(
+        provider="microsoft", workspace_id=workspace_id, mongo_col=microsoft_integrations_col,
+    )
     if not doc:
         return {"success": True, "already": "disconnected"}
 
@@ -5874,13 +5906,17 @@ async def microsoft_oauth_disconnect(
     elif access:
         msoa.revoke_token(access)
 
-    await microsoft_integrations_col.delete_one({"workspace_id": workspace_id})
+    await secrets_store.delete_connection(
+        provider="microsoft", workspace_id=workspace_id, mongo_col=microsoft_integrations_col,
+    )
     await inbox_col.delete_many({"workspace_id": workspace_id, "is_real": True, "source": "outlook"})
     await calendar_col.delete_many({"workspace_id": workspace_id, "is_real": True, "source": "outlook_calendar"})
 
     # Only restore demo mode if there's no other real integration
     # (e.g. Google) keeping this workspace in real-data territory.
-    other_real = await google_integrations_col.find_one({"workspace_id": workspace_id})
+    other_real = await secrets_store.get_connection(
+        provider="google", workspace_id=workspace_id, mongo_col=google_integrations_col,
+    )
     if not other_real:
         await inbox_col.update_many(
             {"workspace_id": workspace_id, "is_simulation": True},
@@ -5936,14 +5972,20 @@ async def toggle_auto_sync(
     AND triggers an immediate sync so the user gets fresh data without
     having to wait up to 15 min for the next cycle.
     """
+    if provider not in ("google", "microsoft"):
+        raise HTTPException(status_code=400, detail=f"Unknown provider '{provider}'")
     col = _provider_collection(provider)
-    doc = await col.find_one({"workspace_id": workspace_id})
+    doc = await secrets_store.get_connection(
+        provider=provider, workspace_id=workspace_id, mongo_col=col,
+    )
     if not doc:
         raise HTTPException(status_code=404, detail=f"{provider} not connected")
 
-    await col.update_one(
-        {"workspace_id": workspace_id},
-        {"$set": {"auto_sync_paused": req.paused, "updated_at": datetime.now(timezone.utc)}},
+    await secrets_store.patch_connection(
+        provider=provider,
+        workspace_id=workspace_id,
+        mongo_col=col,
+        fields={"auto_sync_paused": req.paused, "updated_at": datetime.now(timezone.utc)},
     )
     try:
         await log_audit(
