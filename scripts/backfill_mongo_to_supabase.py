@@ -27,7 +27,8 @@ Safety guarantees
 * **Idempotent.** Re-running after a partial run picks up where it
   left off. No row is updated; only inserted-if-missing.
 * **Granular --table flag.** You can run only the table you want
-  (``members``, ``invites``, ``audit``, ``provider_connections``, ``all``).
+  (``members``, ``invites``, ``audit``, ``provider_connections``,
+  ``action_executions``, ``automation_policies``, ``action_policies``, ``all``).
 
 Examples
 --------
@@ -507,6 +508,18 @@ async def migrate_audit(
 
 
 
+
+def _iso_ts(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
 # ── Phase 2: provider OAuth connections ───────────────────────────────
 async def migrate_provider_connections(
     db, sb: SupabaseClient, ws_org: Dict[str, str], reporter: Reporter, *,
@@ -621,6 +634,233 @@ async def migrate_provider_connections(
                 )
 
 
+
+
+# ── Phase 3: Actions executions + policies ────────────────────────────
+async def migrate_action_executions(
+    db, sb: SupabaseClient, reporter: Reporter, *,
+    execute: bool, limit: Optional[int],
+) -> None:
+    """Copy action_executions ledger into Supabase. Upsert on execution_id."""
+    print("\n--- action_executions → action_executions ---")
+    seen = 0
+    dry_seen: set = set()
+    cursor = db["action_executions"].find({})
+    async for row in cursor:
+        if limit and seen >= limit:
+            break
+        seen += 1
+        eid = row.get("execution_id")
+        wid = row.get("workspace_id")
+        if not eid or not wid:
+            reporter.bump("action_executions", "skip:missing_key")
+            continue
+
+        status, body = await sb.get(
+            "/rest/v1/action_executions",
+            {"execution_id": f"eq.{eid}", "select": "execution_id", "limit": "1"},
+        )
+        if status == 200 and isinstance(body, list) and body:
+            print(f"  [skip:duplicate] execution_id={eid}")
+            reporter.bump("action_executions", "skip:duplicate")
+            continue
+        if eid in dry_seen:
+            reporter.bump("action_executions", "skip:duplicate_in_run")
+            continue
+
+        payload = {
+            "execution_id": eid,
+            "workspace_id": wid,
+            "action_id": row.get("action_id"),
+            "provider": row.get("provider"),
+            "requested_by": row.get("requested_by"),
+            "actor_role": row.get("actor_role"),
+            "source": row.get("source"),
+            "input": row.get("input") or {},
+            "status": row.get("status") or "failed",
+            "risk_level": row.get("risk_level"),
+            "policy_decision": row.get("policy_decision"),
+            "confidence": row.get("confidence"),
+            "idempotency_key": row.get("idempotency_key"),
+            "started_at": _iso_ts(row.get("started_at")),
+            "completed_at": _iso_ts(row.get("completed_at")),
+            "provider_request_id": row.get("provider_request_id"),
+            "result_metadata": row.get("result_metadata") or {},
+            "error_code": row.get("error_code"),
+            "error_message_sanitized": row.get("error_message_sanitized"),
+            "approved_by": row.get("approved_by"),
+            "approved_at": _iso_ts(row.get("approved_at")),
+        }
+
+        if not execute:
+            print(f"  [dry] would upsert execution_id={eid} action={row.get('action_id')} status={row.get('status')}")
+            reporter.bump("action_executions", "dry:would_insert")
+            dry_seen.add(eid)
+            continue
+
+        status, body = await sb.post(
+            "/rest/v1/action_executions?on_conflict=execution_id",
+            payload,
+            prefer="resolution=merge-duplicates,return=minimal",
+        )
+        if status < 400:
+            print(f"  [ok] upserted execution_id={eid}")
+            reporter.bump("action_executions", "upserted")
+            dry_seen.add(eid)
+        else:
+            print(f"  [error:{status}] execution_id={eid} body={str(body)[:160]}")
+            reporter.bump("action_executions", f"error:{status}")
+            reporter.error("action_executions", eid, f"http {status}: {str(body)[:120]}")
+
+
+async def migrate_automation_policies(
+    db, sb: SupabaseClient, ws_org: Dict[str, str], reporter: Reporter, *,
+    execute: bool, limit: Optional[int],
+) -> None:
+    """Copy automation_policies (inbox + scope=action) into Supabase."""
+    print("\n--- automation_policies → automation_policies ---")
+    seen = 0
+    dry_seen: set = set()
+    known = {
+        "policy_id", "workspace_id", "org_id", "enabled",
+        "intent", "action", "confidence_threshold_high", "confidence_threshold_medium",
+        "high_action", "medium_action", "low_action",
+        "scope", "action_id", "provider", "mode", "minimum_role", "daily_limit",
+        "created_at", "updated_at",
+    }
+    cursor = db["automation_policies"].find({})
+    async for row in cursor:
+        if limit and seen >= limit:
+            break
+        seen += 1
+        pid = row.get("policy_id")
+        wid = row.get("workspace_id")
+        if not pid or not wid:
+            reporter.bump("automation_policies", "skip:missing_key")
+            continue
+
+        status, body = await sb.get(
+            "/rest/v1/automation_policies",
+            {"policy_id": f"eq.{pid}", "select": "policy_id", "limit": "1"},
+        )
+        if status == 200 and isinstance(body, list) and body:
+            print(f"  [skip:duplicate] policy_id={pid}")
+            reporter.bump("automation_policies", "skip:duplicate")
+            continue
+        if pid in dry_seen:
+            reporter.bump("automation_policies", "skip:duplicate_in_run")
+            continue
+
+        org_id = ws_org.get(wid) or (DEFAULT_ORG_ID or None)
+        payload: Dict[str, Any] = {"policy_id": pid, "workspace_id": wid}
+        if org_id and is_uuid(org_id):
+            payload["org_id"] = org_id
+        extra: Dict[str, Any] = {}
+        for k, v in row.items():
+            if k in {"_id", "id", "policy_id", "workspace_id", "org_id"}:
+                continue
+            if k in known:
+                if k in ("created_at", "updated_at"):
+                    payload[k] = _iso_ts(v)
+                else:
+                    payload[k] = v
+            else:
+                extra[k] = v
+        payload["extra"] = extra
+        payload.setdefault("enabled", True)
+
+        hint = row.get("intent") or row.get("action_id") or row.get("scope") or "?"
+        if not execute:
+            print(f"  [dry] would upsert policy_id={pid} hint={hint}")
+            reporter.bump("automation_policies", "dry:would_insert")
+            dry_seen.add(pid)
+            continue
+
+        status, body = await sb.post(
+            "/rest/v1/automation_policies?on_conflict=policy_id",
+            payload,
+            prefer="resolution=merge-duplicates,return=minimal",
+        )
+        if status < 400:
+            print(f"  [ok] upserted policy_id={pid}")
+            reporter.bump("automation_policies", "upserted")
+            dry_seen.add(pid)
+        else:
+            print(f"  [error:{status}] policy_id={pid} body={str(body)[:160]}")
+            reporter.bump("automation_policies", f"error:{status}")
+            reporter.error("automation_policies", pid, f"http {status}: {str(body)[:120]}")
+
+
+async def migrate_action_policies(
+    db, sb: SupabaseClient, reporter: Reporter, *,
+    execute: bool, limit: Optional[int],
+) -> None:
+    """Copy legacy action_policies into Supabase (compat-read path)."""
+    print("\n--- action_policies → action_policies ---")
+    seen = 0
+    dry_seen: set = set()
+    cursor = db["action_policies"].find({})
+    async for row in cursor:
+        if limit and seen >= limit:
+            break
+        seen += 1
+        wid = row.get("workspace_id")
+        aid = row.get("action_id")
+        if not wid or not aid:
+            reporter.bump("action_policies", "skip:missing_key")
+            continue
+        key = f"{wid}/{aid}"
+
+        status, body = await sb.get(
+            "/rest/v1/action_policies",
+            {
+                "workspace_id": f"eq.{wid}",
+                "action_id": f"eq.{aid}",
+                "select": "workspace_id",
+                "limit": "1",
+            },
+        )
+        if status == 200 and isinstance(body, list) and body:
+            print(f"  [skip:duplicate] {key}")
+            reporter.bump("action_policies", "skip:duplicate")
+            continue
+        if key in dry_seen:
+            reporter.bump("action_policies", "skip:duplicate_in_run")
+            continue
+
+        payload = {
+            "policy_id": row.get("policy_id"),
+            "workspace_id": wid,
+            "action_id": aid,
+            "auto_approve": bool(row.get("auto_approve") or False),
+            "daily_limit": row.get("daily_limit"),
+            "created_at": _iso_ts(row.get("created_at")),
+            "updated_at": _iso_ts(row.get("updated_at")),
+        }
+        # Drop nulls that would confuse timestamptz
+        payload = {k: v for k, v in payload.items() if v is not None or k in ("auto_approve",)}
+
+        if not execute:
+            print(f"  [dry] would upsert {key} auto_approve={payload.get('auto_approve')}")
+            reporter.bump("action_policies", "dry:would_insert")
+            dry_seen.add(key)
+            continue
+
+        status, body = await sb.post(
+            "/rest/v1/action_policies?on_conflict=workspace_id,action_id",
+            payload,
+            prefer="resolution=merge-duplicates,return=minimal",
+        )
+        if status < 400:
+            print(f"  [ok] upserted {key}")
+            reporter.bump("action_policies", "upserted")
+            dry_seen.add(key)
+        else:
+            print(f"  [error:{status}] {key} body={str(body)[:160]}")
+            reporter.bump("action_policies", f"error:{status}")
+            reporter.error("action_policies", key, f"http {status}: {str(body)[:120]}")
+
+
 # ── Main ─────────────────────────────────────────────────────────────
 async def main(args: argparse.Namespace) -> None:
     sb = SupabaseClient()
@@ -668,6 +908,18 @@ async def main(args: argparse.Namespace) -> None:
         await migrate_provider_connections(
             db, sb, ws_org, reporter, execute=args.execute, limit=args.limit,
         )
+    if table in ("action_executions", "all"):
+        await migrate_action_executions(
+            db, sb, reporter, execute=args.execute, limit=args.limit,
+        )
+    if table in ("automation_policies", "all"):
+        await migrate_automation_policies(
+            db, sb, ws_org, reporter, execute=args.execute, limit=args.limit,
+        )
+    if table in ("action_policies", "all"):
+        await migrate_action_policies(
+            db, sb, reporter, execute=args.execute, limit=args.limit,
+        )
 
     reporter.print_summary()
 
@@ -697,7 +949,10 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--table",
-        choices=["members", "invites", "audit", "provider_connections", "all"],
+        choices=[
+            "members", "invites", "audit", "provider_connections",
+            "action_executions", "automation_policies", "action_policies", "all",
+        ],
         default="all",
         help="Restrict which collection to process (default: all).",
     )
