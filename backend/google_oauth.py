@@ -4,10 +4,11 @@ Google OAuth 2.0 + Gmail / Calendar sync helpers (Phase 7e).
 This module isolates everything Google-specific so server.py only deals
 with high-level intents:
 
-    1. ``build_authorization_url(state, scopes)`` — generates the URL
-       the frontend redirects the user to.
-    2. ``exchange_code_for_tokens(code)`` — completes the OAuth flow and
-       returns plaintext credentials we can persist (encrypted).
+    1. ``build_authorization_url(state, redirect_uri)`` — generates the URL
+       the frontend redirects the user to, plus the PKCE ``code_verifier``.
+    2. ``exchange_code_for_tokens(code, redirect_uri, code_verifier)`` —
+       completes the OAuth flow (with PKCE) and returns plaintext
+       credentials we can persist (encrypted).
     3. ``load_credentials(workspace_id)`` — fetches stored tokens for a
        workspace, decrypts them, refreshes if expired, and returns a
        google-auth ``Credentials`` object ready to call APIs.
@@ -196,12 +197,17 @@ def resolve_redirect_uri(request_base_url: Optional[str] = None) -> str:
     )
 
 
-def build_authorization_url(state: str, redirect_uri: str) -> str:
+def build_authorization_url(state: str, redirect_uri: str) -> Tuple[str, Optional[str]]:
     """Compose the URL the frontend opens for user consent.
 
     ``access_type='offline'`` + ``prompt='consent'`` are MANDATORY — they
     are the difference between getting a refresh token (and thus being
     able to sync forever) and getting only a 1-hour access token.
+
+    Returns ``(url, code_verifier)``. google-auth-oauthlib enables PKCE by
+    default; the verifier generated on ``authorization_url`` MUST be
+    persisted with OAuth state and passed back to ``exchange_code_for_tokens``,
+    otherwise Google returns ``(invalid_grant) Missing code verifier.``
     """
     flow = Flow.from_client_config(
         _client_config(), scopes=GOOGLE_SCOPES, redirect_uri=redirect_uri
@@ -212,11 +218,11 @@ def build_authorization_url(state: str, redirect_uri: str) -> str:
         include_granted_scopes="true",
         state=state,
     )
-    return url
+    return url, getattr(flow, "code_verifier", None)
 
 
 def exchange_code_for_tokens(
-    code: str, redirect_uri: str
+    code: str, redirect_uri: str, code_verifier: Optional[str] = None
 ) -> Tuple[Credentials, Dict[str, Any]]:
     """Exchange the ``code`` Google sent us for tokens + user info.
 
@@ -224,10 +230,17 @@ def exchange_code_for_tokens(
     user's email/sub so the caller can persist account identity. We
     suppress the noisy "scope changed" warning Google emits when it
     re-orders the scopes.
+
+    ``code_verifier`` is the PKCE verifier from ``build_authorization_url``
+    (stored on the OAuth state doc). A new Flow instance does not retain
+    the original verifier — set it before ``fetch_token`` or the exchange
+    fails with Missing code verifier.
     """
     flow = Flow.from_client_config(
         _client_config(), scopes=GOOGLE_SCOPES, redirect_uri=redirect_uri
     )
+    if code_verifier:
+        flow.code_verifier = code_verifier
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         flow.fetch_token(code=code)
@@ -404,18 +417,24 @@ ACTION_SCOPES = {
 }
 
 
-def build_incremental_authorization_url(state: str, redirect_uri: str, additional_scopes: List[str]) -> str:
+def build_incremental_authorization_url(
+    state: str, redirect_uri: str, additional_scopes: List[str]
+) -> Tuple[str, Optional[str]]:
     """Same OAuth dance as build_authorization_url(), but requesting the
     existing GOOGLE_SCOPES PLUS the extra scope(s) an Action needs.
     include_granted_scopes='true' is what makes this "incremental" —
     Google keeps whatever the user already granted and only prompts for
-    the delta."""
+    the delta.
+
+    Returns ``(url, code_verifier)`` — same PKCE contract as
+    ``build_authorization_url`` (callback reuses exchange_code_for_tokens).
+    """
     scopes = list(GOOGLE_SCOPES) + [s for s in additional_scopes if s not in GOOGLE_SCOPES]
     flow = Flow.from_client_config(_client_config(), scopes=scopes, redirect_uri=redirect_uri)
     url, _ = flow.authorization_url(
         access_type="offline", prompt="consent", include_granted_scopes="true", state=state,
     )
-    return url
+    return url, getattr(flow, "code_verifier", None)
 
 
 def send_gmail(creds: Credentials, to: str, subject: str, body: str) -> str:
