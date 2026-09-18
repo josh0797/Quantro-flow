@@ -26,10 +26,9 @@ import supabase_admin
 # ─── Config ────────────────────────────────────────────────────────────
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
 DB_NAME = os.environ.get("DB_NAME", "quantro_os")
-# AI Billing — every AI request now flows through ai_billing.run_ai_request.
-# EMERGENT_LLM_KEY is intentionally NOT loaded here: Quantro uses
-# OPENAI_API_KEY directly (Quantro credits) or the user's own key
-# (coupon / depleted-credit users). See /app/backend/ai_billing.py.
+# AI Billing — every AI request flows through ai_billing.run_ai_request.
+# Emergent LLM (EMERGENT_LLM_KEY / emergentintegrations) removed in Phase 0.
+# Quantro uses OPENAI_API_KEY (credits) or the user's own key. See ai_billing.py.
 
 # ─── Supabase Auth (shared project with the Quantro landing) ──────────
 # The frontend signs users in through Supabase Auth; we simply verify the
