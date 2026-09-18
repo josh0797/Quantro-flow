@@ -1,4 +1,5 @@
 # Quantro-flow FastAPI — Fly.io
+# Build context = repo root (see fly.toml dockerfile = backend/Dockerfile)
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -11,16 +12,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY backend/ .
 
-# Non-root
 RUN useradd -m appuser && chown -R appuser:appuser /app
 USER appuser
 
 EXPOSE 8000
 
-# Fly sets PORT; bind all interfaces
 CMD ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port ${PORT:-8000}"]

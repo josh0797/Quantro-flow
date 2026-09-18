@@ -1,0 +1,12 @@
+.git
+.github
+frontend/node_modules
+frontend/build
+**/__pycache__
+**/.venv
+**/.env
+**/.env.*
+**/node_modules
+supabase/.temp
+*.md
+docs
