@@ -1,8 +1,9 @@
 # Phase 7c — Migration to Supabase (apply manually)
 
 ## Status
-- Backend code is **dual-write ready**.
-- Default mode: `QUANTRO_DB_PRIMARY=mongo` — Mongo remains the read source, Supabase is shadow-written best-effort.
+- **Superseded for identity SoT by Phase 1** — see `docs/phase1-identity-sot.md`.
+- Backend code is **dual-write ready** (Phase 7c) and **Supabase-primary by default** (Phase 1).
+- Default mode: `QUANTRO_DB_PRIMARY=supabase` (rollback: `mongo`) — Mongo remains the read source, Supabase is shadow-written best-effort.
 - After applying the SQL migration below, flip `QUANTRO_DB_PRIMARY=supabase` to make Supabase the read source. Mongo keeps receiving writes for backward compatibility.
 
 ## What's in the migration

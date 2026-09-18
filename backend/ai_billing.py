@@ -14,7 +14,7 @@ Responsibilities:
         - user_api: user supplied their own key
         - blocked:  neither
   * Expose a single ``run_ai_request`` wrapper that every AI endpoint
-    must call instead of touching OpenAI / EMERGENT_LLM_KEY directly.
+    must call instead of touching OpenAI directly (Emergent LLM path removed in Phase 0).
 
 The encryption / decryption of `profiles.user_openai_api_key_encrypted`
 is intentionally NOT implemented here yet — it requires choosing a

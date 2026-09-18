@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Tuple
 from ai_billing import run_ai_request
 import supabase_admin
+import provider_secrets_store as secrets_store
 
 # ─── Quantro Connect + Quantro Actions ─────────────────────────────────
 # New platform-layer modules (see integrations/ and actions/ packages).
@@ -46,10 +47,9 @@ from actions.bootstrap import register_all_actions
 # ─── Config ────────────────────────────────────────────────────────────
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
 DB_NAME = os.environ.get("DB_NAME", "quantro_os")
-# AI Billing — every AI request now flows through ai_billing.run_ai_request.
-# EMERGENT_LLM_KEY is intentionally NOT loaded here: Quantro uses
-# OPENAI_API_KEY directly (Quantro credits) or the user's own key
-# (coupon / depleted-credit users). See /app/backend/ai_billing.py.
+# AI Billing — every AI request flows through ai_billing.run_ai_request.
+# Emergent LLM (EMERGENT_LLM_KEY / emergentintegrations) removed in Phase 0.
+# Quantro uses OPENAI_API_KEY (credits) or the user's own key. See ai_billing.py.
 
 # ─── Supabase Auth (shared project with the Quantro landing) ──────────
 # The frontend signs users in through Supabase Auth; we simply verify the
@@ -98,15 +98,23 @@ integrations_config_col = db["integrations_config"]
 system_health_col = db["system_health_events"]
 # Phase 7a — Auth + multi-tenant
 users_col = db["users"]
-user_sessions_col = db["user_sessions"]
+# Phase 1: user_sessions is FROZEN / unused. Auth is Supabase JWT only;
+# do not read or write this collection. Kept bound so legacy ad-hoc
+# scripts do not explode if they import server collections by name.
+user_sessions_col = db["user_sessions"]  # frozen — see docs/phase1-identity-sot.md
 workspaces_col = db["workspaces"]
+# Identity SoT is Supabase org_members / invitations / org_audit_logs
+# when QUANTRO_DB_PRIMARY=supabase (Phase 1). Mongo cols below are an
+# optional mirror (QUANTRO_MONGO_MIRROR) or the rollback read path.
 workspace_members_col = db["workspace_members"]
 workspace_invites_col = db["workspace_invites"]
 audit_log_col = db["audit_log"]
-# Phase 7e — Google OAuth (Gmail + Calendar)
+# Phase 7e / Phase 2 — Google OAuth (Gmail + Calendar)
+# Mongo cols remain the default read primary until QUANTRO_SECRETS_PRIMARY=supabase.
+# Dual-write via provider_secrets_store (see docs/phase2-oauth-secrets.md).
 google_integrations_col = db["google_integrations"]
 google_oauth_state_col = db["google_oauth_state"]
-# Phase 7e.2 — Microsoft Outlook OAuth (Mail + Calendar)
+# Phase 7e.2 / Phase 2 — Microsoft Outlook OAuth (Mail + Calendar)
 microsoft_integrations_col = db["microsoft_integrations"]
 microsoft_oauth_state_col = db["microsoft_oauth_state"]
 # Quantro Connect — Facturapi (CFDI México)
@@ -386,47 +394,43 @@ async def log_audit(
     workspace context (`workspace_id`), action (`event_type`), and a
     free-form `metadata` jsonb-like dict.
     """
+    # Phase 1: Supabase org_audit_logs is SoT when primary; Mongo is an
+    # optional mirror (or the rollback primary).
     try:
-        await audit_log_col.insert_one({
-            "event_id": str(uuid.uuid4()),
-            "event_type": event_type,
-            "description": description,
-            "user_id": user_id,
-            "target_member_id": target_member_id,
-            "workspace_id": workspace_id,
-            "metadata": metadata or {},
-            "timestamp": datetime.now(timezone.utc),
-        })
-    except Exception:
-        pass
-
-    # Shadow-write to Supabase (best-effort).
-    try:
-        if not workspace_id or not target_member_id:
-            return
-        if not supabase_admin.is_dual_write_enabled():
-            return
-        org_id = await workspace_to_org_id(workspace_id)
-        if not org_id:
-            return
-        action = _map_audit_event_to_supabase(event_type)
-        if not action:
-            return
-        meta = dict(metadata or {})
-        meta.setdefault("event_type", event_type)
-        meta.setdefault("description", description)
-        await supabase_admin.insert_audit_log(
-            org_id=org_id,
-            action=action,
-            target_user_id=target_member_id,
-            actor_user_id=user_id,
-            access_token=None,  # service-role only in this path; user JWT not always available here
-            old_role=meta.get("previous_role") or meta.get("old_role"),
-            new_role=meta.get("new_role"),
-            metadata=meta,
-        )
+        if workspace_id and target_member_id and supabase_admin.is_dual_write_enabled():
+            org_id = await workspace_to_org_id(workspace_id)
+            action = _map_audit_event_to_supabase(event_type) if org_id else None
+            if org_id and action:
+                meta = dict(metadata or {})
+                meta.setdefault("event_type", event_type)
+                meta.setdefault("description", description)
+                await supabase_admin.insert_audit_log(
+                    org_id=org_id,
+                    action=action,
+                    target_user_id=target_member_id,
+                    actor_user_id=user_id,
+                    access_token=None,  # service-role preferred
+                    old_role=meta.get("previous_role") or meta.get("old_role"),
+                    new_role=meta.get("new_role"),
+                    metadata=meta,
+                )
     except Exception:  # noqa: BLE001
         pass
+
+    if supabase_admin.is_mongo_mirror_enabled() or supabase_admin.is_mongo_identity_primary():
+        try:
+            await audit_log_col.insert_one({
+                "event_id": str(uuid.uuid4()),
+                "event_type": event_type,
+                "description": description,
+                "user_id": user_id,
+                "target_member_id": target_member_id,
+                "workspace_id": workspace_id,
+                "metadata": metadata or {},
+                "timestamp": datetime.now(timezone.utc),
+            })
+        except Exception:
+            pass
 
 
 # Mapping from internal event_type → Supabase org_audit_logs.action
@@ -1630,15 +1634,19 @@ async def _perform_google_sync_for_workspace(workspace_id: str) -> Dict[str, Any
                 upsert=True,
             )
             counts["events"] += 1
-        await google_integrations_col.update_one(
-            {"workspace_id": workspace_id},
-            {"$set": {"last_sync_at": now, "last_sync_error": None}},
+        await secrets_store.patch_connection(
+            provider="google",
+            workspace_id=workspace_id,
+            mongo_col=google_integrations_col,
+            fields={"last_sync_at": now, "last_sync_error": None},
         )
         return {"workspace_id": workspace_id, "ok": True, "counts": counts}
     except Exception as exc:  # noqa: BLE001
-        await google_integrations_col.update_one(
-            {"workspace_id": workspace_id},
-            {"$set": {"last_sync_error": str(exc)[:200], "last_sync_attempt_at": now}},
+        await secrets_store.patch_connection(
+            provider="google",
+            workspace_id=workspace_id,
+            mongo_col=google_integrations_col,
+            fields={"last_sync_error": str(exc)[:200], "last_sync_attempt_at": now},
         )
         return {"workspace_id": workspace_id, "error": str(exc)[:200]}
 
@@ -1652,28 +1660,18 @@ async def _periodic_provider_sync_loop() -> None:
     while True:
         try:
             # --- Google
-            cursor = google_integrations_col.find(
-                {"auto_sync_paused": {"$ne": True}},
-                {"_id": 0, "workspace_id": 1},
-            )
-            async for row in cursor:
-                wid = row.get("workspace_id")
-                if not wid:
-                    continue
+            for wid in await secrets_store.list_autosync_workspace_ids(
+                provider="google", mongo_col=google_integrations_col,
+            ):
                 res = await _perform_google_sync_for_workspace(wid)
                 if res.get("error"):
                     print(f"[sync:google] {wid} failed: {res['error']}")
             # --- Microsoft (registered only if module is loaded)
             ms_sync = globals().get("_perform_microsoft_sync_for_workspace")
             if ms_sync is not None:
-                cursor_ms = microsoft_integrations_col.find(
-                    {"auto_sync_paused": {"$ne": True}},
-                    {"_id": 0, "workspace_id": 1},
-                )
-                async for row in cursor_ms:
-                    wid = row.get("workspace_id")
-                    if not wid:
-                        continue
+                for wid in await secrets_store.list_autosync_workspace_ids(
+                    provider="microsoft", mongo_col=microsoft_integrations_col,
+                ):
                     try:
                         res = await ms_sync(wid)
                         if res.get("error"):
@@ -1940,6 +1938,28 @@ def role_rank(role: Optional[str]) -> int:
 
 
 async def _membership_for(user_id: str, workspace_id: str) -> Optional[dict]:
+    """Resolve membership for RBAC.
+
+    Phase 1: when QUANTRO_DB_PRIMARY=supabase, prefer ``org_members``.
+    Falls back to Mongo so rollback / incomplete backfill never locks
+    users out. Does not require a Mongo member doc when Supabase has the row.
+    """
+    org_id = await workspace_to_org_id(workspace_id)
+    if supabase_admin.is_supabase_primary() and org_id:
+        try:
+            row = await supabase_admin.get_org_member(org_id, user_id)
+            if row:
+                return {
+                    "user_id": user_id,
+                    "workspace_id": workspace_id,
+                    "role": _normalize_role(row.get("role")),
+                    "joined_at": row.get("joined_at"),
+                    "org_id": org_id,
+                    "source": "supabase",
+                }
+        except Exception:  # noqa: BLE001
+            pass
+
     member = await workspace_members_col.find_one(
         {"user_id": user_id, "workspace_id": workspace_id}, {"_id": 0}
     )
@@ -1947,6 +1967,7 @@ async def _membership_for(user_id: str, workspace_id: str) -> Optional[dict]:
         # Normalize on read so callers always see the canonical Quantro
         # role even if the row was written before the migration.
         member["role"] = _normalize_role(member["role"])
+        member.setdefault("source", "mongo")
     return member
 
 
@@ -2145,35 +2166,53 @@ async def update_member_role(
 
     # Ownership transfer: demote previous owner to leader so workspace
     # always has exactly one Owner.
+    org_id = await workspace_to_org_id(workspace_id)
     if new_role == "owner":
         if user.user_id == target_user_id:
             raise HTTPException(status_code=400, detail="You're already the owner")
-        await workspace_members_col.update_one(
-            {"user_id": user.user_id, "workspace_id": workspace_id},
-            {"$set": {"role": "leader"}},
-        )
+        if org_id and supabase_admin.is_dual_write_enabled():
+            try:
+                await supabase_admin.update_member_role(
+                    org_id=org_id,
+                    member_user_id=user.user_id,
+                    new_role="leader",
+                    access_token=user.access_token or "",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        if supabase_admin.is_mongo_mirror_enabled() or supabase_admin.is_mongo_identity_primary():
+            await workspace_members_col.update_one(
+                {"user_id": user.user_id, "workspace_id": workspace_id},
+                {"$set": {"role": "leader"}},
+            )
         await workspaces_col.update_one(
             {"workspace_id": workspace_id},
             {"$set": {"owner_user_id": target_user_id}},
         )
 
-    await workspace_members_col.update_one(
-        {"user_id": target_user_id, "workspace_id": workspace_id},
-        {"$set": {"role": new_role, "role_updated_at": datetime.now(timezone.utc)}},
-    )
-
-    # Phase 7c shadow-write: keep org_members in sync.
-    org_id = await workspace_to_org_id(workspace_id)
+    # Phase 1: org_members is SoT when primary; Mongo optional mirror.
     if org_id and supabase_admin.is_dual_write_enabled():
         try:
-            await supabase_admin.update_member_role(
+            ok = await supabase_admin.update_member_role(
                 org_id=org_id,
                 member_user_id=target_user_id,
                 new_role=new_role,
                 access_token=user.access_token or "",
             )
+            if supabase_admin.is_supabase_primary() and not ok:
+                raise HTTPException(status_code=502, detail="Failed to update role in Supabase")
+        except HTTPException:
+            raise
         except Exception:  # noqa: BLE001
-            pass
+            if supabase_admin.is_supabase_primary():
+                raise HTTPException(status_code=502, detail="Failed to update role in Supabase")
+
+    if supabase_admin.is_mongo_mirror_enabled() or supabase_admin.is_mongo_identity_primary():
+        await workspace_members_col.update_one(
+            {"user_id": target_user_id, "workspace_id": workspace_id},
+            {"$set": {"role": new_role, "role_updated_at": datetime.now(timezone.utc)}},
+            upsert=supabase_admin.is_supabase_primary(),
+        )
 
     await log_audit(
         "members.role_changed",
@@ -2218,27 +2257,32 @@ async def remove_member(
         if target_role == "leader" and me.get("role") != "owner":
             raise HTTPException(status_code=403, detail="Only the Owner can remove a leader")
 
-    await workspace_members_col.delete_one(
-        {"user_id": target_user_id, "workspace_id": workspace_id}
-    )
+    org_id = await workspace_to_org_id(workspace_id)
+    if org_id and supabase_admin.is_dual_write_enabled():
+        try:
+            ok = await supabase_admin.delete_member(
+                org_id=org_id,
+                member_user_id=target_user_id,
+                access_token=user.access_token or "",
+            )
+            if supabase_admin.is_supabase_primary() and not ok:
+                raise HTTPException(status_code=502, detail="Failed to remove member in Supabase")
+        except HTTPException:
+            raise
+        except Exception:  # noqa: BLE001
+            if supabase_admin.is_supabase_primary():
+                raise HTTPException(status_code=502, detail="Failed to remove member in Supabase")
+
+    if supabase_admin.is_mongo_mirror_enabled() or supabase_admin.is_mongo_identity_primary():
+        await workspace_members_col.delete_one(
+            {"user_id": target_user_id, "workspace_id": workspace_id}
+        )
     # If the user was active in this workspace, clear their pointer so
     # /api/auth/me re-resolves on next login.
     await users_col.update_one(
         {"user_id": target_user_id, "current_workspace_id": workspace_id},
         {"$unset": {"current_workspace_id": ""}},
     )
-
-    # Phase 7c shadow-write: also remove from Supabase.
-    org_id = await workspace_to_org_id(workspace_id)
-    if org_id and supabase_admin.is_dual_write_enabled():
-        try:
-            await supabase_admin.delete_member(
-                org_id=org_id,
-                member_user_id=target_user_id,
-                access_token=user.access_token or "",
-            )
-        except Exception:  # noqa: BLE001
-            pass
 
     await log_audit(
         "members.removed",
@@ -2277,11 +2321,41 @@ async def create_invite(
         raise HTTPException(status_code=403, detail="Only the Owner can invite leaders/owners")
 
     import secrets
-    token = secrets.token_urlsafe(24)
-    invite_id = f"inv_{uuid.uuid4().hex[:12]}"
     expires_in_days = max(1, min(int(req.expires_in_days or 7), 90))
     max_uses = max(1, min(int(req.max_uses or 1), 50))
     expires_at = datetime.now(timezone.utc) + timedelta(days=expires_in_days)
+
+    org_id = await workspace_to_org_id(workspace_id)
+    supabase_invite_id = None
+    sb_token = None
+
+    # Phase 1: invitations table is SoT when primary — create there first.
+    if org_id and supabase_admin.is_dual_write_enabled():
+        try:
+            sb_invite = await supabase_admin.insert_invitation(
+                org_id=org_id,
+                role=role,
+                invited_by=user.user_id,
+                access_token=user.access_token or "",
+                email=req.email,
+                full_name=req.full_name,
+                job_title=req.job_title,
+                expires_at=expires_at.isoformat(),
+            )
+            if sb_invite and sb_invite.get("id"):
+                supabase_invite_id = sb_invite["id"]
+                sb_token = sb_invite.get("token")
+            elif supabase_admin.is_supabase_primary():
+                raise HTTPException(status_code=502, detail="Failed to create invite in Supabase")
+        except HTTPException:
+            raise
+        except Exception:  # noqa: BLE001
+            if supabase_admin.is_supabase_primary():
+                raise HTTPException(status_code=502, detail="Failed to create invite in Supabase")
+
+    # Prefer Supabase token/id when present so join URLs work with SoT.
+    token = sb_token or secrets.token_urlsafe(24)
+    invite_id = supabase_invite_id or f"inv_{uuid.uuid4().hex[:12]}"
 
     invite_doc = {
         "invite_id": invite_id,
@@ -2297,44 +2371,18 @@ async def create_invite(
         "accepted_by": [],
         "email": (req.email or None),
         "full_name": (req.full_name or None),
+        "supabase_invite_id": supabase_invite_id,
+        "supabase_token": sb_token,
     }
-    await workspace_invites_col.insert_one(invite_doc)
 
-    # Phase 7c shadow-write: also create the invite in Supabase so the
-    # rest of the org tooling (and the eventual primary read switch)
-    # stays in sync. Best-effort — failures don't bubble up.
-    org_id = await workspace_to_org_id(workspace_id)
-    supabase_invite_id = None
-    if org_id and supabase_admin.is_dual_write_enabled():
-        try:
-            sb_invite = await supabase_admin.insert_invitation(
-                org_id=org_id,
-                role=role,
-                invited_by=user.user_id,
-                access_token=user.access_token or "",
-                email=req.email,
-                full_name=req.full_name,
-                job_title=req.job_title,
-                expires_at=expires_at.isoformat(),
-            )
-            if sb_invite and sb_invite.get("id"):
-                supabase_invite_id = sb_invite["id"]
-                # Cross-link Mongo row → Supabase row id for later
-                # revoke/accept dual-writes.
-                await workspace_invites_col.update_one(
-                    {"invite_id": invite_id},
-                    {"$set": {
-                        "supabase_invite_id": supabase_invite_id,
-                        "supabase_token": sb_invite.get("token"),
-                    }},
-                )
-        except Exception:  # noqa: BLE001
-            pass
+    if supabase_admin.is_mongo_mirror_enabled() or supabase_admin.is_mongo_identity_primary():
+        await workspace_invites_col.insert_one(dict(invite_doc))
 
     await log_audit(
         "invites.created",
         f"{user.email} created invite for role={role}",
         user_id=user.user_id, workspace_id=workspace_id,
+        target_member_id=user.user_id,
         metadata={
             "invite_id": invite_id,
             "role": role,
@@ -2407,32 +2455,37 @@ async def revoke_invite(
         raise HTTPException(status_code=403, detail="Not a workspace member")
     if role_rank(me.get("role")) < role_rank("leader"):
         raise HTTPException(status_code=403, detail="Requires leader role")
-    # Look up the row first so we have the supabase_invite_id (if any)
-    # before flipping the revoked flag.
+    org_id = await workspace_to_org_id(workspace_id)
     invite_row = await workspace_invites_col.find_one(
         {"workspace_id": workspace_id, "invite_id": invite_id}, {"_id": 0}
     )
-    result = await workspace_invites_col.update_one(
-        {"workspace_id": workspace_id, "invite_id": invite_id},
-        {"$set": {"revoked": True, "revoked_at": datetime.now(timezone.utc), "revoked_by": user.user_id}},
-    )
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Invite not found")
 
-    # Phase 7c shadow-write: revoke in Supabase too. There's no
-    # "revoked" column on `invitations`; we mark accepted=true so the
-    # invite stops being valid (keeps schema clean even if it's not
-    # the most semantic mapping). The Mongo row is still the source of
-    # truth for the revoked-vs-used distinction during the migration.
-    if invite_row and invite_row.get("supabase_invite_id") and supabase_admin.is_dual_write_enabled():
+    # Phase 1: when SoT is Supabase, invite_id is the invitations.id UUID
+    # (list_invites returns that). Revoke there first.
+    sb_id = (invite_row or {}).get("supabase_invite_id") or invite_id
+    revoked_in_sb = False
+    if org_id and supabase_admin.is_dual_write_enabled():
         try:
-            await supabase_admin.update_invitation(
-                invite_row["supabase_invite_id"],
+            revoked_in_sb = await supabase_admin.update_invitation(
+                sb_id,
                 {"accepted": True},
                 user.access_token or "",
             )
         except Exception:  # noqa: BLE001
-            pass
+            revoked_in_sb = False
+
+    matched = 0
+    if supabase_admin.is_mongo_mirror_enabled() or supabase_admin.is_mongo_identity_primary():
+        result = await workspace_invites_col.update_one(
+            {"workspace_id": workspace_id, "invite_id": invite_id},
+            {"$set": {"revoked": True, "revoked_at": datetime.now(timezone.utc), "revoked_by": user.user_id}},
+        )
+        matched = result.matched_count
+
+    if matched == 0 and not revoked_in_sb:
+        raise HTTPException(status_code=404, detail="Invite not found")
+    if invite_row is None:
+        invite_row = {"invite_id": invite_id, "supabase_invite_id": sb_id, "created_by": None}
 
     await log_audit(
         "invites.revoked",
@@ -2444,19 +2497,68 @@ async def revoke_invite(
     return {"success": True}
 
 
+async def _resolve_invite_by_token(token: str, access_token: Optional[str] = None) -> Optional[dict]:
+    """Resolve an invite from Supabase SoT (preferred) or Mongo mirror."""
+    if supabase_admin.is_supabase_primary() or supabase_admin.is_dual_write_enabled():
+        try:
+            sb = await supabase_admin.get_invitation_by_token(token, access_token)
+            if sb:
+                org_id = sb.get("org_id")
+                workspace_id = DEFAULT_WORKSPACE_ID
+                # Best-effort reverse map org → workspace.
+                try:
+                    ws = await workspaces_col.find_one({"org_id": org_id}, {"_id": 0, "workspace_id": 1})
+                    if ws and ws.get("workspace_id"):
+                        workspace_id = ws["workspace_id"]
+                    elif org_id and org_id == supabase_admin.resolve_default_org_id():
+                        workspace_id = DEFAULT_WORKSPACE_ID
+                except Exception:  # noqa: BLE001
+                    pass
+                return {
+                    "invite_id": sb.get("id"),
+                    "supabase_invite_id": sb.get("id"),
+                    "workspace_id": workspace_id,
+                    "org_id": org_id,
+                    "token": sb.get("token"),
+                    "role": sb.get("role"),
+                    "expires_at": sb.get("expires_at"),
+                    "revoked": False,
+                    "accepted": bool(sb.get("accepted")),
+                    "used_count": 1 if sb.get("accepted") else 0,
+                    "max_uses": 1,
+                    "source": "supabase",
+                    "created_by": sb.get("invited_by"),
+                }
+        except Exception:  # noqa: BLE001
+            pass
+
+    invite = await workspace_invites_col.find_one({"token": token}, {"_id": 0})
+    if invite:
+        invite = dict(invite)
+        invite.setdefault("source", "mongo")
+    return invite
+
+
 @app.get("/api/invites/{token}")
-async def peek_invite(token: str, user: User = Depends(get_current_user)):  # noqa: ARG001 — auth required
+async def peek_invite(token: str, user: User = Depends(get_current_user)):
     """Public-ish endpoint (still requires Supabase auth so abuse is
     bounded) that shows the receiver what they're about to accept. Used
     by the /join/:token frontend page."""
-    invite = await workspace_invites_col.find_one({"token": token}, {"_id": 0})
+    invite = await _resolve_invite_by_token(token, user.access_token)
     if not invite:
         raise HTTPException(status_code=404, detail="Invite not found or expired")
-    if invite.get("revoked"):
+    if invite.get("revoked") or invite.get("accepted"):
         raise HTTPException(status_code=410, detail="This invite has been revoked")
     expires_at = invite.get("expires_at")
-    if isinstance(expires_at, datetime) and expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
-        raise HTTPException(status_code=410, detail="This invite has expired")
+    if isinstance(expires_at, str):
+        try:
+            expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except Exception:  # noqa: BLE001
+            expires_at = None
+    if isinstance(expires_at, datetime):
+        exp = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
+        if exp < datetime.now(timezone.utc):
+            raise HTTPException(status_code=410, detail="This invite has expired")
     if invite.get("used_count", 0) >= invite.get("max_uses", 1):
         raise HTTPException(status_code=410, detail="This invite has reached its usage limit")
     workspace = await workspaces_col.find_one({"workspace_id": invite["workspace_id"]}, {"_id": 0})
@@ -2464,7 +2566,8 @@ async def peek_invite(token: str, user: User = Depends(get_current_user)):  # no
         "workspace_id": invite["workspace_id"],
         "workspace_name": (workspace or {}).get("name", "Workspace"),
         "role": _normalize_role(invite.get("role")),
-        "expires_at": expires_at.isoformat() if isinstance(expires_at, datetime) else expires_at,
+        "expires_at": expires_at.isoformat() if isinstance(expires_at, datetime) else invite.get("expires_at"),
+        "source": invite.get("source"),
     }
 
 
@@ -2473,56 +2576,97 @@ async def accept_invite(token: str, user: User = Depends(get_current_user)):
     """Accept an invite token. Adds the authenticated user to the
     workspace with the role specified on the invite. Idempotent: if the
     user is already a member, the existing membership is preserved
-    (role is NOT downgraded)."""
-    invite = await workspace_invites_col.find_one({"token": token}, {"_id": 0})
+    (role is NOT downgraded).
+
+    Phase 1: works with Supabase invitations SoT — does not require a
+    Mongo ``workspace_members`` / ``workspace_invites`` document.
+    """
+    invite = await _resolve_invite_by_token(token, user.access_token)
     if not invite:
         raise HTTPException(status_code=404, detail="Invite not found")
-    if invite.get("revoked"):
+    if invite.get("revoked") or invite.get("accepted"):
         raise HTTPException(status_code=410, detail="This invite has been revoked")
     expires_at = invite.get("expires_at")
-    if isinstance(expires_at, datetime) and expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
-        raise HTTPException(status_code=410, detail="This invite has expired")
+    if isinstance(expires_at, str):
+        try:
+            expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except Exception:  # noqa: BLE001
+            expires_at = None
+    if isinstance(expires_at, datetime):
+        exp = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
+        if exp < datetime.now(timezone.utc):
+            raise HTTPException(status_code=410, detail="This invite has expired")
     if invite.get("used_count", 0) >= invite.get("max_uses", 1):
         raise HTTPException(status_code=410, detail="This invite has reached its usage limit")
 
     workspace_id = invite["workspace_id"]
     role = _normalize_role(invite.get("role") or "member")
+    org_id = invite.get("org_id") or await workspace_to_org_id(workspace_id)
 
     existing = await _membership_for(user.user_id, workspace_id)
     if existing:
-        # Already a member — don't downgrade. Just point them at the
-        # workspace and consider the invite redeemed.
         await users_col.update_one(
             {"user_id": user.user_id},
             {"$set": {"current_workspace_id": workspace_id}},
         )
         return {"success": True, "workspace_id": workspace_id, "role": existing.get("role"), "already_member": True}
 
-    await workspace_members_col.insert_one({
-        "workspace_id": workspace_id,
-        "user_id": user.user_id,
-        "role": role,
-        "joined_at": datetime.now(timezone.utc),
-        "joined_via_invite": invite.get("invite_id"),
-    })
-    await workspace_invites_col.update_one(
-        {"token": token},
-        {
-            "$inc": {"used_count": 1},
-            "$push": {"accepted_by": {"user_id": user.user_id, "at": datetime.now(timezone.utc)}},
-        },
-    )
+    joined_at = datetime.now(timezone.utc)
+    if org_id and supabase_admin.is_dual_write_enabled():
+        sb_member = await supabase_admin.insert_org_member(
+            org_id=org_id,
+            user_id=user.user_id,
+            role=role,
+            access_token=user.access_token,
+            joined_at=joined_at.isoformat(),
+        )
+        if supabase_admin.is_supabase_primary() and not sb_member:
+            raise HTTPException(status_code=502, detail="Failed to add member in Supabase")
+        sb_invite_id = invite.get("supabase_invite_id") or invite.get("invite_id")
+        if sb_invite_id:
+            try:
+                await supabase_admin.update_invitation(
+                    sb_invite_id,
+                    {"accepted": True},
+                    user.access_token or "",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    if supabase_admin.is_mongo_mirror_enabled() or supabase_admin.is_mongo_identity_primary():
+        await workspace_members_col.update_one(
+            {"workspace_id": workspace_id, "user_id": user.user_id},
+            {"$set": {
+                "workspace_id": workspace_id,
+                "user_id": user.user_id,
+                "role": role,
+                "joined_at": joined_at,
+                "joined_via_invite": invite.get("invite_id"),
+            }},
+            upsert=True,
+        )
+        await workspace_invites_col.update_one(
+            {"token": token},
+            {
+                "$inc": {"used_count": 1},
+                "$push": {"accepted_by": {"user_id": user.user_id, "at": joined_at}},
+                "$set": {"revoked": False},
+            },
+        )
+
     await users_col.update_one(
         {"user_id": user.user_id},
         {"$set": {"current_workspace_id": workspace_id}},
+        upsert=False,
     )
     await log_audit(
         "invites.accepted",
         f"{user.email} joined workspace via invite as {role}",
         user_id=user.user_id, workspace_id=workspace_id,
         target_member_id=user.user_id,
-        metadata={"invite_id": invite.get("invite_id"), "role": role},
+        metadata={"invite_id": invite.get("invite_id"), "role": role, "source": invite.get("source")},
     )
+    return {"success": True, "workspace_id": workspace_id, "role": role, "already_member": False, "source": invite.get("source")}
 
 
 # ─── Onboarding + Audit (Phase 7b-ext) ────────────────────────────────
@@ -5118,11 +5262,15 @@ async def google_integration_status(
     diag = goog.config_status()
     if not goog.is_oauth_configured():
         return {"configured": False, "connected": False, **diag}
-    doc = await google_integrations_col.find_one(
-        {"workspace_id": workspace_id},
-        {"_id": 0, "account_email": 1, "scopes": 1, "connected_at": 1,
-         "last_sync_at": 1, "expires_at": 1, "auto_sync_paused": 1, "last_sync_error": 1,
-         "connected": 1, "status": 1, "reauthorization_required": 1, "missing_scopes": 1},
+    doc = await secrets_store.get_connection(
+        provider="google",
+        workspace_id=workspace_id,
+        mongo_col=google_integrations_col,
+        projection={
+            "_id": 0, "account_email": 1, "scopes": 1, "connected_at": 1,
+            "last_sync_at": 1, "expires_at": 1, "auto_sync_paused": 1, "last_sync_error": 1,
+            "connected": 1, "status": 1, "reauthorization_required": 1, "missing_scopes": 1,
+        },
     )
     if not doc:
         return {"configured": True, "connected": False, **diag}
@@ -5194,18 +5342,16 @@ async def google_oauth_start(
     redirect_uri = goog.resolve_redirect_uri(base_url)
     state = uuid.uuid4().hex
 
-    await google_oauth_state_col.insert_one(
-        {
-            "state": state,
-            "user_id": user.user_id,
-            "workspace_id": workspace_id,
-            "return_to": _sanitize_return_to(return_to),
-            "redirect_uri": redirect_uri,
-            "created_at": datetime.now(timezone.utc),
-            # State documents auto-expire after 10 min via TTL index
-            # configured at startup (see google_oauth_state_col below).
-            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
-        }
+    await secrets_store.put_oauth_state(
+        provider="google",
+        mongo_col=google_oauth_state_col,
+        state=state,
+        user_id=user.user_id,
+        workspace_id=workspace_id,
+        return_to=_sanitize_return_to(return_to),
+        redirect_uri=redirect_uri,
+        created_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
     )
 
     auth_url = goog.build_authorization_url(state=state, redirect_uri=redirect_uri)
@@ -5301,7 +5447,9 @@ async def google_oauth_callback(
     if not code or not state:
         return _bounce("google_connected=error&reason=missing_code_or_state")
 
-    state_doc = await google_oauth_state_col.find_one_and_delete({"state": state})
+    state_doc = await secrets_store.consume_oauth_state(
+        provider="google", mongo_col=google_oauth_state_col, state=state,
+    )
     if not state_doc:
         return _bounce("google_connected=error&reason=invalid_state")
 
@@ -5342,34 +5490,36 @@ async def google_oauth_callback(
     # Google does not always return a fresh refresh_token on every grant
     # (e.g. some reconnect edge cases even with prompt=consent). Never let
     # a missing new token overwrite a previously valid encrypted one.
-    existing_doc = await google_integrations_col.find_one(
-        {"workspace_id": workspace_id}, {"_id": 0, "refresh_token": 1}
+    existing_doc = await secrets_store.get_connection(
+        provider="google",
+        workspace_id=workspace_id,
+        mongo_col=google_integrations_col,
+        projection={"_id": 0, "refresh_token": 1},
     )
     new_refresh_token = goog.encrypt_token(creds.refresh_token)
     refresh_token_to_store = new_refresh_token or (existing_doc or {}).get("refresh_token")
 
-    await google_integrations_col.update_one(
-        {"workspace_id": workspace_id},
-        {
-            "$set": {
-                "workspace_id": workspace_id,
-                "user_id": user_id,
-                "access_token": goog.encrypt_token(creds.token),
-                "refresh_token": refresh_token_to_store,
-                "expires_at": expires_at,
-                "scopes": granted_scopes or goog.GOOGLE_SCOPES,
-                "connected": is_connected,
-                "status": integration_status,
-                "reauthorization_required": reauthorization_required,
-                "missing_scopes": missing_scopes,
-                "account_email": (profile or {}).get("email"),
-                "account_name": (profile or {}).get("name"),
-                "google_user_id": (profile or {}).get("google_user_id"),
-                "connected_at": datetime.now(timezone.utc),
-                "updated_at": datetime.now(timezone.utc),
-            }
+    await secrets_store.upsert_connection(
+        provider="google",
+        workspace_id=workspace_id,
+        mongo_col=google_integrations_col,
+        fields={
+            "workspace_id": workspace_id,
+            "user_id": user_id,
+            "access_token": goog.encrypt_token(creds.token),
+            "refresh_token": refresh_token_to_store,
+            "expires_at": expires_at,
+            "scopes": granted_scopes or goog.GOOGLE_SCOPES,
+            "connected": is_connected,
+            "status": integration_status,
+            "reauthorization_required": reauthorization_required,
+            "missing_scopes": missing_scopes,
+            "account_email": (profile or {}).get("email"),
+            "account_name": (profile or {}).get("name"),
+            "google_user_id": (profile or {}).get("google_user_id"),
+            "connected_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
         },
-        upsert=True,
     )
 
     try:
@@ -5399,7 +5549,9 @@ async def _load_google_credentials(workspace_id: str):
     """Decrypt + auto-refresh credentials for a workspace, persisting
     rotated tokens. Returns ``(creds, integration_doc)`` or
     ``(None, None)`` if the workspace isn't connected."""
-    doc = await google_integrations_col.find_one({"workspace_id": workspace_id})
+    doc = await secrets_store.get_connection(
+        provider="google", workspace_id=workspace_id, mongo_col=google_integrations_col,
+    )
     if not doc:
         return None, None
     access_token = goog.decrypt_token(doc.get("access_token"))
@@ -5418,15 +5570,15 @@ async def _load_google_credentials(workspace_id: str):
         new_expiry = creds.expiry
         if isinstance(new_expiry, datetime) and new_expiry.tzinfo is None:
             new_expiry = new_expiry.replace(tzinfo=timezone.utc)
-        await google_integrations_col.update_one(
-            {"workspace_id": workspace_id},
-            {
-                "$set": {
-                    "access_token": goog.encrypt_token(creds.token),
-                    "refresh_token": goog.encrypt_token(creds.refresh_token) or doc.get("refresh_token"),
-                    "expires_at": new_expiry,
-                    "updated_at": datetime.now(timezone.utc),
-                }
+        await secrets_store.patch_connection(
+            provider="google",
+            workspace_id=workspace_id,
+            mongo_col=google_integrations_col,
+            fields={
+                "access_token": goog.encrypt_token(creds.token),
+                "refresh_token": goog.encrypt_token(creds.refresh_token) or doc.get("refresh_token"),
+                "expires_at": new_expiry,
+                "updated_at": datetime.now(timezone.utc),
             },
         )
     return creds, doc
@@ -5549,9 +5701,11 @@ async def google_oauth_sync(
         upsert=True,
     )
 
-    await google_integrations_col.update_one(
-        {"workspace_id": workspace_id},
-        {"$set": {"last_sync_at": now}},
+    await secrets_store.patch_connection(
+        provider="google",
+        workspace_id=workspace_id,
+        mongo_col=google_integrations_col,
+        fields={"last_sync_at": now},
     )
     try:
         await log_audit(
@@ -5578,7 +5732,9 @@ async def _disconnect_google_workspace(workspace_id: str, user_id: Optional[str]
     route and the Quantro Connect GoogleAdapter call the exact same
     implementation — see integrations/providers/google.py.
     """
-    doc = await google_integrations_col.find_one({"workspace_id": workspace_id})
+    doc = await secrets_store.get_connection(
+        provider="google", workspace_id=workspace_id, mongo_col=google_integrations_col,
+    )
     if not doc:
         return {"success": True, "already": "disconnected"}
 
@@ -5589,7 +5745,9 @@ async def _disconnect_google_workspace(workspace_id: str, user_id: Optional[str]
     elif access:
         goog.revoke_token(access)
 
-    await google_integrations_col.delete_one({"workspace_id": workspace_id})
+    await secrets_store.delete_connection(
+        provider="google", workspace_id=workspace_id, mongo_col=google_integrations_col,
+    )
 
     # Wipe any rows we synced from Google so the user doesn't see stale
     # data after disconnecting.
@@ -5643,10 +5801,14 @@ async def microsoft_integration_status(
 ):
     if not msoa.is_oauth_configured():
         return {"configured": False, "connected": False}
-    doc = await microsoft_integrations_col.find_one(
-        {"workspace_id": workspace_id},
-        {"_id": 0, "account_email": 1, "scopes": 1, "connected_at": 1,
-         "last_sync_at": 1, "auto_sync_paused": 1, "last_sync_error": 1},
+    doc = await secrets_store.get_connection(
+        provider="microsoft",
+        workspace_id=workspace_id,
+        mongo_col=microsoft_integrations_col,
+        projection={
+            "_id": 0, "account_email": 1, "scopes": 1, "connected_at": 1,
+            "last_sync_at": 1, "auto_sync_paused": 1, "last_sync_error": 1,
+        },
     )
     if not doc:
         return {"configured": True, "connected": False}
@@ -5677,13 +5839,16 @@ async def microsoft_oauth_start(
     base_url = str(request.base_url).rstrip("/")
     redirect_uri = msoa.resolve_redirect_uri(base_url)
     state = uuid.uuid4().hex
-    await microsoft_oauth_state_col.insert_one(
-        {
-            "state": state, "user_id": user.user_id, "workspace_id": workspace_id,
-            "return_to": return_to or "/welcome/inbox", "redirect_uri": redirect_uri,
-            "created_at": datetime.now(timezone.utc),
-            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
-        }
+    await secrets_store.put_oauth_state(
+        provider="microsoft",
+        mongo_col=microsoft_oauth_state_col,
+        state=state,
+        user_id=user.user_id,
+        workspace_id=workspace_id,
+        return_to=return_to or "/welcome/inbox",
+        redirect_uri=redirect_uri,
+        created_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
     )
     auth_url = msoa.build_authorization_url(state=state, redirect_uri=redirect_uri)
     return {"auth_url": auth_url, "state": state}
@@ -5714,7 +5879,9 @@ async def microsoft_oauth_callback(
     if not code or not state:
         return _bounce("microsoft_connected=error&reason=missing_code_or_state")
 
-    state_doc = await microsoft_oauth_state_col.find_one_and_delete({"state": state})
+    state_doc = await secrets_store.consume_oauth_state(
+        provider="microsoft", mongo_col=microsoft_oauth_state_col, state=state,
+    )
     if not state_doc:
         return _bounce("microsoft_connected=error&reason=invalid_state")
     expires = state_doc.get("expires_at")
@@ -5735,23 +5902,25 @@ async def microsoft_oauth_callback(
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
     granted_scopes = (token_payload.get("scope") or "").split()
 
-    await microsoft_integrations_col.update_one(
-        {"workspace_id": workspace_id},
-        {
-            "$set": {
-                "workspace_id": workspace_id, "user_id": user_id,
-                "access_token": msoa.encrypt_token(token_payload.get("access_token")),
-                "refresh_token": msoa.encrypt_token(token_payload.get("refresh_token")),
-                "expires_at": expires_at,
-                "scopes": granted_scopes or msoa.MS_SCOPES,
-                "account_email": (profile or {}).get("email"),
-                "account_name": (profile or {}).get("name"),
-                "ms_user_id": (profile or {}).get("ms_user_id"),
-                "connected_at": datetime.now(timezone.utc),
-                "updated_at": datetime.now(timezone.utc),
-            }
+    await secrets_store.upsert_connection(
+        provider="microsoft",
+        workspace_id=workspace_id,
+        mongo_col=microsoft_integrations_col,
+        fields={
+            "workspace_id": workspace_id,
+            "user_id": user_id,
+            "access_token": msoa.encrypt_token(token_payload.get("access_token")),
+            "refresh_token": msoa.encrypt_token(token_payload.get("refresh_token")),
+            "expires_at": expires_at,
+            "scopes": granted_scopes or msoa.MS_SCOPES,
+            "connected": True,
+            "status": "ok",
+            "account_email": (profile or {}).get("email"),
+            "account_name": (profile or {}).get("name"),
+            "ms_user_id": (profile or {}).get("ms_user_id"),
+            "connected_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
         },
-        upsert=True,
     )
 
     try:
@@ -5772,7 +5941,9 @@ async def _load_microsoft_credentials(workspace_id: str) -> Tuple[Optional[str],
     """Decrypt + auto-refresh the Microsoft access token. Returns
     ``(access_token_plain, doc)`` or ``(None, None)`` if not connected
     or unrecoverable."""
-    doc = await microsoft_integrations_col.find_one({"workspace_id": workspace_id})
+    doc = await secrets_store.get_connection(
+        provider="microsoft", workspace_id=workspace_id, mongo_col=microsoft_integrations_col,
+    )
     if not doc:
         return None, None
     access_plain = msoa.decrypt_token(doc.get("access_token"))
@@ -5791,14 +5962,16 @@ async def _load_microsoft_credentials(workspace_id: str) -> Tuple[Optional[str],
             access_plain = fresh.get("access_token") or access_plain
             new_refresh = fresh.get("refresh_token") or refresh_plain
             new_expiry = datetime.now(timezone.utc) + timedelta(seconds=int(fresh.get("expires_in") or 3600))
-            await microsoft_integrations_col.update_one(
-                {"workspace_id": workspace_id},
-                {"$set": {
+            await secrets_store.patch_connection(
+                provider="microsoft",
+                workspace_id=workspace_id,
+                mongo_col=microsoft_integrations_col,
+                fields={
                     "access_token": msoa.encrypt_token(access_plain),
                     "refresh_token": msoa.encrypt_token(new_refresh),
                     "expires_at": new_expiry,
                     "updated_at": datetime.now(timezone.utc),
-                }},
+                },
             )
         except Exception:  # noqa: BLE001
             return None, doc
@@ -5851,15 +6024,19 @@ async def _perform_microsoft_sync_for_workspace(workspace_id: str) -> Dict[str, 
                 upsert=True,
             )
             counts["events"] += 1
-        await microsoft_integrations_col.update_one(
-            {"workspace_id": workspace_id},
-            {"$set": {"last_sync_at": now, "last_sync_error": None}},
+        await secrets_store.patch_connection(
+            provider="microsoft",
+            workspace_id=workspace_id,
+            mongo_col=microsoft_integrations_col,
+            fields={"last_sync_at": now, "last_sync_error": None},
         )
         return {"workspace_id": workspace_id, "ok": True, "counts": counts}
     except Exception as exc:  # noqa: BLE001
-        await microsoft_integrations_col.update_one(
-            {"workspace_id": workspace_id},
-            {"$set": {"last_sync_error": str(exc)[:200], "last_sync_attempt_at": now}},
+        await secrets_store.patch_connection(
+            provider="microsoft",
+            workspace_id=workspace_id,
+            mongo_col=microsoft_integrations_col,
+            fields={"last_sync_error": str(exc)[:200], "last_sync_attempt_at": now},
         )
         return {"workspace_id": workspace_id, "error": str(exc)[:200]}
 
@@ -5904,7 +6081,9 @@ async def microsoft_oauth_sync(
 async def _disconnect_microsoft_workspace(workspace_id: str, user_id: Optional[str] = None) -> Dict[str, Any]:
     """Same extraction rationale as _disconnect_google_workspace() —
     shared by the legacy route and integrations/providers/microsoft.py."""
-    doc = await microsoft_integrations_col.find_one({"workspace_id": workspace_id})
+    doc = await secrets_store.get_connection(
+        provider="microsoft", workspace_id=workspace_id, mongo_col=microsoft_integrations_col,
+    )
     if not doc:
         return {"success": True, "already": "disconnected"}
 
@@ -5915,13 +6094,17 @@ async def _disconnect_microsoft_workspace(workspace_id: str, user_id: Optional[s
     elif access:
         msoa.revoke_token(access)
 
-    await microsoft_integrations_col.delete_one({"workspace_id": workspace_id})
+    await secrets_store.delete_connection(
+        provider="microsoft", workspace_id=workspace_id, mongo_col=microsoft_integrations_col,
+    )
     await inbox_col.delete_many({"workspace_id": workspace_id, "is_real": True, "source": "outlook"})
     await calendar_col.delete_many({"workspace_id": workspace_id, "is_real": True, "source": "outlook_calendar"})
 
     # Only restore demo mode if there's no other real integration
     # (e.g. Google) keeping this workspace in real-data territory.
-    other_real = await google_integrations_col.find_one({"workspace_id": workspace_id})
+    other_real = await secrets_store.get_connection(
+        provider="google", workspace_id=workspace_id, mongo_col=google_integrations_col,
+    )
     if not other_real:
         await inbox_col.update_many(
             {"workspace_id": workspace_id, "is_simulation": True},
@@ -5985,14 +6168,20 @@ async def toggle_auto_sync(
     AND triggers an immediate sync so the user gets fresh data without
     having to wait up to 15 min for the next cycle.
     """
+    if provider not in ("google", "microsoft"):
+        raise HTTPException(status_code=400, detail=f"Unknown provider '{provider}'")
     col = _provider_collection(provider)
-    doc = await col.find_one({"workspace_id": workspace_id})
+    doc = await secrets_store.get_connection(
+        provider=provider, workspace_id=workspace_id, mongo_col=col,
+    )
     if not doc:
         raise HTTPException(status_code=404, detail=f"{provider} not connected")
 
-    await col.update_one(
-        {"workspace_id": workspace_id},
-        {"$set": {"auto_sync_paused": req.paused, "updated_at": datetime.now(timezone.utc)}},
+    await secrets_store.patch_connection(
+        provider=provider,
+        workspace_id=workspace_id,
+        mongo_col=col,
+        fields={"auto_sync_paused": req.paused, "updated_at": datetime.now(timezone.utc)},
     )
     try:
         await log_audit(
