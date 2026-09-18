@@ -13,6 +13,7 @@ Migración one-shot de los datos legacy de Mongo a las tablas reales de Supabase
 | `workspace_members`     | → | `org_members`      |
 | `workspace_invites`     | → | `invitations`      |
 | `audit_log`             | → | `org_audit_logs`   |
+| `google_integrations` / `microsoft_integrations` | → | `provider_connections` (Phase 2) |
 
 ### Pre-requisitos
 
@@ -36,6 +37,7 @@ python backfill_mongo_to_supabase.py
 python backfill_mongo_to_supabase.py --table members
 python backfill_mongo_to_supabase.py --table invites
 python backfill_mongo_to_supabase.py --table audit
+python backfill_mongo_to_supabase.py --table provider_connections
 
 # 3) Spot-check con 50 filas.
 python backfill_mongo_to_supabase.py --limit 50
@@ -122,3 +124,7 @@ BACKFILL SUMMARY
 3. `supervisorctl restart backend`.
 4. Si algo se rompe, vuelves a `mongo` y los dual-writes mantienen sincro.
 5. Cuando todo esté validado por unas semanas, podemos apagar las escrituras a Mongo (Phase 7d).
+
+## Phase 2 secrets
+
+See `docs/phase2-oauth-secrets.md`. Requires migration `20260918000000_provider_oauth_secrets.sql`.
