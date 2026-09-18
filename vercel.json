@@ -9,5 +9,14 @@
       "source": "/(.*)",
       "destination": "/index.html"
     }
-  ]
+  ],
+  "env": {
+    "DISABLE_ESLINT_PLUGIN": "true"
+  },
+  "build": {
+    "env": {
+      "DISABLE_ESLINT_PLUGIN": "true",
+      "CI": "false"
+    }
+  }
 }
