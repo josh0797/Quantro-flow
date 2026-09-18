@@ -49,6 +49,7 @@ from actions.store import (
     wrap_automation_policies_col,
     wrap_action_policies_col,
 )
+from inbox_store import wrap_inbox_col
 
 # ─── Config ────────────────────────────────────────────────────────────
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
@@ -94,7 +95,9 @@ client = AsyncIOMotorClient(
 db = client[DB_NAME]
 
 # Collections
-inbox_col = db["inbox_items"]
+# Phase 6.1: inbox_items dual-write / optional Supabase SoT
+# (QUANTRO_INBOX_PRIMARY, default mongo). See docs/phase6-inbox-items.md.
+inbox_col = wrap_inbox_col(db["inbox_items"])
 calendar_col = db["calendar_events"]
 contacts_col = db["contacts"]
 agents_col = db["agents"]

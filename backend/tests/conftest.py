@@ -26,6 +26,13 @@ def _match(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
         elif isinstance(v, dict) and "$gte" in v:
             if doc.get(k) is None or doc.get(k) < v["$gte"]:
                 return False
+        elif isinstance(v, dict) and "$ne" in v:
+            if doc.get(k) == v["$ne"]:
+                return False
+        elif isinstance(v, dict) and "$exists" in v:
+            exists = k in doc and doc.get(k) is not None
+            if bool(v["$exists"]) != exists:
+                return False
         elif doc.get(k) != v:
             return False
     return True
@@ -72,10 +79,26 @@ class FakeAsyncCollection:
                 return _Result(1, 1)
         if upsert:
             new_doc = dict(query)
+            new_doc.update(update.get("$setOnInsert", {}))
             new_doc.update(update.get("$set", {}))
             self._docs.append(new_doc)
             return _Result(0, 0)
         return _Result(0, 0)
+
+    async def update_many(self, query: Dict[str, Any], update: Dict[str, Any]):
+        class _Result:
+            def __init__(self, matched: int, modified: int):
+                self.matched_count = matched
+                self.modified_count = modified
+
+        matched = 0
+        for doc in self._docs:
+            if _match(doc, query):
+                doc.update(update.get("$set", {}))
+                for key in update.get("$unset", {}):
+                    doc.pop(key, None)
+                matched += 1
+        return _Result(matched, matched)
 
 
     async def find_one_and_update(self, query: Dict[str, Any], update: Dict[str, Any], projection: Optional[Dict[str, int]] = None, return_document=None):
@@ -107,9 +130,23 @@ class FakeAsyncCollection:
 class _FakeCursor:
     def __init__(self, docs: List[Dict[str, Any]]):
         self._docs = docs
+        self._sort_key = None
+        self._sort_dir = 1
+
+    def sort(self, key: str, direction: int = 1):
+        self._sort_key = key
+        self._sort_dir = direction
+        return self
 
     async def to_list(self, n: int):
-        return copy.deepcopy(self._docs[:n])
+        rows = list(self._docs)
+        if self._sort_key:
+            rev = self._sort_dir < 0
+            rows.sort(
+                key=lambda r: (r.get(self._sort_key) is None, r.get(self._sort_key)),
+                reverse=rev,
+            )
+        return copy.deepcopy(rows[:n])
 
 
 def _project(doc: Dict[str, Any], projection: Optional[Dict[str, int]]):

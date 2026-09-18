@@ -29,7 +29,8 @@ Safety guarantees
 * **Granular --table flag.** You can run only the table you want
   (``members``, ``invites``, ``audit``, ``provider_connections``,
   ``facturapi_connections``, ``webhook_events``, ``integrations_config``,
-  ``action_executions``, ``automation_policies``, ``action_policies``, ``all``).
+  ``action_executions``, ``automation_policies``, ``action_policies``,
+  ``inbox_items``, ``all``).
 
 Examples
 --------
@@ -1113,6 +1114,98 @@ async def migrate_integrations_config(
 
 
 # ── Main ─────────────────────────────────────────────────────────────
+
+# ── Phase 6.1: inbox_items ────────────────────────────────────────────
+async def migrate_inbox_items(
+    db, sb: SupabaseClient, reporter: Reporter, *,
+    execute: bool, limit: Optional[int],
+) -> None:
+    """Copy inbox_items into Supabase. Upsert on (workspace_id, inbox_id)."""
+    print("\n--- inbox_items → inbox_items ---")
+    seen = 0
+    dry_seen: set = set()
+    cursor = db["inbox_items"].find({})
+    async for row in cursor:
+        if limit and seen >= limit:
+            break
+        seen += 1
+        wid = row.get("workspace_id")
+        iid = row.get("inbox_id") or row.get("id")
+        if not wid or not iid:
+            reporter.bump("inbox_items", "skip:missing_key")
+            continue
+        key = f"{wid}:{iid}"
+
+        status, body = await sb.get(
+            "/rest/v1/inbox_items",
+            {
+                "workspace_id": f"eq.{wid}",
+                "inbox_id": f"eq.{iid}",
+                "select": "inbox_id",
+                "limit": "1",
+            },
+        )
+        if status == 200 and isinstance(body, list) and body:
+            print(f"  [skip:duplicate] workspace_id={wid} inbox_id={iid}")
+            reporter.bump("inbox_items", "skip:duplicate")
+            continue
+        if key in dry_seen:
+            reporter.bump("inbox_items", "skip:duplicate_in_run")
+            continue
+
+        payload = {
+            "inbox_id": iid,
+            "workspace_id": wid,
+            "from_name": row.get("from_name"),
+            "from_email": row.get("from_email"),
+            "from_address": row.get("from_address"),
+            "subject": row.get("subject"),
+            # body intentionally included for SoT; dry-run logs omit it
+            "body": row.get("body"),
+            "preview": row.get("preview"),
+            "received_at": _iso_ts(row.get("received_at")),
+            "read": bool(row.get("read", False)),
+            "status": row.get("status"),
+            "ai_intent": row.get("ai_intent"),
+            "ai_suggested_action": row.get("ai_suggested_action"),
+            "contact_id": row.get("contact_id"),
+            "source": row.get("source"),
+            "gmail_id": row.get("gmail_id"),
+            "ms_id": row.get("ms_id"),
+            "thread_id": row.get("thread_id"),
+            "label_ids": row.get("label_ids"),
+            "categories": row.get("categories"),
+            "is_real": row.get("is_real"),
+            "is_simulation": row.get("is_simulation"),
+            "hidden_by_real": row.get("hidden_by_real"),
+            "priority": row.get("priority"),
+            "synced_at": _iso_ts(row.get("synced_at")),
+            "created_at": _iso_ts(row.get("created_at")),
+        }
+
+        if not execute:
+            subj = (row.get("subject") or "")[:60]
+            print(f"  [dry] would upsert ws={wid} inbox_id={iid} subject={subj!r}")
+            reporter.bump("inbox_items", "dry:would_insert")
+            dry_seen.add(key)
+            continue
+
+        status, body = await sb.post(
+            "/rest/v1/inbox_items?on_conflict=workspace_id,inbox_id",
+            payload,
+            prefer="resolution=merge-duplicates,return=minimal",
+        )
+        if status < 400:
+            print(f"  [ok] upserted ws={wid} inbox_id={iid}")
+            reporter.bump("inbox_items", "upserted")
+            dry_seen.add(key)
+        else:
+            # Never dump body content in error summaries
+            print(f"  [error:{status}] ws={wid} inbox_id={iid} body={str(body)[:120]}")
+            reporter.bump("inbox_items", f"error:{status}")
+            reporter.error("inbox_items", key, f"http {status}: {str(body)[:80]}")
+
+
 async def main(args: argparse.Namespace) -> None:
     sb = SupabaseClient()
     print(f"[supabase] {SUPABASE_URL}  auth={'service-role' if sb.use_service else 'anon'}")
@@ -1183,6 +1276,10 @@ async def main(args: argparse.Namespace) -> None:
         await migrate_integrations_config(
             db, sb, reporter, execute=args.execute, limit=args.limit,
         )
+    if table in ("inbox_items", "all"):
+        await migrate_inbox_items(
+            db, sb, reporter, execute=args.execute, limit=args.limit,
+        )
 
     reporter.print_summary()
 
@@ -1215,7 +1312,8 @@ def parse_args() -> argparse.Namespace:
         choices=[
             "members", "invites", "audit", "provider_connections",
             "facturapi_connections", "webhook_events", "integrations_config",
-            "action_executions", "automation_policies", "action_policies", "all",
+            "action_executions", "automation_policies", "action_policies",
+            "inbox_items", "all",
         ],
         default="all",
         help="Restrict which collection to process (default: all).",
