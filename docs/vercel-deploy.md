@@ -17,3 +17,16 @@ in the Vercel project Environment Variables (Production + Preview), then redeplo
 ```bash
 cd frontend && npm install --legacy-peer-deps
 ```
+
+## Fly.io backend
+
+App name: `quantro-flow-api` (see `fly.toml`).
+
+```bash
+fly auth login
+fly apps create quantro-flow-api --org personal
+fly secrets set MONGO_URL=... SUPABASE_URL=... SUPABASE_ANON_KEY=... SUPABASE_SERVICE_ROLE_KEY=... FRONTEND_PUBLIC_URL=https://quantro-flow.vercel.app BACKEND_PUBLIC_URL=https://quantro-flow-api.fly.dev
+fly deploy
+```
+
+Then set `REACT_APP_BACKEND_URL=https://quantro-flow-api.fly.dev` on the Vercel project and redeploy.
