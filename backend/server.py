@@ -84,7 +84,12 @@ def _get_jwks_client() -> Optional[PyJWKClient]:
     return _jwks_client
 
 # ─── MongoDB ───────────────────────────────────────────────────────────
-client = AsyncIOMotorClient(MONGO_URL)
+client = AsyncIOMotorClient(
+    MONGO_URL,
+    # Fail fast on Fly/Atlas network issues so lifespan can soft-fail
+    # instead of blocking health checks for 30s+ per call.
+    serverSelectionTimeoutMS=int(os.environ.get("MONGO_SERVER_SELECTION_TIMEOUT_MS") or 8000),
+)
 db = client[DB_NAME]
 
 # Collections
@@ -1559,13 +1564,22 @@ async def reconcile_supabase_memberships_to_mongo(user_doc: dict) -> Optional[st
 # ─── Lifespan ──────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await seed_database()
-    await ensure_integrations_seeded()
-    await backfill_simulation_flag()
-    await backfill_workspace_scoping()
-    await migrate_legacy_role_names()
-    await ensure_action_indexes(action_executions_col)
-    await backfill_workspace_automations()
+    # Soft-fail startup jobs so /api/health can bind even when Mongo/Atlas
+    # is unreachable (common on first Fly deploys before Network Access).
+    for _label, _coro in (
+        ("seed_database", seed_database),
+        ("ensure_integrations_seeded", ensure_integrations_seeded),
+        ("backfill_simulation_flag", backfill_simulation_flag),
+        ("backfill_workspace_scoping", backfill_workspace_scoping),
+        ("migrate_legacy_role_names", migrate_legacy_role_names),
+        ("ensure_action_indexes", lambda: ensure_action_indexes(action_executions_col)),
+        ("backfill_workspace_automations", backfill_workspace_automations),
+    ):
+        try:
+            await _coro()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[startup] {_label} failed (continuing): {exc}")
+
     # Phase 7e — Background sync scheduler. We launch a single asyncio
     # task that wakes up every PERIODIC_SYNC_INTERVAL_SECS and calls the
     # provider-specific sync helpers for every workspace whose
