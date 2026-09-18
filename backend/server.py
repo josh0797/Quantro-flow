@@ -15,7 +15,7 @@ import httpx
 import jwt as pyjwt
 from jwt import PyJWKClient, InvalidTokenError, ExpiredSignatureError
 from fastapi import FastAPI, HTTPException, Query, Request, Response, Depends
-from fastapi.responses import StreamingResponse, RedirectResponse, PlainTextResponse
+from fastapi.responses import StreamingResponse, RedirectResponse, PlainTextResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
@@ -23,6 +23,26 @@ from typing import Optional, List, Dict, Any, Tuple
 from ai_billing import run_ai_request
 import supabase_admin
 import provider_secrets_store as secrets_store
+
+# ─── Quantro Connect + Quantro Actions ─────────────────────────────────
+# New platform-layer modules (see integrations/ and actions/ packages).
+# server.py stays the single FastAPI app; these packages hold all the
+# provider/action-specific logic so server.py doesn't grow further.
+from errors import QuantroError
+from integrations.base import ConnectionStatus
+from integrations import secrets as integration_secrets
+from integrations.registry import register_provider, get_provider as get_connect_provider, list_providers as list_connect_providers
+from integrations.service import ConnectService
+from integrations.providers.google import GoogleAdapter
+from integrations.providers.microsoft import MicrosoftAdapter
+from integrations.providers.facturapi import FacturapiAdapter
+from integrations.providers.quantro_internal import QuantroInternalAdapter
+from actions.executor import ActionExecutor
+from actions.policy_gate import PolicyGate
+from actions.policy_engine import PolicyEngine
+from actions.indexes import ensure_action_indexes
+from actions.registry import get_action, list_actions
+from actions.bootstrap import register_all_actions
 
 # ─── Config ────────────────────────────────────────────────────────────
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
@@ -97,6 +117,12 @@ google_oauth_state_col = db["google_oauth_state"]
 # Phase 7e.2 / Phase 2 — Microsoft Outlook OAuth (Mail + Calendar)
 microsoft_integrations_col = db["microsoft_integrations"]
 microsoft_oauth_state_col = db["microsoft_oauth_state"]
+# Quantro Connect — Facturapi (CFDI México)
+facturapi_connections_col = db["facturapi_connections"]
+facturapi_webhook_events_col = db["facturapi_webhook_events"]
+# Quantro Actions
+action_executions_col = db["action_executions"]
+action_policies_col = db["action_policies"]  # workspace-level auto-approve overrides for high/critical-risk actions
 
 # The workspace_id used by pre-auth seed + backfill. The first user to
 # log in claims this workspace (rename + become Owner). Subsequent users
@@ -601,100 +627,97 @@ async def log_activity(event_type, title, description, related_id=None, related_
 URGENCY_KEYWORDS = ["urgent", "asap", "immediately", "emergency", "critical", "right away", "time-sensitive", "rush"]
 
 async def execute_action_for_item(item, source="auto"):
-    """Execute the suggested action for an inbox item. Returns execution results."""
+    """Execute the suggested action for an inbox item.
+
+    Thin compatibility shim over ActionExecutor.execute() — Quantro
+    Actions migration. The actual DB-write logic for each action_type
+    now lives in actions/handlers/quantro_internal.py (moved, not
+    copied); this function's only job is: map the legacy action_type
+    name to its Action id, build the `input` shape a handler expects
+    from an inbox item, and translate the resulting execution record
+    back into the {"executed", "action_type", "results"} shape every
+    existing caller (analyze/batch-analyze/approve endpoints) expects,
+    so nothing downstream of this function had to change.
+
+    skip_policy_gate=True: callers only ever reach this function AFTER
+    their own intent-based policy evaluation (see
+    evaluate_policy_for_item / the confidence-threshold checks in
+    analyze/batch-analyze above) already decided to auto-run — this
+    function must never re-decide that via the Actions Policy Gate.
+    """
     action = item.get("ai_suggested_action")
     if not action:
         return {"executed": False, "reason": "No action available"}
-    
+
     action_type = action["type"]
     entities = item.get("ai_intent", {}).get("entities", {})
-    results = []
     # Downstream artifacts inherit the mode of the triggering inbox item
     # so everything remains in the correct sandbox/workspace.
     sim_flag = bool(item.get("is_simulation", False))
     ws_id = item.get("workspace_id", DEFAULT_WORKSPACE_ID)
-    
+
+    async def run(action_id: str, input_payload: dict):
+        return await action_executor.execute(
+            workspace_id=ws_id, action_id=action_id, input=input_payload,
+            source=source, skip_policy_gate=True,
+        )
+
     if action_type == "schedule_meeting":
-        event = {
-            "event_id": str(uuid.uuid4()),
+        execution = await run("quantro.calendar.event.create", {
             "title": f"Meeting - {item['from_name']}",
-            "description": action["description"],
+            "description": action.get("description", ""),
             "start_time": (datetime.utcnow() + timedelta(days=1, hours=2)).isoformat(),
             "end_time": (datetime.utcnow() + timedelta(days=1, hours=3)).isoformat(),
             "location": entities.get("property", "TBD"),
             "attendees": [item["from_name"]],
-            "status": "pending",
-            "source": f"ai_{source}",
-            "created_at": now_iso(),
             "contact_id": item.get("contact_id"),
             "is_simulation": sim_flag,
-            "workspace_id": ws_id,
-        }
-        await calendar_col.insert_one(event)
-        await log_activity("calendar", f"Meeting auto-scheduled ({source})", f"Meeting with {item['from_name']} created automatically", event["event_id"], "calendar")
-        results.append({"type": "event_created", "event_id": event["event_id"]})
-    
+        })
+        results = [{"type": "event_created", "event_id": (execution.get("result_metadata") or {}).get("event_id")}]
+
     elif action_type == "create_contact":
-        contact = {
-            "contact_id": str(uuid.uuid4()),
+        execution = await run("quantro.crm.contact.create", {
             "name": entities.get("person_name", item["from_name"]),
             "email": entities.get("email", item["from_email"]),
             "phone": entities.get("phone", ""),
-            "type": "lead",
-            "lifecycle_stage": "new",
-            "source": f"inbox_{source}",
-            "ghl_sync_status": "pending",
-            "ghl_last_sync": None,
-            "created_at": now_iso(),
-            "updated_at": now_iso(),
             "notes": item.get("ai_intent", {}).get("summary", ""),
             "is_simulation": sim_flag,
-            "workspace_id": ws_id,
-        }
-        await contacts_col.insert_one(contact)
-        await inbox_col.update_one({"inbox_id": item["inbox_id"]}, {"$set": {"contact_id": contact["contact_id"]}})
-        await log_activity("crm", f"Contact auto-created ({source})", f"New contact {contact['name']} created automatically", contact["contact_id"], "contact")
-        results.append({"type": "contact_created", "contact_id": contact["contact_id"]})
-    
+        })
+        contact_id = (execution.get("result_metadata") or {}).get("contact_id")
+        if contact_id:
+            await inbox_col.update_one({"inbox_id": item["inbox_id"]}, {"$set": {"contact_id": contact_id}})
+        results = [{"type": "contact_created", "contact_id": contact_id}]
+
     elif action_type == "start_onboarding":
-        agent = {
-            "agent_id": str(uuid.uuid4()),
+        execution = await run("quantro.onboarding.start", {
             "name": entities.get("person_name", item["from_name"]),
             "email": entities.get("email", item["from_email"]),
             "phone": entities.get("phone", ""),
-            "role": "agent",
-            "status": "onboarding",
-            "start_date": datetime.utcnow().isoformat(),
-            "photo_url": None,
-            "created_at": now_iso(),
             "is_simulation": sim_flag,
-            "workspace_id": ws_id,
-        }
-        await agents_col.insert_one(agent)
-        for idx, title in enumerate(["Complete compliance training", "Set up CRM profile", "Configure email signature", "Schedule orientation with team lead", "Access granted to listing portal"]):
-            await onboarding_col.insert_one({"workspace_id": ws_id, "task_id": str(uuid.uuid4()), "agent_id": agent["agent_id"], "title": title, "description": f"Auto-generated step {idx+1}", "status": "pending", "order": idx + 1, "completed_at": None, "auto_generated": True, "is_simulation": sim_flag})
-        await log_activity("onboarding", f"Onboarding auto-started ({source})", f"Agent {agent['name']} onboarding initiated automatically", agent["agent_id"], "agent")
-        results.append({"type": "agent_created", "agent_id": agent["agent_id"]})
-    
+        })
+        results = [{"type": "agent_created", "agent_id": (execution.get("result_metadata") or {}).get("agent_id")}]
+
     elif action_type == "send_follow_up":
-        await log_activity("inbox", f"Follow-up auto-queued ({source})", f"Follow-up for {item['from_name']} queued automatically", item["inbox_id"], "inbox")
-        results.append({"type": "follow_up_queued"})
-    
+        execution = await run("quantro.followup.send", {"recipient_name": item["from_name"], "related_id": item["inbox_id"]})
+        results = [{"type": "follow_up_queued"}]
+
     elif action_type == "ignore":
-        await log_activity("inbox", f"Auto-ignored ({source})", f"Message from {item['from_name']} auto-ignored (spam/irrelevant)", item["inbox_id"], "inbox")
-        results.append({"type": "ignored"})
-    
+        execution = await run("quantro.inbox.ignore", {"from_name": item["from_name"], "related_id": item["inbox_id"]})
+        results = [{"type": "ignored"}]
+
     else:
-        await log_activity("inbox", f"Action auto-executed ({source})", f"Action '{action_type}' for {item['from_name']} executed automatically", item["inbox_id"], "inbox")
-        results.append({"type": action_type})
-    
+        execution = await run("quantro.review.flag", {"reason": f"Action '{action_type}' for {item['from_name']}", "related_id": item["inbox_id"]})
+        results = [{"type": action_type}]
+
+    executed = execution["status"] in ("succeeded", "simulated")
+
     # Mark as auto-actioned
     await inbox_col.update_one(
         {"inbox_id": item["inbox_id"]},
-        {"$set": {"status": "auto_actioned", "auto_executed": True, "auto_executed_at": now_iso(), "execution_source": source, "execution_results": results}}
+        {"$set": {"status": "auto_actioned", "auto_executed": executed, "auto_executed_at": now_iso(), "execution_source": source, "execution_results": results}}
     )
-    
-    return {"executed": True, "action_type": action_type, "results": results}
+
+    return {"executed": executed, "action_type": action_type, "results": results}
 
 
 async def evaluate_advanced_escalation(item, intent, confidence, policy_action):
@@ -980,6 +1003,29 @@ class ApproveWithOverridesRequest(BaseModel):
     contact_name: Optional[str] = None
     contact_email: Optional[str] = None
     contact_phone: Optional[str] = None
+
+# Legacy → canonical policy-action aliases. AutomationPolicies.js (frontend)
+# sends 'auto_execute' as its "auto" mode value; the auto-execute checks
+# throughout this file compare against 'auto_run'. Before this alias map,
+# a policy saved with mode "Auto-execute" from the UI silently never
+# auto-executed — found during the Quantro Connect/Actions Phase 0 audit.
+# _normalize_policy_action() is the single place that reconciles the two,
+# applied on both read (evaluate_policy_for_item, analyze/batch-analyze)
+# and write (create_policy/update_policy) so stored data converges on
+# the canonical value without a data migration.
+POLICY_ACTION_ALIASES = {
+    "auto_execute": "auto_run",
+    "auto_run": "auto_run",
+    "require_approval": "require_approval",
+    "manual_review": "manual_review",
+    "suggest_only": "manual_review",
+    "escalate": "escalate",
+}
+
+
+def _normalize_policy_action(action: Optional[str]) -> str:
+    return POLICY_ACTION_ALIASES.get((action or "").lower().strip(), action or "manual_review")
+
 
 class AutomationPolicyRequest(BaseModel):
     intent: str
@@ -1510,6 +1556,7 @@ async def lifespan(app: FastAPI):
     await backfill_simulation_flag()
     await backfill_workspace_scoping()
     await migrate_legacy_role_names()
+    await ensure_action_indexes(action_executions_col)
     await backfill_workspace_automations()
     # Phase 7e — Background sync scheduler. We launch a single asyncio
     # task that wakes up every PERIODIC_SYNC_INTERVAL_SECS and calls the
@@ -3423,11 +3470,109 @@ async def system_health(workspace_id: str = Depends(get_current_workspace_id)):
                     else "All systems operational"
                 ),
             },
+            *(await _quantro_connect_health_checks(workspace_id)),
         ],
         "latest_check": serialize_doc(latest) if latest else None,
         "recent_repairs": [serialize_doc(r) for r in recent_repairs],
         "total_repair_events": total_repair_events,
     }
+
+
+async def _quantro_connect_health_checks(workspace_id: str) -> List[Dict[str, Any]]:
+    """Quantro Connect + Actions checks, additive to the pre-existing
+    System Health checks above. Deliberately does NOT feed into
+    `overall` (healthy/degraded/repaired) — an unconfigured *optional*
+    provider (e.g. Microsoft OAuth not set up in this deployment, or no
+    Facturapi connection yet) is informational, not a platform failure;
+    per the task spec, a provider with insufficient scope is "limited",
+    not a system failure either."""
+    checks: List[Dict[str, Any]] = []
+
+    providers = list_connect_providers()
+    checks.append({
+        "id": "provider_registry", "label": "Provider registry loaded",
+        "ok": len(providers) > 0,
+        "detail": f"{len(providers)} provider(s) registered: {', '.join(p.provider_id for p in providers)}",
+    })
+
+    all_actions = list_actions()
+    checks.append({
+        "id": "action_registry", "label": "Action registry loaded",
+        "ok": len(all_actions) > 0,
+        "detail": f"{len(all_actions)} action(s) registered across {len({a.provider for a in all_actions})} provider(s)",
+    })
+
+    checks.append({
+        "id": "secret_encryption", "label": "Secret encryption configured",
+        "ok": integration_secrets.is_encryption_configured(),
+        "detail": (
+            "Using a dedicated INTEGRATIONS_ENCRYPTION_KEY" if integration_secrets.using_dedicated_key()
+            else "Falling back to GOOGLE_TOKENS_ENCRYPTION_KEY — set INTEGRATIONS_ENCRYPTION_KEY for production"
+            if integration_secrets.is_encryption_configured()
+            else "No encryption key configured — provider secrets cannot be stored"
+        ),
+    })
+
+    checks.append({
+        "id": "oauth_configuration", "label": "OAuth providers configured",
+        "ok": goog.is_oauth_configured(),  # Google is the one existing users depend on today
+        "detail": f"Google: {'configured' if goog.is_oauth_configured() else 'not configured'} · Microsoft: {'configured' if msoa.is_oauth_configured() else 'not configured'}",
+    })
+
+    facturapi_doc = await facturapi_connections_col.find_one({"workspace_id": workspace_id}, {"_id": 0, "status": 1, "last_error": 1, "environment": 1})
+    checks.append({
+        "id": "facturapi_connectivity", "label": "Facturapi connectivity",
+        "ok": not facturapi_doc or facturapi_doc.get("status") != "error",
+        "detail": (
+            "Not connected for this workspace" if not facturapi_doc
+            else f"Connected ({facturapi_doc.get('environment')})" if facturapi_doc.get("status") != "error"
+            else f"Last check failed: {facturapi_doc.get('last_error') or 'unknown error'}"
+        ),
+    })
+
+    limited: List[str] = []
+    stale: List[str] = []
+    for adapter in providers:
+        if adapter.provider_id == "quantro_internal":
+            continue
+        status = await adapter.get_status(workspace_id)
+        if status.status == ConnectionStatus.CONNECTED_LIMITED:
+            limited.append(adapter.provider_id)
+        if status.status == ConnectionStatus.CONNECTED and adapter.supports_sync:
+            if not status.last_sync_at:
+                stale.append(adapter.provider_id)
+            else:
+                try:
+                    last_sync = datetime.fromisoformat(status.last_sync_at.replace("Z", "+00:00"))
+                    if last_sync.tzinfo is None:
+                        last_sync = last_sync.replace(tzinfo=timezone.utc)
+                    if datetime.now(timezone.utc) - last_sync > timedelta(days=7):
+                        stale.append(adapter.provider_id)
+                except ValueError:
+                    pass
+
+    checks.append({
+        "id": "missing_scopes", "label": "No providers missing required scopes",
+        "ok": len(limited) == 0,
+        "detail": "All connected providers have full scope" if not limited else f"Missing action scopes: {', '.join(limited)}",
+    })
+    checks.append({
+        "id": "stale_connections", "label": "No stale connections",
+        "ok": len(stale) == 0,
+        "detail": "All syncs are recent" if not stale else f"No sync in 7+ days: {', '.join(stale)}",
+    })
+
+    recent_failed_webhooks = await facturapi_webhook_events_col.count_documents({
+        "workspace_id": workspace_id, "signature_valid": False,
+        "received_at": {"$gte": datetime.now(timezone.utc) - timedelta(hours=24)},
+    })
+    checks.append({
+        "id": "webhook_failures", "label": "No recent webhook signature failures",
+        "ok": recent_failed_webhooks == 0,
+        "detail": "No failures in the last 24h" if recent_failed_webhooks == 0 else f"{recent_failed_webhooks} unverified webhook event(s) in the last 24h",
+    })
+
+    return checks
 
 # ─── Plan & Usage ──────────────────────────────────────────────────────
 # NOTE: /api/usage was removed (P5 cleanup) — it was dead code. The real
@@ -3555,15 +3700,16 @@ async def analyze_inbox_item(inbox_id: str, workspace_id: str = Depends(get_curr
             policy_action = policy.get("medium_action", "require_approval")
         else:
             policy_action = policy.get("low_action", "escalate")
-    
+    policy_action = _normalize_policy_action(policy_action)
+
     # Evaluate advanced escalation conditions (applies to all policy actions)
     updated_item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
     escalation_info = await evaluate_advanced_escalation(updated_item, intent, confidence, policy_action)
-    
+
     # If escalation triggered, override policy action
     if escalation_info:
         policy_action = "escalate"
-    
+
     # Auto-execute if policy says auto_run and no escalation. The
     # `auto_executed` / `execution_results` locals are kept (even though
     # not used in this single-analyze response) because the caller
@@ -3768,7 +3914,8 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
                     policy_action = policy.get("medium_action", "require_approval")
                 else:
                     policy_action = policy.get("low_action", "escalate")
-            
+            policy_action = _normalize_policy_action(policy_action)
+
             # Evaluate advanced escalation conditions (applies to all policy actions)
             updated_item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
             escalation_info = await evaluate_advanced_escalation(updated_item, intent, confidence, policy_action)
@@ -4317,12 +4464,12 @@ async def create_policy(req: AutomationPolicyRequest, workspace_id: str = Depend
         "policy_id": str(uuid.uuid4()),
         "workspace_id": workspace_id,
         "intent": req.intent,
-        "action": req.action,
+        "action": _normalize_policy_action(req.action),
         "confidence_threshold_high": req.confidence_threshold_high,
         "confidence_threshold_medium": req.confidence_threshold_medium,
-        "high_action": req.high_action,
-        "medium_action": req.medium_action,
-        "low_action": req.low_action,
+        "high_action": _normalize_policy_action(req.high_action),
+        "medium_action": _normalize_policy_action(req.medium_action),
+        "low_action": _normalize_policy_action(req.low_action),
         "enabled": req.enabled,
         "created_at": now_iso(),
     }
@@ -4343,12 +4490,12 @@ async def delete_policy(policy_id: str, workspace_id: str = Depends(get_current_
 async def update_policy(policy_id: str, req: AutomationPolicyRequest, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("accountant"))):
     update = {
         "intent": req.intent,
-        "action": req.action,
+        "action": _normalize_policy_action(req.action),
         "confidence_threshold_high": req.confidence_threshold_high,
         "confidence_threshold_medium": req.confidence_threshold_medium,
-        "high_action": req.high_action,
-        "medium_action": req.medium_action,
-        "low_action": req.low_action,
+        "high_action": _normalize_policy_action(req.high_action),
+        "medium_action": _normalize_policy_action(req.medium_action),
+        "low_action": _normalize_policy_action(req.low_action),
         "enabled": req.enabled,
         "updated_at": now_iso(),
     }
@@ -4383,7 +4530,8 @@ async def evaluate_policy_for_item(inbox_id: str, workspace_id: str = Depends(ge
         resolved_action = policy.get("medium_action", "require_approval")
     else:
         resolved_action = policy.get("low_action", "escalate")
-    
+    resolved_action = _normalize_policy_action(resolved_action)
+
     # Check escalation rules
     escalation = None
     if resolved_action == "escalate":
@@ -4717,50 +4865,84 @@ class IntegrationUpdate(BaseModel):
 
 @app.get("/api/integrations")
 async def get_integrations(workspace_id: str = Depends(get_current_workspace_id)):
-    """Get all integration configurations for the current workspace."""
+    """Get all integration configurations for the current workspace.
+
+    SECURITY: `config` may hold an encrypted secret field (api_key,
+    secret_key, ...) — see integrations/secrets.py. Every secret field
+    is redacted to a `has_<field>: bool` flag before it leaves this
+    endpoint; the encrypted value itself never reaches the browser.
+    """
     integrations = await integrations_config_col.find({"workspace_id": workspace_id}, {"_id": 0}).to_list(100)
-    return [serialize_doc(i) for i in integrations]
+    out = []
+    for i in integrations:
+        doc = serialize_doc(i)
+        doc["config"] = integration_secrets.redact_config(doc.get("config"))
+        out.append(doc)
+    return out
 
 @app.get("/api/integrations/{provider}")
 async def get_integration(provider: str, workspace_id: str = Depends(get_current_workspace_id)):
-    """Get a specific integration configuration."""
+    """Get a specific integration configuration (secrets redacted — see get_integrations())."""
     integration = await integrations_config_col.find_one({"workspace_id": workspace_id, "provider": provider}, {"_id": 0})
     if not integration:
         raise HTTPException(status_code=404, detail="Integration not found")
-    return serialize_doc(integration)
+    doc = serialize_doc(integration)
+    doc["config"] = integration_secrets.redact_config(doc.get("config"))
+    return doc
 
 OAUTH_ONLY_PROVIDERS = {"gmail", "google_calendar"}
 
 @app.put("/api/integrations/{provider}")
 async def update_integration(provider: str, req: IntegrationUpdate, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("leader"))):
-    """Update an integration configuration."""
+    """Update an integration configuration.
+
+    SECURITY: `config` is encrypted field-by-field before it's ever
+    written to Mongo (integration_secrets.encrypt_config_secrets) — see
+    the Phase 0 audit note in integrations/secrets.py's module
+    docstring for why this matters (this endpoint used to persist and
+    return API keys in plaintext).
+    """
     if provider in OAUTH_ONLY_PROVIDERS and req.status == "connected":
         raise HTTPException(
             status_code=400,
             detail=f"'{provider}' requires real Google OAuth. Use GET /api/integrations/google/start instead of manually marking it as connected.",
         )
+    # A blank secret field in the request means "leave it unchanged" (the
+    # frontend never re-populates a secret input with the real value, so
+    # an untouched field arrives here empty) — merge onto the existing
+    # encrypted config instead of overwriting it with an empty string.
+    existing_doc = await integrations_config_col.find_one({"workspace_id": workspace_id, "provider": provider}, {"_id": 0, "config": 1})
+    existing_config = (existing_doc or {}).get("config") or {}
+    incoming_config = dict(req.config)
+    for secret_field in integration_secrets.SECRET_FIELD_NAMES:
+        if secret_field in incoming_config and not incoming_config[secret_field]:
+            incoming_config.pop(secret_field)
+    merged_config = {**existing_config, **integration_secrets.encrypt_config_secrets(incoming_config)}
+
     update_data = {
         "status": req.status,
-        "config": req.config,
+        "config": merged_config,
         "updated_at": now_iso()
     }
-    
+
     if req.status == "connected":
         update_data["last_sync_at"] = now_iso()
-    
+
     result = await integrations_config_col.update_one(
         {"workspace_id": workspace_id, "provider": provider},
         {"$set": update_data}
     )
-    
+
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Integration not found")
-    
+
     await log_activity("system", f"{provider.title()} integration updated", f"Status: {req.status}", provider, "integration", workspace_id=workspace_id)
     await log_audit(f"integration.{req.status}", f"{provider} -> {req.status}", workspace_id=workspace_id, metadata={"provider": provider})
-    
+
     updated = await integrations_config_col.find_one({"workspace_id": workspace_id, "provider": provider}, {"_id": 0})
-    return serialize_doc(updated)
+    doc = serialize_doc(updated)
+    doc["config"] = integration_secrets.redact_config(doc.get("config"))
+    return doc
 
 @app.post("/api/integrations/{provider}/test")
 async def test_integration(provider: str, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("leader"))):
@@ -5539,16 +5721,16 @@ async def google_oauth_sync(
     return {"success": True, "counts": counts, "synced_at": now.isoformat()}
 
 
-@app.delete("/api/integrations/google/disconnect")
-async def google_oauth_disconnect(
-    workspace_id: str = Depends(get_current_workspace_id),
-    user: User = Depends(get_current_user),
-):
+async def _disconnect_google_workspace(workspace_id: str, user_id: Optional[str] = None) -> Dict[str, Any]:
     """Revoke tokens at Google + delete locally + restore demo seed.
 
     Disconnecting un-hides the simulation rows so the workspace doesn't
     end up with an empty inbox/calendar, and re-enables simulation_mode
     so the UI returns to demo state cleanly.
+
+    Extracted so both the legacy DELETE /api/integrations/google/disconnect
+    route and the Quantro Connect GoogleAdapter call the exact same
+    implementation — see integrations/providers/google.py.
     """
     doc = await secrets_store.get_connection(
         provider="google", workspace_id=workspace_id, mongo_col=google_integrations_col,
@@ -5591,13 +5773,21 @@ async def google_oauth_disconnect(
         await log_audit(
             "integration.google_disconnected",
             f"Google disconnected ({(doc or {}).get('account_email') or 'unknown'})",
-            user_id=user.user_id,
+            user_id=user_id,
             workspace_id=workspace_id,
         )
     except Exception:  # noqa: BLE001
         pass
 
     return {"success": True}
+
+
+@app.delete("/api/integrations/google/disconnect")
+async def google_oauth_disconnect(
+    workspace_id: str = Depends(get_current_workspace_id),
+    user: User = Depends(get_current_user),
+):
+    return await _disconnect_google_workspace(workspace_id, user.user_id)
 
 
 # ─── Microsoft Outlook OAuth — Mail + Calendar (Phase 7e.2) ───────────
@@ -5888,11 +6078,9 @@ async def microsoft_oauth_sync(
     return {"success": True, "counts": res["counts"], "synced_at": datetime.now(timezone.utc).isoformat()}
 
 
-@app.delete("/api/integrations/microsoft/disconnect")
-async def microsoft_oauth_disconnect(
-    workspace_id: str = Depends(get_current_workspace_id),
-    user: User = Depends(get_current_user),
-):
+async def _disconnect_microsoft_workspace(workspace_id: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+    """Same extraction rationale as _disconnect_google_workspace() —
+    shared by the legacy route and integrations/providers/microsoft.py."""
     doc = await secrets_store.get_connection(
         provider="microsoft", workspace_id=workspace_id, mongo_col=microsoft_integrations_col,
     )
@@ -5936,11 +6124,19 @@ async def microsoft_oauth_disconnect(
         await log_audit(
             "integration.microsoft_disconnected",
             f"Microsoft disconnected ({(doc or {}).get('account_email') or 'unknown'})",
-            user_id=user.user_id, workspace_id=workspace_id,
+            user_id=user_id, workspace_id=workspace_id,
         )
     except Exception:  # noqa: BLE001
         pass
     return {"success": True}
+
+
+@app.delete("/api/integrations/microsoft/disconnect")
+async def microsoft_oauth_disconnect(
+    workspace_id: str = Depends(get_current_workspace_id),
+    user: User = Depends(get_current_user),
+):
+    return await _disconnect_microsoft_workspace(workspace_id, user.user_id)
 
 
 # ─── Auto-sync controls (Phase 7e) ────────────────────────────────────
@@ -6140,3 +6336,300 @@ async def complete_welcome_onboarding(
             "events": events_total,
         },
     }
+
+
+# ═════════════════════════════════════════════════════════════════════
+# QUANTRO CONNECT + QUANTRO ACTIONS
+# ═════════════════════════════════════════════════════════════════════
+# Bootstrap: register every provider adapter and Action, then wire the
+# two services (ConnectService, ActionExecutor) the endpoints below use.
+# Placed at the bottom of the file (not in lifespan) because adapters
+# need functions defined earlier in this module (e.g.
+# _perform_google_sync_for_workspace, _disconnect_google_workspace) —
+# by module-load time everything above has already executed, and
+# Python resolves the free variables these closures capture (like
+# `action_executor` inside execute_action_for_item, defined far above)
+# at CALL time, not at function-definition time, so the forward
+# reference here is safe.
+
+def _backend_public_url() -> Optional[str]:
+    return (os.environ.get("BACKEND_PUBLIC_URL") or "").strip() or None
+
+
+google_adapter = GoogleAdapter(google_integrations_col, goog, _perform_google_sync_for_workspace, _disconnect_google_workspace)
+microsoft_adapter = MicrosoftAdapter(microsoft_integrations_col, msoa, _perform_microsoft_sync_for_workspace, _disconnect_microsoft_workspace)
+facturapi_adapter = FacturapiAdapter(facturapi_connections_col, facturapi_webhook_events_col, _backend_public_url, log_audit_fn=log_audit)
+quantro_internal_adapter = QuantroInternalAdapter()
+
+register_provider(google_adapter)
+register_provider(microsoft_adapter)
+register_provider(facturapi_adapter)
+register_provider(quantro_internal_adapter)
+
+connect_service = ConnectService()
+
+register_all_actions()
+
+policy_engine = PolicyEngine(
+    automation_policies_col=policies_col,
+    action_policies_col=action_policies_col,
+    action_executions_col=action_executions_col,
+    is_simulation_mode_fn=is_simulation_mode,
+    escalation_col=escalation_col,
+)
+policy_gate = PolicyGate(policy_engine)
+
+action_executor = ActionExecutor(
+    action_executions_col, policy_gate, log_audit,
+    deps={
+        "contacts_col": contacts_col,
+        "calendar_col": calendar_col,
+        "agents_col": agents_col,
+        "onboarding_col": onboarding_col,
+        "log_activity": log_activity,
+        "google_integrations_col": google_integrations_col,
+        "microsoft_integrations_col": microsoft_integrations_col,
+        "load_google_credentials": _load_google_credentials,
+        "load_microsoft_credentials": _load_microsoft_credentials,
+        "goog_module": goog,
+        "msoa_module": msoa,
+        "facturapi_adapter": facturapi_adapter,
+    },
+)
+
+
+@app.exception_handler(QuantroError)
+async def quantro_error_handler(request: Request, exc: QuantroError):
+    """Every Connect/Actions endpoint below lets QuantroError propagate
+    instead of catching it locally — this single handler is what turns
+    it into the normalized {error, message, ...} JSON body with the
+    right status code (see errors.py's ERROR_CODES)."""
+    http_exc = exc.to_http_exception()
+    return JSONResponse(status_code=http_exc.status_code, content=http_exc.detail)
+
+
+# ─── Quantro Connect API ───────────────────────────────────────────────
+
+@app.get("/api/connect/providers")
+async def connect_list_providers(workspace_id: str = Depends(get_current_workspace_id)):
+    return await connect_service.list_providers(workspace_id)
+
+
+@app.get("/api/connect/connections")
+async def connect_list_connections(workspace_id: str = Depends(get_current_workspace_id)):
+    return await connect_service.list_connections(workspace_id)
+
+
+@app.get("/api/connect/providers/{provider}")
+async def connect_get_provider(provider: str, workspace_id: str = Depends(get_current_workspace_id)):
+    return await connect_service.get_provider(workspace_id, provider)
+
+
+@app.post("/api/connect/providers/{provider}/test")
+async def connect_test_provider(
+    provider: str, workspace_id: str = Depends(get_current_workspace_id),
+    _m: dict = Depends(require_role("leader")),
+):
+    return await connect_service.test_connection(workspace_id, provider)
+
+
+@app.post("/api/connect/providers/{provider}/sync")
+async def connect_sync_provider(
+    provider: str, workspace_id: str = Depends(get_current_workspace_id),
+    _m: dict = Depends(require_role("leader")),
+):
+    return await connect_service.sync(workspace_id, provider)
+
+
+@app.delete("/api/connect/providers/{provider}")
+async def connect_disconnect_provider(
+    provider: str, workspace_id: str = Depends(get_current_workspace_id),
+    _m: dict = Depends(require_role("leader")),
+):
+    return await connect_service.disconnect(workspace_id, provider)
+
+
+class FacturapiConnectRequest(BaseModel):
+    secret_key: str
+
+
+@app.post("/api/connect/providers/facturapi/connect")
+async def connect_facturapi(
+    req: FacturapiConnectRequest,
+    workspace_id: str = Depends(get_current_workspace_id),
+    _m: dict = Depends(require_role("leader")),
+):
+    """Connect Facturapi with a Test or Live secret key. The key is
+    never persisted in plaintext and never returned — see
+    integrations/providers/facturapi.py's connect()."""
+    return await facturapi_adapter.connect(workspace_id, {"secret_key": req.secret_key})
+
+
+@app.get("/api/connect/providers/google/request-permission")
+async def connect_google_request_permission(
+    request: Request,
+    action_id: str,
+    return_to: Optional[str] = None,
+    workspace_id: str = Depends(get_current_workspace_id),
+    user: User = Depends(get_current_user),
+):
+    """Incremental Google authorization for one Action's write scope —
+    the "Grant permission" flow. Reuses the exact same state-doc +
+    callback machinery as /api/integrations/google/start (the callback
+    itself needs no changes: Google returns the FULL cumulative scope
+    set once include_granted_scopes=true is used, so the existing
+    callback naturally persists the broader grant)."""
+    if not goog.is_oauth_configured():
+        raise HTTPException(status_code=503, detail="Google OAuth is not configured.")
+    scope = goog.ACTION_SCOPES.get(action_id)
+    if not scope:
+        raise HTTPException(status_code=400, detail=f"No additional Google scope is defined for action '{action_id}'")
+
+    base_url = str(request.base_url).rstrip("/")
+    redirect_uri = goog.resolve_redirect_uri(base_url)
+    state = uuid.uuid4().hex
+    await google_oauth_state_col.insert_one({
+        "state": state, "user_id": user.user_id, "workspace_id": workspace_id,
+        "return_to": _sanitize_return_to(return_to), "redirect_uri": redirect_uri,
+        "created_at": datetime.now(timezone.utc),
+        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
+    })
+    auth_url = goog.build_incremental_authorization_url(state=state, redirect_uri=redirect_uri, additional_scopes=[scope])
+    return {"auth_url": auth_url, "state": state}
+
+
+# ─── Facturapi webhook receiver ────────────────────────────────────────
+
+@app.post("/api/webhooks/facturapi/{connection_id}/{webhook_token}")
+async def facturapi_webhook_receiver(connection_id: str, webhook_token: str, request: Request):
+    """No @app-level auth dependency — Facturapi calls this directly.
+    Authenticity comes from the high-entropy webhook_token embedded in
+    the URL path (generated per-connection, see
+    FacturapiAdapter._register_webhook) plus, when available, the
+    Facturapi-Signature header verified against Facturapi's own
+    validate-signature endpoint. Unknown connection / bad token get a
+    plain 404 (don't help an attacker distinguish "wrong token" from
+    "no such endpoint"); everything else — including malformed/
+    duplicate events, which ARE legitimate Facturapi traffic — gets a
+    2xx so Facturapi doesn't retry-storm us."""
+    raw_body = await request.body()
+    signature = request.headers.get("Facturapi-Signature")
+    result = await facturapi_adapter.handle_webhook(connection_id, webhook_token, raw_body, signature)
+    if result.get("reason") in ("unknown_connection", "invalid_token"):
+        raise HTTPException(status_code=404, detail="Not found")
+    return result
+
+
+# ─── Quantro Actions API ────────────────────────────────────────────────
+
+class ExecuteActionRequest(BaseModel):
+    input: Dict[str, Any] = {}
+    idempotency_key: Optional[str] = None
+    dry_run: bool = False
+    source: str = "manual"
+
+
+def _serialize_action_definition(d, connection_status: Optional[str]) -> Dict[str, Any]:
+    return {
+        "action_id": d.action_id,
+        "provider": d.provider,
+        "name": d.name,
+        "description": d.description,
+        "risk_level": d.risk_level.value,
+        "input_schema": d.input_schema,
+        "required_capabilities": d.required_capabilities,
+        "required_scopes": d.required_scopes,
+        "supports_dry_run": d.supports_dry_run,
+        "idempotent": d.idempotent,
+        "minimum_role": d.minimum_role,
+        "connection_status": connection_status,
+    }
+
+
+@app.get("/api/actions")
+async def actions_list(
+    provider: Optional[str] = None,
+    connected: Optional[bool] = None,
+    workspace_id: str = Depends(get_current_workspace_id),
+):
+    defs = list_actions(provider=provider)
+    out = []
+    for d in defs:
+        adapter = get_connect_provider(d.provider)
+        connection_status = (await adapter.get_status(workspace_id)).status.value if adapter else None
+        if connected is not None:
+            is_connected = connection_status in ("connected", "connected_limited")
+            if is_connected != connected:
+                continue
+        out.append(_serialize_action_definition(d, connection_status))
+    return out
+
+
+@app.get("/api/actions/{action_id}")
+async def actions_get(action_id: str, workspace_id: str = Depends(get_current_workspace_id)):
+    d = get_action(action_id)
+    if not d:
+        raise HTTPException(status_code=404, detail="Action not found")
+    adapter = get_connect_provider(d.provider)
+    connection_status = (await adapter.get_status(workspace_id)).status.value if adapter else None
+    return _serialize_action_definition(d, connection_status)
+
+
+@app.post("/api/actions/{action_id}/execute")
+async def actions_execute(
+    action_id: str, req: ExecuteActionRequest,
+    workspace_id: str = Depends(get_current_workspace_id),
+    user: User = Depends(get_current_user),
+):
+    me = await _membership_for(user.user_id, workspace_id)
+    actor_role = _normalize_role(me.get("role")) if me else "viewer"
+    return await action_executor.execute(
+        workspace_id=workspace_id, action_id=action_id, input=req.input,
+        requested_by=user.user_id, source=req.source,
+        idempotency_key=req.idempotency_key, dry_run=req.dry_run,
+        actor_role=actor_role,
+    )
+
+
+@app.get("/api/actions/executions")
+async def actions_list_executions(
+    workspace_id: str = Depends(get_current_workspace_id),
+    action_id: Optional[str] = None,
+    provider: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = Query(default=50, le=200),
+):
+    query: Dict[str, Any] = {"workspace_id": workspace_id}
+    if action_id:
+        query["action_id"] = action_id
+    if provider:
+        query["provider"] = provider
+    if status:
+        query["status"] = status
+    rows = await action_executions_col.find(query, {"_id": 0}).sort("started_at", -1).to_list(limit)
+    return [serialize_doc(r) for r in rows]
+
+
+@app.get("/api/actions/executions/{execution_id}")
+async def actions_get_execution(execution_id: str, workspace_id: str = Depends(get_current_workspace_id)):
+    row = await action_executions_col.find_one({"execution_id": execution_id, "workspace_id": workspace_id}, {"_id": 0})
+    if not row:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    return serialize_doc(row)
+
+
+@app.post("/api/actions/executions/{execution_id}/approve")
+async def actions_approve_execution(
+    execution_id: str, workspace_id: str = Depends(get_current_workspace_id),
+    user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
+):
+    return await action_executor.approve(workspace_id, execution_id, user.user_id)
+
+
+@app.post("/api/actions/executions/{execution_id}/cancel")
+async def actions_cancel_execution(
+    execution_id: str, workspace_id: str = Depends(get_current_workspace_id),
+    _m: dict = Depends(require_role("leader")),
+):
+    return await action_executor.cancel(workspace_id, execution_id)

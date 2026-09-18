@@ -220,4 +220,24 @@ export const updateTemplate = (id, data) => api.put(`/templates/${id}`, data).th
 export const deleteTemplate = (id) => api.delete(`/templates/${id}`).then(r => r.data);
 export const generateFromTemplate = (id, context) => api.post(`/templates/${id}/generate`, { template_id: id, context }).then(r => r.data);
 
+// Quantro Connect
+export const getConnectProviders = () => api.get('/connect/providers').then(r => r.data);
+export const getConnections = () => api.get('/connect/connections').then(r => r.data);
+export const getConnectProvider = (provider) => api.get(`/connect/providers/${provider}`).then(r => r.data);
+export const testConnection = (provider) => api.post(`/connect/providers/${provider}/test`).then(r => r.data);
+export const syncConnection = (provider) => api.post(`/connect/providers/${provider}/sync`).then(r => r.data);
+export const disconnectProvider = (provider) => api.delete(`/connect/providers/${provider}`).then(r => r.data);
+export const connectFacturapi = (secret_key) => api.post('/connect/providers/facturapi/connect', { secret_key }).then(r => r.data);
+export const requestGooglePermission = (action_id, return_to) =>
+  api.get('/connect/providers/google/request-permission', { params: { action_id, return_to } }).then(r => r.data);
+
+// Quantro Actions
+export const getActions = (params = {}) => api.get('/actions', { params }).then(r => r.data);
+export const getAction = (actionId) => api.get(`/actions/${actionId}`).then(r => r.data);
+export const executeAction = (actionId, payload) => api.post(`/actions/${actionId}/execute`, payload).then(r => r.data);
+export const getActionExecutions = (params = {}) => api.get('/actions/executions', { params }).then(r => r.data);
+export const getActionExecution = (executionId) => api.get(`/actions/executions/${executionId}`).then(r => r.data);
+export const approveActionExecution = (executionId) => api.post(`/actions/executions/${executionId}/approve`).then(r => r.data);
+export const cancelActionExecution = (executionId) => api.post(`/actions/executions/${executionId}/cancel`).then(r => r.data);
+
 export default api;

@@ -13,6 +13,8 @@ import CRM from './pages/CRM';
 import Onboarding from './pages/Onboarding';
 import ContentEngine from './pages/ContentEngine';
 import AutomationPolicies from './pages/AutomationPolicies';
+import Connect from './pages/Connect';
+import QuantroActions from './pages/Actions';
 import Settings from './pages/Settings';
 import PlanAndUsage from './pages/PlanAndUsage';
 import LoginPage from './pages/LoginPage';
@@ -52,6 +54,8 @@ function AppShell() {
             <Route path="/content" element={<ContentEngine />} />
             <Route path="/automation" element={<AutomationPolicies />} />
             <Route path="/automation-policies" element={<AutomationPolicies />} />
+            <Route path="/connect" element={<Connect />} />
+            <Route path="/actions" element={<QuantroActions />} />
             <Route path="/plan" element={<PlanAndUsage />} />
             <Route path="/members" element={<Members />} />
             <Route path="/settings" element={<Settings />} />

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Loader2, ArrowRight, Lock } from 'lucide-react';
 import { toast } from 'sonner';
 import {
@@ -10,7 +10,7 @@ import {
 } from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
 import { useLanguage } from '../../../context/LanguageContext';
-import { startGoogleOAuth } from '../../../lib/api';
+import { startGoogleOAuth, startMicrosoftOAuth, getMicrosoftIntegrationStatus } from '../../../lib/api';
 
 /**
  * ProviderConnectModal — single, opinionated picker for the
@@ -39,20 +39,36 @@ export default function ProviderConnectModal({
 }) {
   const { t } = useLanguage();
   const [redirecting, setRedirecting] = useState(null); // 'google' | 'microsoft' | null
+  // Microsoft used to be hard-coded disabled regardless of backend
+  // config — now it reflects whether MS_CLIENT_ID/MS_CLIENT_SECRET are
+  // actually set on this deployment (see /api/integrations/microsoft/status),
+  // same signal Settings > Integrations already uses.
+  const [microsoftConfigured, setMicrosoftConfigured] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    getMicrosoftIntegrationStatus()
+      .then((status) => { if (!cancelled) setMicrosoftConfigured(!!status?.configured); })
+      .catch(() => { if (!cancelled) setMicrosoftConfigured(false); });
+    return () => { cancelled = true; };
+  }, [open]);
 
   const handlePick = async (provider) => {
-    if (provider === 'microsoft') {
-      // Microsoft is intentionally not wired up yet (PENDING) — never
-      // call startMicrosoftOAuth even if this somehow gets triggered.
-      // The card itself is disabled + shows "Próximamente" below.
+    if (provider === 'microsoft' && !microsoftConfigured) {
+      // Backend doesn't have MS_CLIENT_ID/MS_CLIENT_SECRET configured
+      // in this deployment — the card shows "Configuration required"
+      // below rather than letting the user hit a 503 mid-flow.
       return;
     }
     setRedirecting(provider);
     try {
-      const { auth_url } = await startGoogleOAuth(returnTo);
+      const { auth_url } = provider === 'microsoft'
+        ? await startMicrosoftOAuth(returnTo)
+        : await startGoogleOAuth(returnTo);
       if (!auth_url) throw new Error('no auth_url returned');
       // Top-level redirect — provider callback bounces back to
-      // returnTo with ?google_connected=success.
+      // returnTo with ?google_connected=success / ?microsoft_connected=success.
       window.location.href = auth_url;
       // Keep the spinner active until the browser actually navigates;
       // the modal will be unmounted by the route change.
@@ -100,13 +116,13 @@ export default function ProviderConnectModal({
           />
           <ProviderCard
             provider="microsoft"
-            disabled
-            comingSoon
-            comingSoonLabel={t('welcome.connect_modal.coming_soon_badge')}
-            redirecting={false}
+            disabled={!microsoftConfigured || redirecting !== null}
+            comingSoon={!microsoftConfigured}
+            comingSoonLabel={t(microsoftConfigured ? 'welcome.connect_modal.coming_soon_badge' : 'welcome.connect_modal.configuration_required_badge')}
+            redirecting={redirecting === 'microsoft'}
             title={t('welcome.connect_modal.microsoft_title')}
             subtitle={t('welcome.connect_modal.microsoft_subtitle')}
-            onClick={() => {}}
+            onClick={() => handlePick('microsoft')}
             testid="provider-pick-microsoft"
           />
 

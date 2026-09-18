@@ -271,6 +271,65 @@ def fetch_upcoming_outlook_events(access_token: str, days: int = 30) -> List[Dic
     return out
 
 
+# ─── Quantro Actions — incremental write-scope authorization ──────────
+# Mirrors google_oauth.py's ACTION_SCOPES. NOTE (see module docstring on
+# MS_SCOPES): Graph/MSAL don't support Google-style incremental consent
+# — requesting these requires adding them to MS_SCOPES and having the
+# user re-run /api/integrations/microsoft/start, which re-prompts for
+# the full scope set. Handlers below correctly report
+# reauthorization_required rather than silently failing in the
+# meantime; wiring the actual re-consent UX is a follow-up.
+ACTION_SCOPES = {
+    "microsoft.mail.send": "Mail.Send",
+    "microsoft.calendar.event.create": "Calendars.ReadWrite",
+}
+
+
+def send_mail(access_token: str, to: str, subject: str, body: str) -> None:
+    """Send a plain-text email via Microsoft Graph. Requires Mail.Send
+    — callers MUST verify it's present in stored scopes first (see
+    actions/handlers/microsoft.py)."""
+    payload = {
+        "message": {
+            "subject": subject,
+            "body": {"contentType": "Text", "content": body},
+            "toRecipients": [{"emailAddress": {"address": to}}],
+        }
+    }
+    with httpx.Client(timeout=15.0) as cx:
+        r = cx.post(
+            f"{_GRAPH_BASE}/me/sendMail",
+            headers={"Authorization": f"Bearer {access_token}"},
+            json=payload,
+        )
+    r.raise_for_status()
+
+
+def create_calendar_event(
+    access_token: str, subject: str, start_iso: str, end_iso: str,
+    description: str = "", location: str = "", attendees: Optional[List[str]] = None,
+) -> str:
+    """Create a real Outlook Calendar event. Requires Calendars.ReadWrite
+    — see send_mail()'s docstring for the same scope-check rule."""
+    payload: Dict[str, Any] = {
+        "subject": subject,
+        "body": {"contentType": "Text", "content": description},
+        "start": {"dateTime": start_iso, "timeZone": "UTC"},
+        "end": {"dateTime": end_iso, "timeZone": "UTC"},
+        "location": {"displayName": location},
+    }
+    if attendees:
+        payload["attendees"] = [{"emailAddress": {"address": a}, "type": "required"} for a in attendees]
+    with httpx.Client(timeout=15.0) as cx:
+        r = cx.post(
+            f"{_GRAPH_BASE}/me/events",
+            headers={"Authorization": f"Bearer {access_token}"},
+            json=payload,
+        )
+    r.raise_for_status()
+    return r.json().get("id")
+
+
 def revoke_token(_token: str) -> bool:
     """Microsoft does not expose a public revoke endpoint for personal
     accounts. The closest action is admin-level tenant-wide revocation

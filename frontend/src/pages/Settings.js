@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Settings as SettingsIcon, Plug, Bot, Building2, Users, Loader2, Zap } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { Settings as SettingsIcon, Plug, Bot, Building2, Users, Loader2, Zap, ExternalLink } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -19,6 +20,7 @@ import { useLanguage } from '../context/LanguageContext';
 export default function Settings() {
   const { profile, updateProfile, refetch } = useBusinessProfile();
   const { t } = useLanguage();
+  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState('integrations');
 
   // Business Profile state
@@ -103,6 +105,16 @@ export default function Settings() {
 
           {/* Integrations Tab */}
           <TabsContent value="integrations" className="space-y-4 mt-6">
+            <Card
+              data-testid="connect-upsell-banner"
+              className="p-4 bg-[hsl(var(--primary)/0.06)] border-[hsl(var(--primary)/0.25)] flex items-center justify-between gap-3 flex-wrap"
+            >
+              <p className="text-sm text-foreground">{t('connect.manage_here_note')}</p>
+              <Button size="sm" variant="outline" onClick={() => navigate('/connect')} data-testid="connect-upsell-cta">
+                <ExternalLink size={14} className="mr-2" />
+                {t('connect.go_to_connect')}
+              </Button>
+            </Card>
             <IntegrationsPanel />
           </TabsContent>
 

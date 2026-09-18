@@ -1,6 +1,6 @@
 import React from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Inbox, Calendar, Users, UserPlus, PenTool, ChevronLeft, ChevronRight, Zap, Bot, Settings, LogOut, Receipt, UserCircle, Building2, Plus, Check, Shield } from 'lucide-react';
+import { LayoutDashboard, Inbox, Calendar, Users, UserPlus, PenTool, ChevronLeft, ChevronRight, Zap, Bot, Settings, LogOut, Receipt, UserCircle, Building2, Plus, Check, Shield, Plug } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../contexts/AuthContext';
@@ -26,6 +26,8 @@ const navItems = [
   { to: '/onboarding', icon: UserPlus, labelKey: 'sidebar.onboarding', testId: 'nav-onboarding' },
   { to: '/content', icon: PenTool, labelKey: 'sidebar.content_engine', testId: 'nav-content-engine' },
   { to: '/automation', icon: Bot, labelKey: 'sidebar.automation', testId: 'nav-automation' },
+  { to: '/connect', icon: Plug, labelKey: 'sidebar.connect', testId: 'nav-connect' },
+  { to: '/actions', icon: Zap, labelKey: 'sidebar.quantro_actions', testId: 'nav-actions' },
   { to: '/members', icon: Shield, labelKey: 'sidebar.members', testId: 'nav-members' },
   { to: '/plan', icon: Receipt, labelKey: 'plan_usage.nav_label', testId: 'nav-plan-usage' },
   { to: '/settings', icon: Settings, labelKey: 'sidebar.settings', testId: 'nav-settings' },
