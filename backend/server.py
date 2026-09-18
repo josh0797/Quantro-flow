@@ -492,12 +492,20 @@ async def get_mode_filter(workspace_id: str = DEFAULT_WORKSPACE_ID) -> dict:
     Combines:
       - workspace_id (strict tenant isolation)
       - is_simulation (strict sandbox/live isolation)
+      - hidden_by_real exclusion in Live mode (demo rows retired after a
+        real Google/Microsoft sync). Missing ``hidden_by_real`` is treated
+        as visible (``{"$ne": True}``).
     """
     base = {"workspace_id": workspace_id}
     if await is_simulation_mode(workspace_id):
         base["is_simulation"] = True
     else:
         base["is_simulation"] = {"$ne": True}
+        # After a real inbox/calendar sync we mark simulation rows with
+        # hidden_by_real=True. Live list endpoints must honour that flag
+        # so demo seed never mixes with DATOS REALES (even if an older
+        # seed row was incompletely tagged for is_simulation).
+        base["hidden_by_real"] = {"$ne": True}
     return base
 
 
@@ -868,6 +876,9 @@ async def seed_database():
         {"inbox_id": str(uuid.uuid4()), "from_name": "James Rivera", "from_email": "jrivera@realtyfirm.com", "subject": "New agent setup request", "body": "Hi, I just joined the team as a new agent. My manager said I should reach out to get my systems set up. Looking forward to getting started!", "received_at": now - timedelta(hours=8), "read": True, "status": "actioned", "ai_intent": {"intent": "onboarding", "confidence": 0.95, "summary": "New agent requesting system setup"}, "ai_suggested_action": {"type": "start_onboarding", "description": "Initiate onboarding workflow for new agent"}, "contact_id": None, "source": "gmail"},
         {"inbox_id": str(uuid.uuid4()), "from_name": "Emily Rodriguez", "from_email": "emily.r@homes.com", "subject": "Similar properties to Maple Ridge?", "body": "Hi there, I attended the open house at Maple Ridge last weekend and loved it. Are there any similar properties available? I'm flexible on timing for a viewing.", "received_at": now - timedelta(hours=4), "read": False, "status": "new", "ai_intent": None, "ai_suggested_action": None, "contact_id": contacts[4]["contact_id"], "source": "gmail"},
     ]
+    for _item in inbox_items:
+        _item["is_simulation"] = True
+        _item.setdefault("workspace_id", DEFAULT_WORKSPACE_ID)
     await inbox_col.insert_many(inbox_items)
 
     # Calendar events
@@ -878,6 +889,9 @@ async def seed_database():
         {"event_id": str(uuid.uuid4()), "title": "Open house - Maple Ridge", "description": "Weekend open house event", "start_time": (now + timedelta(days=3, hours=5)).isoformat(), "end_time": (now + timedelta(days=3, hours=8)).isoformat(), "location": "Maple Ridge Estate", "attendees": ["Carlos Mendez", "Aisha Patel"], "status": "confirmed", "source": "google_calendar", "created_at": now - timedelta(days=5), "contact_id": None},
         {"event_id": str(uuid.uuid4()), "title": "Onboarding - James Rivera", "description": "New agent orientation session", "start_time": (now + timedelta(days=1, hours=5)).isoformat(), "end_time": (now + timedelta(days=1, hours=6)).isoformat(), "location": "Office - Training Room", "attendees": ["James Rivera", "Sophia Turner"], "status": "pending", "source": "system", "created_at": now - timedelta(hours=6), "contact_id": None},
     ]
+    for _item in calendar_events:
+        _item["is_simulation"] = True
+        _item.setdefault("workspace_id", DEFAULT_WORKSPACE_ID)
     await calendar_col.insert_many(calendar_events)
 
     # Content items
@@ -1661,6 +1675,23 @@ async def _perform_google_sync_for_workspace(workspace_id: str) -> Dict[str, Any
             workspace_id=workspace_id,
             mongo_col=google_integrations_col,
             fields={"last_sync_at": now, "last_sync_error": None},
+        )
+        # Retire demo seed + leave Simulation Mode so Live inbox/calendar
+        # never mix DATOS REALES with Sarah Chen-style demo rows. Mirrors
+        # POST /api/integrations/google/sync (and OAuth callback kicks this
+        # path in the background).
+        await inbox_col.update_many(
+            {"workspace_id": workspace_id, "is_simulation": True},
+            {"$set": {"hidden_by_real": True}},
+        )
+        await calendar_col.update_many(
+            {"workspace_id": workspace_id, "is_simulation": True},
+            {"$set": {"hidden_by_real": True}},
+        )
+        await business_profile_col.update_one(
+            {"workspace_id": workspace_id},
+            {"$set": {"simulation_mode": False, "updated_at": now_iso()}},
+            upsert=True,
         )
         return {"workspace_id": workspace_id, "ok": True, "counts": counts}
     except Exception as exc:  # noqa: BLE001
@@ -5570,6 +5601,11 @@ async def google_oauth_callback(
         )
     else:
         qs = f"google_connected=success&account={(profile or {}).get('email') or ''}&return_to={return_to}"
+        # Kick a background sync immediately so onboarding does not wait on
+        # the frontend "Sincronizar" click. Same fire-and-forget pattern as
+        # auto-sync resume — do not block the OAuth redirect on completion.
+        if workspace_id:
+            asyncio.create_task(_perform_google_sync_for_workspace(workspace_id))
     return _bounce(qs)
 
 
