@@ -41,6 +41,11 @@ from ..base import (
 )
 from ..secrets import decrypt_secret, encrypt_secret, redact_error_text
 
+try:
+    import connect_store
+except ImportError:  # pragma: no cover — script / partial path
+    connect_store = None  # type: ignore
+
 FACTURAPI_BASE = "https://www.facturapi.io/v2"
 
 # Verbatim from Facturapi's WebhookCreateInput.enabled_events enum.
@@ -116,10 +121,44 @@ class FacturapiAdapter(ProviderAdapter):
             )
 
     async def _get_secret_key(self, workspace_id: str) -> Optional[str]:
-        doc = await self.col.find_one({"workspace_id": workspace_id})
+        doc = await self._load_connection(workspace_id=workspace_id)
         if not doc:
             return None
         return decrypt_secret(doc.get("secret_key_encrypted"))
+
+    async def _load_connection(
+        self,
+        *,
+        workspace_id: Optional[str] = None,
+        connection_id: Optional[str] = None,
+        projection: Optional[Dict[str, int]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if connect_store is None:
+            if connection_id:
+                return await self.col.find_one({"connection_id": connection_id}, projection)
+            return await self.col.find_one({"workspace_id": workspace_id}, projection)
+        return await connect_store.get_facturapi_connection(
+            workspace_id=workspace_id,
+            connection_id=connection_id,
+            mongo_col=self.col,
+            projection=projection,
+        )
+
+    async def _persist_connection(self, workspace_id: str, fields: Dict[str, Any], *, upsert: bool = True) -> None:
+        if connect_store is None:
+            if upsert:
+                await self.col.update_one({"workspace_id": workspace_id}, {"$set": fields}, upsert=True)
+            else:
+                await self.col.update_one({"workspace_id": workspace_id}, {"$set": fields})
+            return
+        if upsert:
+            await connect_store.upsert_facturapi_connection(
+                workspace_id=workspace_id, mongo_col=self.col, fields=fields,
+            )
+        else:
+            await connect_store.patch_facturapi_connection(
+                workspace_id=workspace_id, mongo_col=self.col, fields=fields,
+            )
 
     async def request(
         self, workspace_id: str, method: str, path: str,
@@ -156,7 +195,10 @@ class FacturapiAdapter(ProviderAdapter):
 
     # ── ProviderAdapter interface ────────────────────────────────────
     async def get_status(self, workspace_id: str) -> ProviderStatus:
-        doc = await self.col.find_one({"workspace_id": workspace_id}, {"_id": 0, "secret_key_encrypted": 0})
+        doc = await self._load_connection(
+            workspace_id=workspace_id,
+            projection={"_id": 0, "secret_key_encrypted": 0},
+        )
         if not doc:
             return ProviderStatus(provider_id=self.provider_id, status=ConnectionStatus.DISCONNECTED)
         status = ConnectionStatus.ERROR if doc.get("status") == "error" else ConnectionStatus.CONNECTED
@@ -196,9 +238,10 @@ class FacturapiAdapter(ProviderAdapter):
         legal = org.get("legal") or {}
 
         now = datetime.now(timezone.utc)
-        connection_id = (await self.col.find_one({"workspace_id": workspace_id}, {"connection_id": 1}) or {}).get(
-            "connection_id"
-        ) or str(uuid.uuid4())
+        existing = await self._load_connection(
+            workspace_id=workspace_id, projection={"connection_id": 1},
+        )
+        connection_id = (existing or {}).get("connection_id") or str(uuid.uuid4())
 
         doc: Dict[str, Any] = {
             "workspace_id": workspace_id,
@@ -213,10 +256,14 @@ class FacturapiAdapter(ProviderAdapter):
             "last_error": None,
             "updated_at": now,
         }
-        existing = await self.col.find_one({"workspace_id": workspace_id})
         if not existing:
-            doc["connected_at"] = now
-        await self.col.update_one({"workspace_id": workspace_id}, {"$set": doc}, upsert=True)
+            # Full doc check for connected_at (projection may omit fields).
+            full_existing = await self._load_connection(workspace_id=workspace_id)
+            if not full_existing:
+                doc["connected_at"] = now
+            elif not full_existing.get("connected_at"):
+                doc["connected_at"] = now
+        await self._persist_connection(workspace_id, doc, upsert=True)
 
         webhook_result = await self._register_webhook(workspace_id, connection_id, secret_key)
 
@@ -238,7 +285,7 @@ class FacturapiAdapter(ProviderAdapter):
         }
 
     async def disconnect(self, workspace_id: str) -> Dict[str, Any]:
-        doc = await self.col.find_one({"workspace_id": workspace_id})
+        doc = await self._load_connection(workspace_id=workspace_id)
         if not doc:
             return {"success": True, "already": "disconnected"}
 
@@ -251,7 +298,12 @@ class FacturapiAdapter(ProviderAdapter):
             except httpx.HTTPError:
                 pass  # best-effort — local delete still proceeds
 
-        await self.col.delete_one({"workspace_id": workspace_id})
+        if connect_store is None:
+            await self.col.delete_one({"workspace_id": workspace_id})
+        else:
+            await connect_store.delete_facturapi_connection(
+                workspace_id=workspace_id, mongo_col=self.col,
+            )
         if self._log_audit:
             await self._log_audit(
                 "integration.disconnected", "Facturapi disconnected",
@@ -267,21 +319,27 @@ class FacturapiAdapter(ProviderAdapter):
             try:
                 resp = await client.get("/organizations/me")
             except httpx.HTTPError as exc:
-                await self.col.update_one(
-                    {"workspace_id": workspace_id},
-                    {"$set": {"status": "error", "last_error": redact_error_text(str(exc))}},
+                await self._persist_connection(
+                    workspace_id,
+                    {"status": "error", "last_error": redact_error_text(str(exc))},
+                    upsert=False,
                 )
                 return {"success": False, "message": "Could not reach Facturapi"}
         if resp.status_code == 401:
-            await self.col.update_one(
-                {"workspace_id": workspace_id},
-                {"$set": {"status": "error", "last_error": "Invalid credentials"}},
+            await self._persist_connection(
+                workspace_id,
+                {"status": "error", "last_error": "Invalid credentials"},
+                upsert=False,
             )
             return {"success": False, "message": "Facturapi rejected the stored secret key"}
         if resp.status_code >= 400:
             return {"success": False, "message": f"Facturapi returned HTTP {resp.status_code}"}
         org = resp.json()
-        await self.col.update_one({"workspace_id": workspace_id}, {"$set": {"status": "connected", "last_error": None}})
+        await self._persist_connection(
+            workspace_id,
+            {"status": "connected", "last_error": None},
+            upsert=False,
+        )
         legal = org.get("legal") or {}
         return {"success": True, "message": f"Connected to {legal.get('legal_name') or legal.get('name') or org.get('id')}"}
 
@@ -320,17 +378,20 @@ class FacturapiAdapter(ProviderAdapter):
             return {"registered": False, "reason": f"HTTP {resp.status_code}"}
 
         body = resp.json()
-        await self.col.update_one(
-            {"workspace_id": workspace_id},
-            {"$set": {
+        await self._persist_connection(
+            workspace_id,
+            {
                 "webhook_id": body.get("id"),
                 "webhook_token_encrypted": encrypt_secret(webhook_token),
                 # Facturapi-issued signing secret (may be absent depending on
                 # API version) — used for defense-in-depth signature checks
                 # in handle_webhook(); our own webhook_token above is the
                 # primary defense regardless of whether this is present.
-                "webhook_signing_secret_encrypted": encrypt_secret(body.get("secret")) if body.get("secret") else None,
-            }},
+                "webhook_signing_secret_encrypted": (
+                    encrypt_secret(body.get("secret")) if body.get("secret") else None
+                ),
+            },
+            upsert=False,
         )
         return {"registered": True, "webhook_id": body.get("id")}
 
@@ -344,7 +405,7 @@ class FacturapiAdapter(ProviderAdapter):
         so Facturapi doesn't retry-storm us; genuine infra errors bubble
         as QuantroError.
         """
-        doc = await self.col.find_one({"connection_id": connection_id})
+        doc = await self._load_connection(connection_id=connection_id)
         if not doc:
             return {"accepted": False, "reason": "unknown_connection"}
 
@@ -385,7 +446,14 @@ class FacturapiAdapter(ProviderAdapter):
 
         # Idempotent dedup on Facturapi's own event id.
         workspace_id = doc["workspace_id"]
-        existing = await self.webhook_events_col.find_one({"event_id": event_id})
+        if connect_store is None:
+            existing = await self.webhook_events_col.find_one({"event_id": event_id})
+        else:
+            existing = await connect_store.find_webhook_event(
+                provider="facturapi",
+                event_id=event_id,
+                mongo_col=self.webhook_events_col,
+            )
         if existing:
             if self._log_audit:
                 await self._log_audit(
@@ -394,7 +462,7 @@ class FacturapiAdapter(ProviderAdapter):
                 )
             return {"accepted": True, "duplicate": True}
 
-        await self.webhook_events_col.insert_one({
+        event_doc = {
             "event_id": event_id,
             "workspace_id": workspace_id,
             "connection_id": connection_id,
@@ -403,7 +471,15 @@ class FacturapiAdapter(ProviderAdapter):
             "signature_valid": signature_valid,
             "received_at": datetime.now(timezone.utc),
             "payload_summary": _summarize_event(payload),
-        })
+        }
+        if connect_store is None:
+            await self.webhook_events_col.insert_one(event_doc)
+        else:
+            await connect_store.insert_webhook_event(
+                provider="facturapi",
+                mongo_col=self.webhook_events_col,
+                doc=event_doc,
+            )
 
         if self._log_audit:
             await self._log_audit(
