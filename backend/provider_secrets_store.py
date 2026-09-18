@@ -1,9 +1,9 @@
-"""Phase 2 — Provider OAuth secrets dual-write (Mongo ↔ Supabase).
+"""Phase 2/4 — Provider secrets dual-write (Mongo ↔ Supabase).
 
-Central persistence for Google/Microsoft integration docs and short-lived
-OAuth CSRF state. Ciphertext only (Fernet via google_oauth /
-microsoft_oauth); this module never encrypts/decrypts and never logs
-token values.
+Central persistence for Google/Microsoft OAuth docs, Facturapi Connect
+secrets (Phase 4), and short-lived OAuth CSRF state. Ciphertext only
+(Fernet); this module never encrypts/decrypts and never logs token or
+API-key values.
 
 Flags
 -----
@@ -40,7 +40,8 @@ SECRETS_PRIMARY = _SECRETS_PRIMARY_RAW if _SECRETS_PRIMARY_RAW in {"mongo", "sup
 _MONGO_MIRROR_RAW = (os.environ.get("QUANTRO_MONGO_MIRROR") or "1").lower().strip()
 MONGO_MIRROR = _MONGO_MIRROR_RAW not in {"0", "false", "no", "off"}
 
-VALID_PROVIDERS = frozenset({"google", "microsoft"})
+VALID_PROVIDERS = frozenset({"google", "microsoft", "facturapi"})
+OAUTH_PROVIDERS = frozenset({"google", "microsoft"})  # CSRF state providers
 
 def _is_sb_configured() -> bool:
     return bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
@@ -126,7 +127,7 @@ async def _sb_request(
         if _table_missing(resp):
             logger.warning(
                 "provider_secrets_store: Supabase table missing for %s %s — "
-                "apply migration 20260918000000_provider_oauth_secrets.sql",
+                "apply Phase 2/4 provider_connections migrations",
                 method, path,
             )
             return None
@@ -174,6 +175,25 @@ def _connection_mongo_to_sb(provider: str, workspace_id: str, fields: Dict[str, 
         elif mongo_key in {"google_user_id", "ms_user_id"}:
             if value is not None:
                 out["provider_user_id"] = value
+        elif mongo_key == "secret_key_encrypted":
+            out["api_key_enc"] = value
+        elif mongo_key == "webhook_token_encrypted":
+            out["webhook_token_enc"] = value
+        elif mongo_key == "webhook_signing_secret_encrypted":
+            out["webhook_secret_enc"] = value
+        elif mongo_key in {
+            "connection_id", "environment", "organization_id", "legal_name",
+            "is_production_ready", "timezone", "webhook_id",
+        }:
+            out[mongo_key] = value
+        elif mongo_key == "last_error":
+            meta = dict(out.get("meta") or {})
+            meta["last_error"] = value
+            out["meta"] = meta
+        elif mongo_key == "meta" and isinstance(value, dict):
+            merged = dict(out.get("meta") or {})
+            merged.update(value)
+            out["meta"] = merged
         elif mongo_key in {
             "org_id", "account_email", "account_name", "user_id", "scopes",
             "expires_at", "connected", "status", "reauthorization_required",
@@ -191,6 +211,9 @@ def _connection_mongo_to_sb(provider: str, workspace_id: str, fields: Dict[str, 
             else:
                 out[mongo_key] = value
         # Ignore unknown keys quietly (e.g. legacy fields).
+    # Facturapi: derive connected from status when not explicit.
+    if provider == "facturapi" and "connected" not in out and "status" in out:
+        out["connected"] = out.get("status") == "connected"
     return out
 
 
@@ -220,7 +243,21 @@ def _connection_sb_to_mongo(row: Dict[str, Any]) -> Dict[str, Any]:
         "last_sync_error": row.get("last_sync_error"),
         "updated_at": _parse_dt(row.get("updated_at")),
         "provider_user_id": row.get("provider_user_id"),
+        # Phase 4 Facturapi fields
+        "secret_key_encrypted": row.get("api_key_enc"),
+        "connection_id": row.get("connection_id"),
+        "environment": row.get("environment"),
+        "organization_id": row.get("organization_id"),
+        "legal_name": row.get("legal_name"),
+        "is_production_ready": row.get("is_production_ready"),
+        "timezone": row.get("timezone"),
+        "webhook_id": row.get("webhook_id"),
+        "webhook_token_encrypted": row.get("webhook_token_enc"),
+        "webhook_signing_secret_encrypted": row.get("webhook_secret_enc"),
     }
+    meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+    if meta.get("last_error") is not None:
+        out["last_error"] = meta.get("last_error")
     # Restore provider-specific id aliases expected by existing callers.
     provider = row.get("provider")
     puid = row.get("provider_user_id")
@@ -454,6 +491,48 @@ async def list_autosync_workspace_ids(
     return out
 
 
+
+async def _sb_get_connection_by_connection_id(
+    provider: str, connection_id: str,
+) -> Optional[Dict[str, Any]]:
+    resp = await _sb_request(
+        "GET",
+        "/rest/v1/provider_connections",
+        params={
+            "provider": f"eq.{provider}",
+            "connection_id": f"eq.{connection_id}",
+            "select": "*",
+            "limit": "1",
+        },
+    )
+    if resp is None or resp.status_code != 200:
+        return None
+    rows = resp.json() or []
+    return rows[0] if rows else None
+
+
+async def get_connection_by_connection_id(
+    *,
+    provider: str,
+    connection_id: str,
+    mongo_col,
+    projection: Optional[Dict[str, int]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Lookup by provider connection_id (Facturapi webhook path)."""
+    if provider not in VALID_PROVIDERS:
+        raise ValueError(f"unknown provider: {provider}")
+
+    if is_secrets_supabase_primary():
+        row = await _sb_get_connection_by_connection_id(provider, connection_id)
+        if row:
+            return _apply_projection(_connection_sb_to_mongo(row), projection)
+        doc = await mongo_col.find_one({"connection_id": connection_id}, projection)
+        return doc
+
+    doc = await mongo_col.find_one({"connection_id": connection_id}, projection)
+    return doc
+
+
 # ── OAuth state ───────────────────────────────────────────────────────
 async def put_oauth_state(
     *,
@@ -473,8 +552,8 @@ async def put_oauth_state(
     ``code_verifier`` is the short-lived Google PKCE verifier (nullable for
     Microsoft / legacy rows). Deleted with the row on consume.
     """
-    if provider not in VALID_PROVIDERS:
-        raise ValueError(f"unknown provider: {provider}")
+    if provider not in OAUTH_PROVIDERS:
+        raise ValueError(f"unknown oauth provider: {provider}")
 
     now = datetime.now(timezone.utc)
     created = created_at or now
@@ -530,8 +609,8 @@ async def consume_oauth_state(
     Short-lived rows: we dual-write on put, so consume checks both to
     tolerate partial writes / primary flip mid-flow.
     """
-    if provider not in VALID_PROVIDERS:
-        raise ValueError(f"unknown provider: {provider}")
+    if provider not in OAUTH_PROVIDERS:
+        raise ValueError(f"unknown oauth provider: {provider}")
 
     async def _from_mongo() -> Optional[Dict[str, Any]]:
         return await mongo_col.find_one_and_delete({"state": state})

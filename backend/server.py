@@ -23,6 +23,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from ai_billing import run_ai_request
 import supabase_admin
 import provider_secrets_store as secrets_store
+import connect_store
 
 # ─── Quantro Connect + Quantro Actions ─────────────────────────────────
 # New platform-layer modules (see integrations/ and actions/ packages).
@@ -4924,8 +4925,15 @@ async def get_integrations(workspace_id: str = Depends(get_current_workspace_id)
     secret_key, ...) — see integrations/secrets.py. Every secret field
     is redacted to a `has_<field>: bool` flag before it leaves this
     endpoint; the encrypted value itself never reaches the browser.
+
+    Phase 4: dual-write catalog via connect_store (default read Mongo).
     """
-    integrations = await integrations_config_col.find({"workspace_id": workspace_id}, {"_id": 0}).to_list(100)
+    integrations = await connect_store.list_integrations_config(
+        workspace_id=workspace_id,
+        mongo_col=integrations_config_col,
+        projection={"_id": 0},
+        limit=100,
+    )
     out = []
     for i in integrations:
         doc = serialize_doc(i)
@@ -4936,7 +4944,12 @@ async def get_integrations(workspace_id: str = Depends(get_current_workspace_id)
 @app.get("/api/integrations/{provider}")
 async def get_integration(provider: str, workspace_id: str = Depends(get_current_workspace_id)):
     """Get a specific integration configuration (secrets redacted — see get_integrations())."""
-    integration = await integrations_config_col.find_one({"workspace_id": workspace_id, "provider": provider}, {"_id": 0})
+    integration = await connect_store.get_integrations_config(
+        workspace_id=workspace_id,
+        provider=provider,
+        mongo_col=integrations_config_col,
+        projection={"_id": 0},
+    )
     if not integration:
         raise HTTPException(status_code=404, detail="Integration not found")
     doc = serialize_doc(integration)
@@ -4964,7 +4977,12 @@ async def update_integration(provider: str, req: IntegrationUpdate, workspace_id
     # frontend never re-populates a secret input with the real value, so
     # an untouched field arrives here empty) — merge onto the existing
     # encrypted config instead of overwriting it with an empty string.
-    existing_doc = await integrations_config_col.find_one({"workspace_id": workspace_id, "provider": provider}, {"_id": 0, "config": 1})
+    existing_doc = await connect_store.get_integrations_config(
+        workspace_id=workspace_id,
+        provider=provider,
+        mongo_col=integrations_config_col,
+        projection={"_id": 0, "config": 1},
+    )
     existing_config = (existing_doc or {}).get("config") or {}
     incoming_config = dict(req.config)
     for secret_field in integration_secrets.SECRET_FIELD_NAMES:
@@ -4981,9 +4999,11 @@ async def update_integration(provider: str, req: IntegrationUpdate, workspace_id
     if req.status == "connected":
         update_data["last_sync_at"] = now_iso()
 
-    result = await integrations_config_col.update_one(
-        {"workspace_id": workspace_id, "provider": provider},
-        {"$set": update_data}
+    result = await connect_store.update_integrations_config(
+        workspace_id=workspace_id,
+        provider=provider,
+        mongo_col=integrations_config_col,
+        fields=update_data,
     )
 
     if result.matched_count == 0:
@@ -4992,7 +5012,12 @@ async def update_integration(provider: str, req: IntegrationUpdate, workspace_id
     await log_activity("system", f"{provider.title()} integration updated", f"Status: {req.status}", provider, "integration", workspace_id=workspace_id)
     await log_audit(f"integration.{req.status}", f"{provider} -> {req.status}", workspace_id=workspace_id, metadata={"provider": provider})
 
-    updated = await integrations_config_col.find_one({"workspace_id": workspace_id, "provider": provider}, {"_id": 0})
+    updated = await connect_store.get_integrations_config(
+        workspace_id=workspace_id,
+        provider=provider,
+        mongo_col=integrations_config_col,
+        projection={"_id": 0},
+    )
     doc = serialize_doc(updated)
     doc["config"] = integration_secrets.redact_config(doc.get("config"))
     return doc
@@ -5000,7 +5025,12 @@ async def update_integration(provider: str, req: IntegrationUpdate, workspace_id
 @app.post("/api/integrations/{provider}/test")
 async def test_integration(provider: str, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("leader"))):
     """Test an integration connection (simulated)."""
-    integration = await integrations_config_col.find_one({"workspace_id": workspace_id, "provider": provider}, {"_id": 0})
+    integration = await connect_store.get_integrations_config(
+        workspace_id=workspace_id,
+        provider=provider,
+        mongo_col=integrations_config_col,
+        projection={"_id": 0},
+    )
     if not integration:
         raise HTTPException(status_code=404, detail="Integration not found")
     

@@ -59,16 +59,23 @@ class FakeAsyncCollection:
         return doc
 
     async def update_one(self, query: Dict[str, Any], update: Dict[str, Any], upsert: bool = False):
+        class _Result:
+            def __init__(self, matched: int, modified: int):
+                self.matched_count = matched
+                self.modified_count = modified
+
         for doc in self._docs:
             if _match(doc, query):
                 doc.update(update.get("$set", {}))
                 for key in update.get("$unset", {}):
                     doc.pop(key, None)
-                return
+                return _Result(1, 1)
         if upsert:
             new_doc = dict(query)
             new_doc.update(update.get("$set", {}))
             self._docs.append(new_doc)
+            return _Result(0, 0)
+        return _Result(0, 0)
 
 
     async def find_one_and_update(self, query: Dict[str, Any], update: Dict[str, Any], projection: Optional[Dict[str, int]] = None, return_document=None):
@@ -92,8 +99,9 @@ class FakeAsyncCollection:
     async def count_documents(self, query: Dict[str, Any]) -> int:
         return sum(1 for d in self._docs if _match(d, query))
 
-    def find(self, query: Dict[str, Any]):
-        return _FakeCursor([d for d in self._docs if _match(d, query)])
+    def find(self, query: Dict[str, Any], projection: Optional[Dict[str, int]] = None):
+        rows = [_project(copy.deepcopy(d), projection) for d in self._docs if _match(d, query)]
+        return _FakeCursor(rows)
 
 
 class _FakeCursor:
