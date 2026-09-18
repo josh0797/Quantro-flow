@@ -304,6 +304,7 @@ class TestOAuthState:
                     workspace_id="ws1",
                     return_to="/welcome/inbox",
                     redirect_uri="https://api.example/callback",
+                    code_verifier="pkce-verifier-abc",
                 )
             # Consume from mongo; also delete SB twin
             mock_client.request = AsyncMock(return_value=_mock_resp(204, None))
@@ -316,6 +317,7 @@ class TestOAuthState:
         assert doc is not None
         assert doc["workspace_id"] == "ws1"
         assert doc["state"] == "abc123"
+        assert doc["code_verifier"] == "pkce-verifier-abc"
         # Consumed from mongo
         assert col.rows == []
 
@@ -337,6 +339,7 @@ class TestOAuthState:
                         "workspace_id": "ws",
                         "return_to": "/welcome/inbox",
                         "redirect_uri": "https://x/cb",
+                        "code_verifier": None,
                         "expires_at": expires.isoformat(),
                     }])
                 return _mock_resp(204, None)
@@ -372,6 +375,7 @@ class TestOAuthState:
                         "user_id": "u",
                         "return_to": "/welcome/inbox",
                         "redirect_uri": "https://x/cb",
+                        "code_verifier": "pkce-from-sb",
                         "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
                     }])
                 return _mock_resp(204, None)
@@ -387,6 +391,7 @@ class TestOAuthState:
 
         doc = asyncio.run(_run())
         assert doc["workspace_id"] == "sb-ws"
+        assert doc["code_verifier"] == "pkce-from-sb"
         # Mongo twin cleaned up
         assert col.rows == []
 
@@ -443,3 +448,86 @@ class TestFieldMapping:
         })
         assert doc["access_token"] == "x"
         assert doc["ms_user_id"] == "ms-9"
+
+
+class TestGoogleOauthPkce:
+    """PKCE round-trip: verifier from build must reach fetch_token on exchange.
+
+    Mocks google-auth-oauthlib Flow so tests run without the Google libs
+    installed in the sandbox.
+    """
+
+    def test_build_returns_verifier_and_exchange_restores_it(self):
+        import google_oauth as goog
+
+        captured = {}
+
+        class FakeFlow:
+            def __init__(self):
+                self.code_verifier = None
+                self.credentials = MagicMock(
+                    token="access",
+                    refresh_token="refresh",
+                    expiry=None,
+                    scopes=list(goog.GOOGLE_SCOPES),
+                )
+
+            @classmethod
+            def from_client_config(cls, *a, **k):
+                return cls()
+
+            def authorization_url(self, **kwargs):
+                self.code_verifier = "generated-verifier-xyz"
+                return ("https://accounts.google.com/o/oauth2/auth?x=1", "state")
+
+            def fetch_token(self, code=None):
+                captured["code"] = code
+                captured["code_verifier"] = self.code_verifier
+
+        with patch.object(goog, "Flow", FakeFlow), \
+             patch.object(goog, "build", side_effect=Exception("skip userinfo")):
+            url, verifier = goog.build_authorization_url(
+                state="st", redirect_uri="https://api.example/cb",
+            )
+            assert url.startswith("https://accounts.google.com/")
+            assert verifier == "generated-verifier-xyz"
+
+            creds, profile = goog.exchange_code_for_tokens(
+                "auth-code", "https://api.example/cb", code_verifier=verifier,
+            )
+            assert captured["code"] == "auth-code"
+            assert captured["code_verifier"] == "generated-verifier-xyz"
+            assert creds.token == "access"
+            assert isinstance(profile, dict)
+
+    def test_put_oauth_state_dual_writes_code_verifier(self):
+        store = _reload_store(QUANTRO_SECRETS_PRIMARY="mongo")
+        col = FakeMongoCol()
+        sb_payloads = []
+
+        async def _run():
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+
+            async def request(method, url, headers=None, json=None, params=None):
+                if json:
+                    sb_payloads.append(json)
+                return _mock_resp(201, None)
+
+            mock_client.request = AsyncMock(side_effect=request)
+            with patch("httpx.AsyncClient", return_value=mock_client):
+                await store.put_oauth_state(
+                    provider="google",
+                    mongo_col=col,
+                    state="pkce-state",
+                    user_id="u1",
+                    workspace_id="ws1",
+                    return_to="/welcome/inbox",
+                    redirect_uri="https://api.example/cb",
+                    code_verifier="v-123",
+                )
+
+        asyncio.run(_run())
+        assert col.rows[0]["code_verifier"] == "v-123"
+        assert sb_payloads and sb_payloads[0].get("code_verifier") == "v-123"

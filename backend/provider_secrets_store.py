@@ -464,10 +464,15 @@ async def put_oauth_state(
     workspace_id: Optional[str],
     return_to: Optional[str],
     redirect_uri: Optional[str],
+    code_verifier: Optional[str] = None,
     created_at: Optional[datetime] = None,
     expires_at: Optional[datetime] = None,
 ) -> None:
-    """Persist CSRF state. Dual-write always when Supabase is configured."""
+    """Persist CSRF state. Dual-write always when Supabase is configured.
+
+    ``code_verifier`` is the short-lived Google PKCE verifier (nullable for
+    Microsoft / legacy rows). Deleted with the row on consume.
+    """
     if provider not in VALID_PROVIDERS:
         raise ValueError(f"unknown provider: {provider}")
 
@@ -481,6 +486,7 @@ async def put_oauth_state(
         "workspace_id": workspace_id,
         "return_to": return_to,
         "redirect_uri": redirect_uri,
+        "code_verifier": code_verifier,
         "created_at": created,
         "expires_at": expires,
     }
@@ -496,6 +502,7 @@ async def put_oauth_state(
             "workspace_id": workspace_id,
             "return_to": return_to,
             "redirect_uri": redirect_uri,
+            "code_verifier": code_verifier,
             "created_at": _iso(created),
             "expires_at": _iso(expires),
         }
@@ -559,6 +566,7 @@ async def consume_oauth_state(
             "workspace_id": row.get("workspace_id"),
             "return_to": row.get("return_to"),
             "redirect_uri": row.get("redirect_uri"),
+            "code_verifier": row.get("code_verifier"),
             "created_at": _parse_dt(row.get("created_at")),
             "expires_at": _parse_dt(row.get("expires_at")),
             "provider": row.get("provider"),

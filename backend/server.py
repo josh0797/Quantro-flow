@@ -5364,6 +5364,10 @@ async def google_oauth_start(
     redirect_uri = goog.resolve_redirect_uri(base_url)
     state = uuid.uuid4().hex
 
+    auth_url, code_verifier = goog.build_authorization_url(
+        state=state, redirect_uri=redirect_uri
+    )
+
     await secrets_store.put_oauth_state(
         provider="google",
         mongo_col=google_oauth_state_col,
@@ -5372,11 +5376,11 @@ async def google_oauth_start(
         workspace_id=workspace_id,
         return_to=_sanitize_return_to(return_to),
         redirect_uri=redirect_uri,
+        code_verifier=code_verifier,
         created_at=datetime.now(timezone.utc),
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
     )
 
-    auth_url = goog.build_authorization_url(state=state, redirect_uri=redirect_uri)
     return {"auth_url": auth_url, "state": state}
 
 
@@ -5486,7 +5490,9 @@ async def google_oauth_callback(
     return_path = return_to  # now safe to use the real destination
 
     try:
-        creds, profile = goog.exchange_code_for_tokens(code, redirect_uri)
+        creds, profile = goog.exchange_code_for_tokens(
+            code, redirect_uri, code_verifier=state_doc.get("code_verifier")
+        )
     except Exception as exc:  # noqa: BLE001
         # Log the real exception server-side only — never put exception
         # text in a URL the browser will carry around (it can leak into
@@ -6510,13 +6516,21 @@ async def connect_google_request_permission(
     base_url = str(request.base_url).rstrip("/")
     redirect_uri = goog.resolve_redirect_uri(base_url)
     state = uuid.uuid4().hex
-    await google_oauth_state_col.insert_one({
-        "state": state, "user_id": user.user_id, "workspace_id": workspace_id,
-        "return_to": _sanitize_return_to(return_to), "redirect_uri": redirect_uri,
-        "created_at": datetime.now(timezone.utc),
-        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
-    })
-    auth_url = goog.build_incremental_authorization_url(state=state, redirect_uri=redirect_uri, additional_scopes=[scope])
+    auth_url, code_verifier = goog.build_incremental_authorization_url(
+        state=state, redirect_uri=redirect_uri, additional_scopes=[scope]
+    )
+    await secrets_store.put_oauth_state(
+        provider="google",
+        mongo_col=google_oauth_state_col,
+        state=state,
+        user_id=user.user_id,
+        workspace_id=workspace_id,
+        return_to=_sanitize_return_to(return_to),
+        redirect_uri=redirect_uri,
+        code_verifier=code_verifier,
+        created_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
     return {"auth_url": auth_url, "state": state}
 
 

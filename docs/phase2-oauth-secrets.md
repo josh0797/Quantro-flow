@@ -28,7 +28,11 @@ Apply:
 
 ```text
 supabase/migrations/20260918000000_provider_oauth_secrets.sql
+supabase/migrations/20260918180000_oauth_states_code_verifier.sql
 ```
+
+The second migration adds nullable ``oauth_states.code_verifier`` for Google
+PKCE (short-lived; deleted on consume).
 
 Tables are **service_role only**: RLS enabled, no policies for `anon` /
 `authenticated` (Konta vault posture). The FastAPI backend talks via
@@ -123,3 +127,22 @@ PYTHONPATH=backend pytest test_phase2_oauth_secrets.py -q
 - Store: `backend/provider_secrets_store.py`
 - Routes: `backend/server.py` (google/microsoft status, start, callback, sync, disconnect, auto-sync)
 - Crypto: `backend/google_oauth.py`, `backend/microsoft_oauth.py` (unchanged key names)
+
+## Google PKCE / `exchange_failed` (`Missing code verifier`)
+
+Fly / Google token exchange can fail with:
+
+```text
+(invalid_grant) Missing code verifier.
+```
+
+Cause: `google-auth-oauthlib` `Flow.authorization_url()` generates a PKCE
+`code_verifier`, but the callback used to construct a **new** `Flow` without
+restoring it before `fetch_token`. Fix: `build_authorization_url` returns
+`(url, code_verifier)`; start persists it via `put_oauth_state`; callback
+passes `code_verifier=state_doc.get("code_verifier")` into
+`exchange_code_for_tokens`. Microsoft uses MSAL confidential client (no Flow
+PKCE) and does not need this column.
+
+After applying the SQL migration, **redeploy Fly** so the backend stores and
+reads `code_verifier`.
