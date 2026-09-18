@@ -1,28 +1,26 @@
-"""Supabase REST helpers for Phase 7c — read/write through PostgREST.
+"""Supabase REST helpers for identity/tenancy (Phase 7c → Phase 1).
 
 This module is the single place the FastAPI server talks to Supabase
-(outside of the AI billing wrapper in ai_billing.py). It uses ``httpx``
-directly against the PostgREST endpoints and never imports
-``supabase-py`` so we keep the dependency surface small.
+for org membership, invites, and audit (outside of the AI billing
+wrapper in ai_billing.py). It uses ``httpx`` directly against
+PostgREST and never imports ``supabase-py``.
 
 Tables touched:
   * organizations            (read-only)
-  * org_members              (read + insert + update + delete)
-  * invitations              (read + insert + update)
-  * org_audit_logs           (read + insert)  — append-only from app
+  * org_members              (read + insert + update + delete)  — SoT
+  * invitations              (read + insert + update)           — SoT
+  * org_audit_logs           (read + insert)                    — SoT
   * people_onboarding_steps  (read + upsert + update)
 
 Auth modes:
-  * "user"    — uses the caller's Supabase JWT (RLS enforced).
-                Adequate for reads + most writes governed by policies.
-  * "service" — uses SUPABASE_SERVICE_ROLE_KEY when available; bypasses
-                RLS. Only used for fan-out events that can't be
-                expressed cleanly as a user-side policy (e.g. logging
-                an audit event when a webhook removes a member).
+  * "user"    — caller's Supabase JWT (RLS enforced).
+  * "service" — SUPABASE_SERVICE_ROLE_KEY; bypasses RLS for RBAC
+                lookups, invite accept, and audit fan-out.
 
-Every function is intentionally **best-effort**: failures log a
-warning and return None / empty list. The backend always has the
-MongoDB fallback during the dual-write transition.
+Phase 1: ``QUANTRO_DB_PRIMARY`` defaults to ``supabase``. Set it to
+``mongo`` to roll back reads. ``QUANTRO_MONGO_MIRROR`` (default on)
+keeps optional Mongo identity writes during the cutover; set to ``0``
+to freeze the Mongo mirror.
 """
 from __future__ import annotations
 
@@ -31,7 +29,6 @@ import os
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import HTTPException
 
 logger = logging.getLogger("quantro.supabase_admin")
 
@@ -39,12 +36,20 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
-# Phase 7c rollout switch. Values:
-#   "mongo"     — default. Read/write Mongo, shadow-write Supabase
-#                 best-effort. UI behavior is unchanged.
-#   "supabase"  — read from Supabase, dual-write to both. Used once
-#                 the migration has been applied and the backfill ran.
-DB_PRIMARY = (os.environ.get("QUANTRO_DB_PRIMARY") or "mongo").lower().strip()
+# Phase 1 identity SoT switch. Values:
+#   "supabase"  — default. Read/write org_members / invitations /
+#                 org_audit_logs as source of truth. Optional Mongo
+#                 mirror via QUANTRO_MONGO_MIRROR (default on).
+#   "mongo"     — rollback. Read Mongo; still shadow-write Supabase
+#                 when configured (Phase 7c dual-write).
+DB_PRIMARY = (os.environ.get("QUANTRO_DB_PRIMARY") or "supabase").lower().strip()
+
+# Optional Mongo mirror for identity collections. Default "1" so a
+# rollback to QUANTRO_DB_PRIMARY=mongo still has recent rows. Set to
+# "0"/"false"/"off" to stop writing workspace_members / invites /
+# audit_log once Supabase SoT is trusted.
+_MONGO_MIRROR_RAW = (os.environ.get("QUANTRO_MONGO_MIRROR") or "1").lower().strip()
+MONGO_MIRROR = _MONGO_MIRROR_RAW not in {"0", "false", "no", "off"}
 
 # Default Quantro org for the legacy single-tenant workspace. Surfaced
 # so the workspace-id mapping helper can resolve ``DEFAULT_WORKSPACE_ID``
@@ -159,6 +164,85 @@ async def list_orgs_for_user(user_id: str) -> List[Dict[str, Any]]:
     return resp.json() or []
 
 
+
+async def get_org_member(org_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+    """Return one ``org_members`` row for ``(org_id, user_id)``.
+
+    Prefers the service-role key so RBAC checks work without threading a
+    user JWT through every dependency. Returns None if not found or on
+    transport/config failure.
+    """
+    if not org_id or not user_id:
+        return None
+    use_service = bool(SUPABASE_SERVICE_ROLE_KEY)
+    resp = await _request(
+        "GET",
+        "/rest/v1/org_members",
+        access_token=None,
+        use_service=use_service,
+        params={
+            "org_id": f"eq.{org_id}",
+            "user_id": f"eq.{user_id}",
+            "select": "id,org_id,user_id,role,joined_at",
+            "limit": "1",
+        },
+    )
+    if resp is None or resp.status_code != 200:
+        return None
+    rows = resp.json() or []
+    return rows[0] if rows else None
+
+
+async def insert_org_member(
+    *,
+    org_id: str,
+    user_id: str,
+    role: str,
+    access_token: Optional[str] = None,
+    joined_at: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Insert an ``org_members`` row. Prefers service-role for invite
+    accept / provisioning paths where RLS may not yet see the member."""
+    payload: Dict[str, Any] = {
+        "org_id": org_id,
+        "user_id": user_id,
+        "role": role,
+    }
+    if joined_at:
+        payload["joined_at"] = joined_at
+
+    if SUPABASE_SERVICE_ROLE_KEY:
+        resp = await _request(
+            "POST",
+            "/rest/v1/org_members",
+            access_token=None,
+            use_service=True,
+            json=payload,
+            prefer="return=representation",
+        )
+        if resp is not None and resp.status_code < 400:
+            rows = resp.json() or []
+            return rows[0] if isinstance(rows, list) and rows else (rows or payload)
+
+    if access_token:
+        resp = await _request(
+            "POST",
+            "/rest/v1/org_members",
+            access_token=access_token,
+            json=payload,
+            prefer="return=representation",
+        )
+        if resp is not None and resp.status_code < 400:
+            rows = resp.json() or []
+            return rows[0] if isinstance(rows, list) and rows else (rows or payload)
+        if resp is not None:
+            logger.warning(
+                "supabase_admin.insert_org_member %s: %s",
+                resp.status_code, resp.text[:200],
+            )
+    return None
+
+
 async def list_invitations(org_id: str, access_token: str) -> List[Dict[str, Any]]:
     resp = await _request(
         "GET",
@@ -175,22 +259,44 @@ async def list_invitations(org_id: str, access_token: str) -> List[Dict[str, Any
     return resp.json() or []
 
 
-async def get_invitation_by_token(token: str, access_token: str) -> Optional[Dict[str, Any]]:
-    """Look up a single invite by its UUID token."""
-    resp = await _request(
-        "GET",
-        "/rest/v1/invitations",
-        access_token=access_token,
-        params={
-            "token": f"eq.{token}",
-            "select": "id,org_id,email,role,token,accepted,expires_at,created_at,full_name,invited_by",
-            "limit": "1",
-        },
-    )
-    if resp is None or resp.status_code != 200:
-        return None
-    rows = resp.json() or []
-    return rows[0] if rows else None
+async def get_invitation_by_token(
+    token: str,
+    access_token: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Look up a single invite by its token (UUID or opaque).
+
+    Tries the user JWT first (when provided), then service-role so
+    invite peek/accept works before the invitee is an org member.
+    """
+    params = {
+        "token": f"eq.{token}",
+        "select": "id,org_id,email,role,token,accepted,expires_at,created_at,full_name,invited_by",
+        "limit": "1",
+    }
+    if access_token:
+        resp = await _request(
+            "GET",
+            "/rest/v1/invitations",
+            access_token=access_token,
+            params=params,
+        )
+        if resp is not None and resp.status_code == 200:
+            rows = resp.json() or []
+            if rows:
+                return rows[0]
+    if SUPABASE_SERVICE_ROLE_KEY:
+        resp = await _request(
+            "GET",
+            "/rest/v1/invitations",
+            access_token=None,
+            use_service=True,
+            params=params,
+        )
+        if resp is None or resp.status_code != 200:
+            return None
+        rows = resp.json() or []
+        return rows[0] if rows else None
+    return None
 
 
 async def list_audit_logs(
@@ -434,18 +540,35 @@ def is_supabase_primary() -> bool:
 
 
 def is_dual_write_enabled() -> bool:
-    """True when shadow writes to Supabase should fire (regardless of
-    which DB is the read primary)."""
+    """True when writes to Supabase should fire (SoT or shadow)."""
     return _is_configured()
+
+
+def is_mongo_mirror_enabled() -> bool:
+    """True when identity writes should also hit Mongo collections.
+
+    Always True when Supabase is not configured (Mongo is the only store).
+    When Supabase is SoT, defaults to True so rollback stays safe; set
+    QUANTRO_MONGO_MIRROR=0 to freeze/deprecate the Mongo mirror.
+    """
+    if not _is_configured():
+        return True
+    return MONGO_MIRROR
+
+
+def is_mongo_identity_primary() -> bool:
+    """True when Mongo is still the identity read primary (rollback)."""
+    return not is_supabase_primary()
 
 
 # Convenience: surface a one-shot health check the lifespan uses on boot.
 async def health_check() -> Dict[str, Any]:
     if not _is_configured():
-        return {"configured": False}
+        return {"configured": False, "primary": DB_PRIMARY, "mongo_mirror": True}
     out = {
         "configured": True,
         "primary": DB_PRIMARY,
+        "mongo_mirror": is_mongo_mirror_enabled(),
         "service_role_available": bool(SUPABASE_SERVICE_ROLE_KEY),
         "default_org_id": DEFAULT_ORG_ID or None,
     }
