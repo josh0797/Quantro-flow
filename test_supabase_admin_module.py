@@ -43,10 +43,13 @@ print("=" * 60)
 try:
     result = supabase_admin.is_supabase_primary()
     print(f"Result: {result}")
-    if result is False:
-        print("✅ PASS - is_supabase_primary() returns False (mongo mode)")
+    # Phase 1 default is supabase when configured; mongo is rollback.
+    primary = os.environ.get("QUANTRO_DB_PRIMARY", "supabase").lower()
+    expected = primary == "supabase"
+    if result is expected:
+        print(f"✅ PASS - is_supabase_primary() returns {result} (QUANTRO_DB_PRIMARY={primary})")
     else:
-        print(f"⚠️  WARN - Expected False (mongo mode), got {result}")
+        print(f"⚠️  WARN - Expected {expected} for primary={primary}, got {result}")
 except Exception as e:
     print(f"❌ ERROR - {e}")
 
