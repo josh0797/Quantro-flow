@@ -20,7 +20,7 @@ import {
 import { useLanguage } from '../context/LanguageContext';
 import {
   getConnectProviders, testConnection, syncConnection, disconnectProvider,
-  connectFacturapi, requestGooglePermission, getActions, getActionExecutions,
+  connectFacturapi, requestGooglePermission, requestMicrosoftPermission, getActions, getActionExecutions,
   startGoogleOAuth, startMicrosoftOAuth,
 } from '../lib/api';
 
@@ -233,9 +233,14 @@ function ProviderDrawer({ provider, open, onClose, onChanged, t }) {
     }
   };
 
-  const handleGrantPermission = async (actionId) => {
+  const handleGrantPermission = async (providerId, actionId) => {
     try {
-      const { auth_url } = await requestGooglePermission(actionId, '/settings');
+      const returnTo = '/connect';
+      const req =
+        providerId === 'microsoft'
+          ? requestMicrosoftPermission(actionId, returnTo)
+          : requestGooglePermission(actionId, returnTo);
+      const { auth_url } = await req;
       window.location.href = auth_url;
     } catch {
       toast.error(t('connect.toasts.action_failed'));
@@ -322,8 +327,8 @@ function ProviderDrawer({ provider, open, onClose, onChanged, t }) {
                   return (
                     <div key={scope} className="flex items-center justify-between gap-2 rounded-lg border border-[hsl(var(--warning)/0.3)] bg-[hsl(var(--warning)/0.06)] px-3 py-2">
                       <span className="text-xs font-mono text-foreground truncate">{scope}</span>
-                      {provider.provider_id === 'google' && actionForScope && (
-                        <Button size="sm" variant="outline" onClick={() => handleGrantPermission(actionForScope.action_id)} data-testid="drawer-grant-permission-button">
+                      {(provider.provider_id === 'google' || provider.provider_id === 'microsoft') && actionForScope && (
+                        <Button size="sm" variant="outline" onClick={() => handleGrantPermission(provider.provider_id, actionForScope.action_id)} data-testid="drawer-grant-permission-button">
                           <Lock size={12} className="mr-1.5" />{t('connect.drawer.grant_permission')}
                         </Button>
                       )}

@@ -50,10 +50,12 @@ from actions.store import (
     wrap_action_policies_col,
 )
 from inbox_store import wrap_inbox_col
+from sync_lock import acquire_sync_lock_lease
 from product_domain_store import (
     wrap_activity_col, wrap_content_items_col, wrap_content_templates_col,
     wrap_contacts_col, wrap_calendar_col, product_domains_health,
     canonical_calendar_write, normalize_calendar_doc,
+    upsert_calendar_external_event,
 )
 
 # ─── Config ────────────────────────────────────────────────────────────
@@ -1691,17 +1693,13 @@ async def _perform_google_sync_for_workspace(workspace_id: str) -> Dict[str, Any
                 updated_at=now,
                 extra={"is_real": True},
             )
-            await calendar_col.update_one(
-                {
-                    "workspace_id": workspace_id,
-                    "external_provider": "google",
-                    "external_event_id": ev["gcal_id"],
-                },
-                {
-                    "$set": {k: v for k, v in canonical.items() if k != "event_id"},
-                    "$setOnInsert": {"event_id": event_id, "created_at": now},
-                },
-                upsert=True,
+            await upsert_calendar_external_event(
+                calendar_col,
+                workspace_id=workspace_id,
+                provider="google",
+                external_event_id=ev["gcal_id"],
+                canonical=canonical,
+                now=now,
             )
             counts["events"] += 1
         await secrets_store.patch_connection(
@@ -1744,10 +1742,10 @@ _SYNC_LOCK_WINDOW_SECONDS = int(os.environ.get("QUANTRO_SYNC_LOCK_WINDOW_SECONDS
 _local_sync_locks: Dict[str, float] = {}
 
 
-async def _acquire_sync_lock(provider: str, workspace_id: str) -> bool:
+async def _acquire_sync_lock(provider: str, workspace_id: str, owner_id: Optional[str] = None) -> bool:
     """Return True if this instance should run sync for provider+workspace.
 
-    Prefer Mongo upsert lock (multi-instance); fall back to in-process
+    Prefer atomic Mongo lease (multi-instance); fall back to in-process
     window if Mongo is unavailable.
     """
     import time as _time
@@ -1756,19 +1754,21 @@ async def _acquire_sync_lock(provider: str, workspace_id: str) -> bool:
     local_expires = _local_sync_locks.get(key) or 0
     if local_expires > now:
         return False
+    acquired = False
     try:
         lock_col = db["sync_locks"]
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=_SYNC_LOCK_WINDOW_SECONDS)
-        existing = await lock_col.find_one({"_id": key})
-        if existing and existing.get("locked_at") and existing["locked_at"].replace(tzinfo=timezone.utc) > cutoff:
-            return False
-        await lock_col.update_one(
-            {"_id": key},
-            {"$set": {"provider": provider, "workspace_id": workspace_id, "locked_at": datetime.now(timezone.utc)}},
-            upsert=True,
+        acquired = await acquire_sync_lock_lease(
+            lock_col,
+            provider=provider,
+            workspace_id=workspace_id,
+            window_seconds=_SYNC_LOCK_WINDOW_SECONDS,
+            owner_id=owner_id,
         )
     except Exception:  # noqa: BLE001
-        pass
+        # Mongo unavailable — single-process fallback only.
+        acquired = True
+    if not acquired:
+        return False
     _local_sync_locks[key] = now + _SYNC_LOCK_WINDOW_SECONDS
     return True
 
@@ -5997,17 +5997,13 @@ async def google_oauth_sync(
             updated_at=now,
             extra={"is_real": True},
         )
-        await calendar_col.update_one(
-            {
-                "workspace_id": workspace_id,
-                "external_provider": "google",
-                "external_event_id": ev["gcal_id"],
-            },
-            {
-                "$set": {k: v for k, v in canonical.items() if k != "event_id"},
-                "$setOnInsert": {"event_id": event_id, "created_at": now},
-            },
-            upsert=True,
+        await upsert_calendar_external_event(
+            calendar_col,
+            workspace_id=workspace_id,
+            provider="google",
+            external_event_id=ev["gcal_id"],
+            canonical=canonical,
+            now=now,
         )
         counts["events"] += 1
 
@@ -6232,7 +6228,10 @@ async def microsoft_oauth_callback(
     return_path = return_to
 
     try:
-        token_payload, profile = msoa.exchange_code_for_tokens(code, redirect_uri)
+        requested_scopes = state_doc.get("requested_scopes") or None
+        token_payload, profile = msoa.exchange_code_for_tokens(
+            code, redirect_uri, scopes=requested_scopes,
+        )
     except Exception as exc:  # noqa: BLE001
         print(f"[microsoft_oauth_callback] token exchange failed for workspace={workspace_id}: {exc}")
         return _bounce("microsoft_connected=error&reason=exchange_failed")
@@ -6392,17 +6391,13 @@ async def _perform_microsoft_sync_for_workspace(workspace_id: str) -> Dict[str, 
                 updated_at=now,
                 extra={"is_real": True},
             )
-            await calendar_col.update_one(
-                {
-                    "workspace_id": workspace_id,
-                    "external_provider": "microsoft",
-                    "external_event_id": ev["ms_id"],
-                },
-                {
-                    "$set": {k: v for k, v in canonical.items() if k != "event_id"},
-                    "$setOnInsert": {"event_id": event_id, "created_at": now},
-                },
-                upsert=True,
+            await upsert_calendar_external_event(
+                calendar_col,
+                workspace_id=workspace_id,
+                provider="microsoft",
+                external_event_id=ev["ms_id"],
+                canonical=canonical,
+                now=now,
             )
             counts["events"] += 1
         await secrets_store.patch_connection(
@@ -6916,6 +6911,7 @@ async def connect_microsoft_request_permission(
     base_url = str(request.base_url).rstrip("/")
     redirect_uri = msoa.resolve_redirect_uri(base_url)
     state = uuid.uuid4().hex
+    requested_scopes = msoa.scopes_for_incremental([scope])
     auth_url = msoa.build_incremental_authorization_url(
         state=state, redirect_uri=redirect_uri, additional_scopes=[scope]
     )
@@ -6927,6 +6923,7 @@ async def connect_microsoft_request_permission(
         workspace_id=workspace_id,
         return_to=_sanitize_return_to(return_to),
         redirect_uri=redirect_uri,
+        requested_scopes=requested_scopes,
         created_at=datetime.now(timezone.utc),
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
     )

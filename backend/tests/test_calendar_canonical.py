@@ -155,3 +155,328 @@ async def test_duplicate_external_same_query_no_second_insert_key():
             upsert=True,
         )
     assert wrapped._mongo.keys[0] == wrapped._mongo.keys[1]
+
+
+@pytest.mark.asyncio
+async def test_calendar_on_conflict_external_vs_internal():
+    from product_domain_store import calendar_on_conflict
+
+    assert calendar_on_conflict({"external_event_id": "g1", "event_id": "e1"}) == (
+        "workspace_id,external_provider,external_event_id"
+    )
+    assert calendar_on_conflict({"external_event_id": None, "event_id": "e1"}) == "workspace_id,event_id"
+    assert calendar_on_conflict({"event_id": "e1"}) == "workspace_id,event_id"
+
+
+@pytest.mark.asyncio
+async def test_sb_upsert_uses_external_conflict_and_preserves_event_id(monkeypatch):
+    """Google first sync insert; second sync same external_event_id keeps event_id."""
+    from product_domain_store import DualWriteCollection, CALENDAR_CFG, canonical_calendar_write
+    import product_domain_store as pds
+
+    posts = []
+    existing_row = None
+
+    class FakeResp:
+        def __init__(self, status_code=201, payload=None, text=""):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = text
+
+        def json(self):
+            return self._payload
+
+    async def fake_sb_request(method, path, **kwargs):
+        nonlocal existing_row
+        if method == "GET":
+            if existing_row:
+                return FakeResp(200, [existing_row])
+            return FakeResp(200, [])
+        if method == "POST":
+            posts.append({"path": path, "json": kwargs.get("json")})
+            existing_row = dict(kwargs.get("json") or {})
+            return FakeResp(201)
+        return FakeResp(200)
+
+    monkeypatch.setattr(pds, "_sb_request", fake_sb_request)
+    monkeypatch.setattr(pds, "_is_sb_configured", lambda: True)
+    monkeypatch.setenv("QUANTRO_CALENDAR_PRIMARY", "mongo")
+
+    class FakeMongo:
+        async def insert_one(self, doc):
+            return doc
+
+        async def update_one(self, *a, **k):
+            class R:
+                matched_count = 1
+                modified_count = 1
+                upserted_id = None
+            return R()
+
+    store = DualWriteCollection(FakeMongo(), CALENDAR_CFG)
+    c1 = canonical_calendar_write(
+        workspace_id="ws1", event_id="evt-first", external_provider="google",
+        external_event_id="gcal-xyz", title="A", source="google_calendar",
+    )
+    assert await store._sb_upsert_doc(c1) is True
+    assert "on_conflict=workspace_id,external_provider,external_event_id" in posts[0]["path"]
+    assert posts[0]["json"]["event_id"] == "evt-first"
+
+    c2 = canonical_calendar_write(
+        workspace_id="ws1", event_id="evt-SECOND-NEW-UUID", external_provider="google",
+        external_event_id="gcal-xyz", title="A2", source="google_calendar",
+    )
+    assert await store._sb_upsert_doc(c2) is True
+    assert posts[1]["json"]["event_id"] == "evt-first"  # preserved
+    assert posts[1]["json"]["title"] == "A2"
+
+
+@pytest.mark.asyncio
+async def test_sb_upsert_internal_uses_event_id_conflict(monkeypatch):
+    from product_domain_store import DualWriteCollection, CALENDAR_CFG, canonical_calendar_write
+    import product_domain_store as pds
+
+    posts = []
+
+    class FakeResp:
+        status_code = 201
+        text = ""
+
+        def json(self):
+            return []
+
+    async def fake_sb_request(method, path, **kwargs):
+        if method == "POST":
+            posts.append(path)
+        return FakeResp()
+
+    monkeypatch.setattr(pds, "_sb_request", fake_sb_request)
+    monkeypatch.setattr(pds, "_is_sb_configured", lambda: True)
+
+    class FakeMongo:
+        async def insert_one(self, doc):
+            return doc
+
+    store = DualWriteCollection(FakeMongo(), CALENDAR_CFG)
+    doc = canonical_calendar_write(
+        workspace_id="ws1", event_id="int-1", external_provider="internal",
+        title="Standup", source="manual",
+    )
+    await store._sb_upsert_doc(doc)
+    assert "on_conflict=workspace_id,event_id" in posts[0]
+
+
+@pytest.mark.asyncio
+async def test_legacy_gcal_id_sync_updates_same_row_no_duplicate():
+    from product_domain_store import (
+        wrap_calendar_col, canonical_calendar_write, upsert_calendar_external_event,
+    )
+    from datetime import datetime, timezone
+
+    class FakeCol:
+        def __init__(self):
+            self._docs = [
+                {
+                    "_id": "mongo1",
+                    "workspace_id": "ws1",
+                    "id": "legacy-evt-1",
+                    "gcal_id": "gcal-legacy",
+                    "title": "Old",
+                    "start": "2026-01-01T00:00:00Z",
+                }
+            ]
+
+        async def find_one(self, query, projection=None):
+            for d in self._docs:
+                if all(d.get(k) == v for k, v in query.items()):
+                    return dict(d)
+            return None
+
+        async def update_one(self, query, update, upsert=False):
+            for d in self._docs:
+                if all(d.get(k) == v for k, v in query.items() if not str(k).startswith("$")):
+                    d.update(update.get("$set", {}))
+                    class R:
+                        matched_count = 1
+                        modified_count = 1
+                        upserted_id = None
+                    return R()
+            if upsert:
+                nd = dict(query)
+                nd.update(update.get("$setOnInsert", {}))
+                nd.update(update.get("$set", {}))
+                self._docs.append(nd)
+            class R:
+                matched_count = 0
+                modified_count = 0
+                upserted_id = None
+            return R()
+
+    raw = FakeCol()
+    wrapped = wrap_calendar_col(raw)
+    now = datetime.now(timezone.utc)
+    canonical = canonical_calendar_write(
+        workspace_id="ws1", event_id="should-not-win",
+        external_provider="google", external_event_id="gcal-legacy",
+        title="New Title", source="google_calendar", synced_at=now, updated_at=now,
+    )
+    eid = await upsert_calendar_external_event(
+        wrapped, workspace_id="ws1", provider="google",
+        external_event_id="gcal-legacy", canonical=canonical, now=now,
+    )
+    assert eid == "legacy-evt-1"
+    assert len(raw._docs) == 1
+    assert raw._docs[0]["external_event_id"] == "gcal-legacy"
+    assert raw._docs[0]["external_provider"] == "google"
+    assert raw._docs[0]["title"] == "New Title"
+    assert raw._docs[0].get("gcal_id") == "gcal-legacy"  # not deleted
+
+    # Repeated sync still one row, same event_id
+    canonical2 = canonical_calendar_write(
+        workspace_id="ws1", event_id="another-uuid",
+        external_provider="google", external_event_id="gcal-legacy",
+        title="Newer", source="google_calendar", synced_at=now, updated_at=now,
+    )
+    eid2 = await upsert_calendar_external_event(
+        wrapped, workspace_id="ws1", provider="google",
+        external_event_id="gcal-legacy", canonical=canonical2, now=now,
+    )
+    assert eid2 == "legacy-evt-1"
+    assert len(raw._docs) == 1
+    assert raw._docs[0]["title"] == "Newer"
+
+
+@pytest.mark.asyncio
+async def test_legacy_ms_id_sync_updates_same_row_no_duplicate():
+    from product_domain_store import (
+        wrap_calendar_col, canonical_calendar_write, upsert_calendar_external_event,
+    )
+    from datetime import datetime, timezone
+
+    class FakeCol:
+        def __init__(self):
+            self._docs = [
+                {
+                    "_id": "mongo-ms",
+                    "workspace_id": "ws1",
+                    "event_id": "ms-legacy-evt",
+                    "ms_id": "ms-legacy",
+                    "title": "Old MS",
+                }
+            ]
+
+        async def find_one(self, query, projection=None):
+            for d in self._docs:
+                if all(d.get(k) == v for k, v in query.items()):
+                    return dict(d)
+            return None
+
+        async def update_one(self, query, update, upsert=False):
+            for d in self._docs:
+                if all(d.get(k) == v for k, v in query.items() if not str(k).startswith("$")):
+                    d.update(update.get("$set", {}))
+                    class R:
+                        matched_count = 1
+                        modified_count = 1
+                        upserted_id = None
+                    return R()
+            class R:
+                matched_count = 0
+                modified_count = 0
+                upserted_id = None
+            return R()
+
+    raw = FakeCol()
+    wrapped = wrap_calendar_col(raw)
+    now = datetime.now(timezone.utc)
+    canonical = canonical_calendar_write(
+        workspace_id="ws1", event_id="new-uuid",
+        external_provider="microsoft", external_event_id="ms-legacy",
+        title="Updated MS", source="outlook_calendar", synced_at=now,
+    )
+    eid = await upsert_calendar_external_event(
+        wrapped, workspace_id="ws1", provider="microsoft",
+        external_event_id="ms-legacy", canonical=canonical, now=now,
+    )
+    assert eid == "ms-legacy-evt"
+    assert len(raw._docs) == 1
+    assert raw._docs[0]["ms_id"] == "ms-legacy"
+    assert raw._docs[0]["external_event_id"] == "ms-legacy"
+
+    eid2 = await upsert_calendar_external_event(
+        wrapped, workspace_id="ws1", provider="microsoft",
+        external_event_id="ms-legacy",
+        canonical=canonical_calendar_write(
+            workspace_id="ws1", event_id="uuid-2", external_provider="microsoft",
+            external_event_id="ms-legacy", title="Again", source="outlook_calendar",
+        ),
+        now=now,
+    )
+    assert eid2 == "ms-legacy-evt"
+    assert len(raw._docs) == 1
+
+
+@pytest.mark.asyncio
+async def test_google_first_sync_insert_then_second_updates_same_event_id():
+    from product_domain_store import (
+        wrap_calendar_col, canonical_calendar_write, upsert_calendar_external_event,
+    )
+    from datetime import datetime, timezone
+
+    class FakeCol:
+        def __init__(self):
+            self._docs = []
+
+        async def find_one(self, query, projection=None):
+            for d in self._docs:
+                if all(d.get(k) == v for k, v in query.items()):
+                    return dict(d)
+            return None
+
+        async def update_one(self, query, update, upsert=False):
+            for d in self._docs:
+                if all(d.get(k) == v for k, v in query.items()):
+                    d.update(update.get("$set", {}))
+                    class R:
+                        matched_count = 1
+                        modified_count = 1
+                        upserted_id = None
+                    return R()
+            if upsert:
+                nd = dict(query)
+                nd.update(update.get("$setOnInsert", {}))
+                nd.update(update.get("$set", {}))
+                self._docs.append(nd)
+                class R:
+                    matched_count = 0
+                    modified_count = 0
+                    upserted_id = nd.get("event_id")
+                return R()
+            class R:
+                matched_count = 0
+                modified_count = 0
+                upserted_id = None
+            return R()
+
+    raw = FakeCol()
+    wrapped = wrap_calendar_col(raw)
+    now = datetime.now(timezone.utc)
+    eid1 = await upsert_calendar_external_event(
+        wrapped, workspace_id="ws", provider="google", external_event_id="g1",
+        canonical=canonical_calendar_write(
+            workspace_id="ws", event_id="e-a", external_provider="google",
+            external_event_id="g1", title="T1", source="google_calendar",
+        ),
+        now=now,
+    )
+    eid2 = await upsert_calendar_external_event(
+        wrapped, workspace_id="ws", provider="google", external_event_id="g1",
+        canonical=canonical_calendar_write(
+            workspace_id="ws", event_id="e-b", external_provider="google",
+            external_event_id="g1", title="T2", source="google_calendar",
+        ),
+        now=now,
+    )
+    assert eid1 == eid2 == "e-a"
+    assert len(raw._docs) == 1
+    assert raw._docs[0]["title"] == "T2"

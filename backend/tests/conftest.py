@@ -20,18 +20,29 @@ os.environ.setdefault("INTEGRATIONS_ENCRYPTION_KEY", Fernet.generate_key().decod
 
 def _match(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
     for k, v in query.items():
-        if isinstance(v, dict) and "$in" in v:
+        if k == "$or":
+            if not any(_match(doc, clause) for clause in v):
+                return False
+        elif k == "$and":
+            if not all(_match(doc, clause) for clause in v):
+                return False
+        elif isinstance(v, dict) and "$in" in v:
             if doc.get(k) not in v["$in"]:
                 return False
         elif isinstance(v, dict) and "$gte" in v:
             if doc.get(k) is None or doc.get(k) < v["$gte"]:
                 return False
+        elif isinstance(v, dict) and "$lte" in v:
+            if doc.get(k) is None or doc.get(k) > v["$lte"]:
+                return False
         elif isinstance(v, dict) and "$ne" in v:
             if doc.get(k) == v["$ne"]:
                 return False
         elif isinstance(v, dict) and "$exists" in v:
-            exists = k in doc and doc.get(k) is not None
-            if bool(v["$exists"]) != exists:
+            exists = k in doc
+            if v["$exists"] and not exists:
+                return False
+            if (not v["$exists"]) and exists:
                 return False
         elif doc.get(k) != v:
             return False
@@ -62,6 +73,10 @@ class FakeAsyncCollection:
                     and existing.get("idempotency_key") == doc.get("idempotency_key")
                 ):
                     raise DuplicateKeyError("duplicate idempotency_key")
+        if doc.get("_id") is not None:
+            for existing in self._docs:
+                if existing.get("_id") == doc.get("_id"):
+                    raise DuplicateKeyError("duplicate _id")
         self._docs.append(copy.deepcopy(doc))
         return doc
 
@@ -101,13 +116,21 @@ class FakeAsyncCollection:
         return _Result(matched, matched)
 
 
-    async def find_one_and_update(self, query: Dict[str, Any], update: Dict[str, Any], projection: Optional[Dict[str, int]] = None, return_document=None):
+    async def find_one_and_update(self, query: Dict[str, Any], update: Dict[str, Any], projection: Optional[Dict[str, int]] = None, return_document=None, upsert: bool = False):
         for doc in self._docs:
             if _match(doc, query):
                 doc.update(update.get("$set", {}))
                 for key in update.get("$unset", {}):
                     doc.pop(key, None)
                 return _project(copy.deepcopy(doc), projection)
+        if upsert:
+            new_doc = dict(query)
+            # Drop operator keys from query when building inserted doc.
+            new_doc = {k: v for k, v in new_doc.items() if not str(k).startswith("$")}
+            new_doc.update(update.get("$setOnInsert", {}))
+            new_doc.update(update.get("$set", {}))
+            self._docs.append(new_doc)
+            return _project(copy.deepcopy(new_doc), projection)
         return None
 
     async def delete_one(self, query: Dict[str, Any]):

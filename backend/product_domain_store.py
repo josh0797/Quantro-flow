@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -279,6 +280,124 @@ def canonical_calendar_write(
     if extra:
         doc.update(extra)
     return normalize_calendar_doc(doc)
+
+
+def calendar_on_conflict(doc: Dict[str, Any]) -> str:
+    """PostgREST ``on_conflict`` target for calendar_events only.
+
+    External syncs mint a fresh UUID ``event_id`` each pass, so upserting on
+    ``workspace_id,event_id`` creates duplicates and fights the unique
+    ``(workspace_id, external_provider, external_event_id)`` index.
+    Internal rows (null external_event_id) keep ``workspace_id,event_id``.
+    """
+    if doc.get("external_event_id"):
+        return "workspace_id,external_provider,external_event_id"
+    return "workspace_id,event_id"
+
+
+async def find_calendar_event_for_external_sync(
+    calendar_col: Any,
+    *,
+    workspace_id: str,
+    provider: str,
+    external_event_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Resolve an existing calendar row for Google/MS sync.
+
+    Lookup order (transition-safe):
+      1. Canonical ``workspace_id + external_provider + external_event_id``
+      2. Legacy Google ``workspace_id + gcal_id`` / MS ``workspace_id + ms_id``
+    """
+    if not external_event_id:
+        return None
+    provider = (provider or "").lower().strip()
+    doc = await calendar_col.find_one(
+        {
+            "workspace_id": workspace_id,
+            "external_provider": provider,
+            "external_event_id": external_event_id,
+        }
+    )
+    if doc:
+        return doc
+    # Legacy keys live only on Mongo; DualWriteCollection remaps gcal_id/ms_id
+    # to external_event_id, so query the underlying collection directly.
+    mongo = getattr(calendar_col, "_mongo", calendar_col)
+    legacy_key = "gcal_id" if provider == "google" else ("ms_id" if provider == "microsoft" else None)
+    if not legacy_key or not hasattr(mongo, "find_one"):
+        return None
+    return await mongo.find_one({"workspace_id": workspace_id, legacy_key: external_event_id})
+
+
+async def upsert_calendar_external_event(
+    calendar_col: Any,
+    *,
+    workspace_id: str,
+    provider: str,
+    external_event_id: str,
+    canonical: Dict[str, Any],
+    now: Any,
+) -> str:
+    """Upsert a Google/MS calendar event without duplicating legacy rows.
+
+    If a legacy ``gcal_id`` / ``ms_id`` row is found, update that document in
+    place, add canonical ``external_*`` fields, and preserve ``event_id``/``id``.
+    Do **not** delete legacy ``gcal_id``/``ms_id``; new writes simply stop
+    writing those keys (canonical payload has none).
+    """
+    provider = (provider or "").lower().strip()
+    existing = await find_calendar_event_for_external_sync(
+        calendar_col,
+        workspace_id=workspace_id,
+        provider=provider,
+        external_event_id=external_event_id,
+    )
+    set_fields = {
+        k: v
+        for k, v in canonical.items()
+        if k not in ("event_id", "id", "_id")
+    }
+    set_fields["workspace_id"] = workspace_id
+    set_fields["external_provider"] = provider
+    set_fields["external_event_id"] = external_event_id
+
+    if existing is not None:
+        event_id = existing.get("event_id") or existing.get("id") or str(uuid.uuid4())
+        set_fields_with_id = {**set_fields, "event_id": event_id}
+        mongo = getattr(calendar_col, "_mongo", calendar_col)
+        if existing.get("_id") is not None and hasattr(mongo, "update_one"):
+            await mongo.update_one({"_id": existing["_id"]}, {"$set": set_fields_with_id})
+        elif existing.get("event_id"):
+            await calendar_col.update_one(
+                {"workspace_id": workspace_id, "event_id": event_id},
+                {"$set": set_fields},
+            )
+        else:
+            legacy_key = "gcal_id" if provider == "google" else "ms_id"
+            await mongo.update_one(
+                {"workspace_id": workspace_id, legacy_key: external_event_id},
+                {"$set": set_fields_with_id},
+            )
+        # Dual-write / SB path: preserve stable event_id via external conflict.
+        if hasattr(calendar_col, "_sb_upsert_doc") and is_dual_write(CALENDAR_CFG):
+            await calendar_col._sb_upsert_doc({**set_fields, "event_id": event_id})
+        return event_id
+
+    event_id = canonical.get("event_id") or str(uuid.uuid4())
+    await calendar_col.update_one(
+        {
+            "workspace_id": workspace_id,
+            "external_provider": provider,
+            "external_event_id": external_event_id,
+        },
+        {
+            "$set": set_fields,
+            "$setOnInsert": {"event_id": event_id, "created_at": now},
+        },
+        upsert=True,
+    )
+    return event_id
+
 
 
 def _primary(cfg: DomainConfig) -> str:
@@ -599,13 +718,29 @@ class DualWriteCollection:
         return None
 
     async def _sb_upsert_doc(self, doc: Dict[str, Any]) -> bool:
+        if self.cfg.name == "calendar":
+            doc = normalize_calendar_doc(doc)
         payload = mongo_to_sb(self.cfg, doc)
         if not payload.get("workspace_id") or not payload.get(self.cfg.app_id_field):
             logger.warning("%s upsert skip — missing workspace_id/%s", self.cfg.name, self.cfg.app_id_field)
             return False
+        conflict = self.cfg.conflict
+        if self.cfg.name == "calendar":
+            conflict = calendar_on_conflict(payload)
+            # Preserve original event_id when upserting by external identity.
+            if payload.get("external_event_id"):
+                existing = await self._sb_find_one(
+                    {
+                        "workspace_id": payload["workspace_id"],
+                        "external_provider": payload.get("external_provider"),
+                        "external_event_id": payload["external_event_id"],
+                    }
+                )
+                if existing and existing.get("event_id"):
+                    payload["event_id"] = existing["event_id"]
         resp = await _sb_request(
             "POST",
-            f"/rest/v1/{self.table}?on_conflict={self.cfg.conflict}",
+            f"/rest/v1/{self.table}?on_conflict={conflict}",
             json=payload,
             prefer="resolution=merge-duplicates,return=minimal",
         )
@@ -619,7 +754,8 @@ class DualWriteCollection:
         set_on_insert = update.get("$setOnInsert") or {}
         unset = update.get("$unset") or {}
         if upsert:
-            merged = {**{k: query.get(k) for k in ("workspace_id", self.cfg.app_id_field) if k in query}}
+            merge_keys = ("workspace_id", self.cfg.app_id_field, "external_provider", "external_event_id")
+            merged = {**{k: query.get(k) for k in merge_keys if k in query}}
             merged.update(set_on_insert)
             merged.update(fields)
             if not merged.get(self.cfg.app_id_field):
