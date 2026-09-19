@@ -21,3 +21,19 @@ canonical calendar tests pass.
   1. Additive migration `20260919010000_calendar_events_canonical.sql` applied
   2. Tests: Google sync→SB, MS sync→SB, internal→SB, legacy backfill shape, duplicate external no-dup
   3. Backfill re-run with `_normalize_calendar_mongo_row`
+
+
+## Audit hardening (PR #20 remaining findings)
+
+Implemented on branch (keep `QUANTRO_CALENDAR_PRIMARY=mongo`):
+
+1. **Calendar Supabase upsert** — `calendar_on_conflict` + `_sb_upsert_doc` use
+   `workspace_id,external_provider,external_event_id` when `external_event_id` is set;
+   preserve existing `event_id` on subsequent external upserts.
+2. **Legacy Mongo dedupe** — `upsert_calendar_external_event` / `find_calendar_event_for_external_sync`
+   resolve canonical then legacy `gcal_id`/`ms_id`; update in place; do not delete legacy keys.
+3. **MS incremental consent** — `requested_scopes` in OAuth state; callback passes scopes to
+   token exchange; Connect Grant Permission for Microsoft with `return_to=/connect`.
+4. **Atomic sync lease** — `sync_lock.acquire_sync_lock_lease` via `find_one_and_update` + insert.
+
+**Still NOT READY to flip calendar to Supabase** without applied migration + verified backfill + real smoke.

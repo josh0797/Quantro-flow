@@ -292,11 +292,9 @@ def fetch_upcoming_outlook_events(access_token: str, days: int = 30) -> List[Dic
 # ─── Quantro Actions — incremental write-scope authorization ──────────
 # Mirrors google_oauth.py's ACTION_SCOPES. NOTE (see module docstring on
 # MS_SCOPES): Graph/MSAL don't support Google-style incremental consent
-# — requesting these requires adding them to MS_SCOPES and having the
-# user re-run /api/integrations/microsoft/start, which re-prompts for
-# the full scope set. Handlers below correctly report
-# reauthorization_required rather than silently failing in the
-# meantime; wiring the actual re-consent UX is a follow-up.
+# — requesting these uses /api/connect/providers/microsoft/request-permission
+# (incremental consent). Handlers report reauthorization_required when
+# action scopes are missing; Connect "Grant Permission" upgrades Limited → Connected.
 ACTION_SCOPES = {
     "microsoft.mail.send": "Mail.Send",
     "microsoft.calendar.event.create": "Calendars.ReadWrite",
