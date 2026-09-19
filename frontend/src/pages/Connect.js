@@ -4,7 +4,7 @@ import {
   Search, CheckCircle2, AlertTriangle, XCircle, Settings2, Loader2,
   RefreshCw, Unlink2, Mail, Receipt, Bot, Sparkles, Lock,
 } from 'lucide-react';
-import { Card, CardContent } from '@/components/ui/card';
+import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
