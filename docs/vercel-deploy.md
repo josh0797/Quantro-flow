@@ -25,7 +25,7 @@ App name: `quantro-flow-api` (see `fly.toml`).
 ```bash
 fly auth login
 fly apps create quantro-flow-api --org personal
-fly secrets set MONGO_URL=... SUPABASE_URL=... SUPABASE_ANON_KEY=... SUPABASE_SERVICE_ROLE_KEY=... FRONTEND_PUBLIC_URL=https://quantro-flow.vercel.app BACKEND_PUBLIC_URL=https://quantro-flow-api.fly.dev
+fly secrets set MONGO_URL=... SUPABASE_URL=... SUPABASE_ANON_KEY=... SUPABASE_SERVICE_ROLE_KEY=... FRONTEND_PUBLIC_URL=https://www.quantroflow.cloud BACKEND_PUBLIC_URL=https://quantro-flow-api.fly.dev ALLOWED_FRONTEND_ORIGINS=https://www.quantroflow.cloud,https://quantroflow.cloud,https://quantro-flow.vercel.app
 fly deploy
 ```
 

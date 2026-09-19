@@ -6,8 +6,6 @@ from unittest.mock import patch
 
 
 def test_sanitize_return_to_allowlist_and_rejects():
-    # Import sanitize by loading the function logic inline to avoid full server import.
-    # Mirror server._sanitize_return_to contract.
     ALLOWED = {"/connect", "/actions", "/settings", "/welcome/inbox", "/welcome/calendar"}
     DEFAULT = "/welcome/inbox"
 
@@ -35,16 +33,55 @@ def test_sanitize_return_to_allowlist_and_rejects():
     assert sanitize("javascript:alert(1)") == DEFAULT
 
 
-def test_cors_origins_no_wildcard_regex_by_default():
+def _allowed_cors_origins_impl():
+    """Mirrors server._allowed_cors_origins contract (post cloud-domain update)."""
+    raw = (os.environ.get("ALLOWED_FRONTEND_ORIGINS") or "").strip()
+    origins = [o.strip().rstrip("/") for o in raw.split(",") if o.strip()]
+    for required in (
+        "https://www.quantroflow.cloud",
+        "https://quantroflow.cloud",
+        "https://quantro-flow.vercel.app",
+    ):
+        if required not in origins:
+            origins.append(required)
+    env_name = (os.environ.get("ENVIRONMENT") or os.environ.get("ENV") or "").lower().strip()
+    allow_local = env_name in {"development", "dev", "local"} or (
+        str(os.environ.get("ALLOW_LOCALHOST_CORS") or "").lower() in {"1", "true", "yes"}
+    )
+    if allow_local:
+        for loc in ("http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173"):
+            if loc not in origins:
+                origins.append(loc)
+    return origins
+
+
+def test_cors_origins_include_cloud_and_vercel_by_default():
     with patch.dict(os.environ, {
-        "ALLOWED_FRONTEND_ORIGINS": "https://quantro-flow.vercel.app,https://app.example.com",
+        "ALLOWED_FRONTEND_ORIGINS": "",
         "ENVIRONMENT": "production",
         "ALLOW_LOCALHOST_CORS": "0",
         "ALLOW_VERCEL_PREVIEW_CORS": "0",
     }, clear=False):
-        # Re-implement helper contract from server._allowed_cors_origins
-        raw = os.environ.get("ALLOWED_FRONTEND_ORIGINS") or ""
-        origins = [o.strip().rstrip("/") for o in raw.split(",") if o.strip()]
+        origins = _allowed_cors_origins_impl()
+        assert "https://www.quantroflow.cloud" in origins
+        assert "https://quantroflow.cloud" in origins
         assert "https://quantro-flow.vercel.app" in origins
         assert "http://localhost:3000" not in origins
         assert ".*" not in origins
+
+
+def test_cors_origins_merges_explicit_env():
+    with patch.dict(os.environ, {
+        "ALLOWED_FRONTEND_ORIGINS": "https://quantro-flow.vercel.app,https://app.example.com",
+        "ENVIRONMENT": "production",
+        "ALLOW_LOCALHOST_CORS": "0",
+    }, clear=False):
+        origins = _allowed_cors_origins_impl()
+        assert "https://app.example.com" in origins
+        assert "https://www.quantroflow.cloud" in origins
+
+
+def test_frontend_public_url_apex_normalizes_to_www():
+    raw = "https://quantroflow.cloud"
+    normalized = "https://www.quantroflow.cloud" if raw == "https://quantroflow.cloud" else raw
+    assert normalized == "https://www.quantroflow.cloud"

@@ -37,6 +37,7 @@ from integrations.service import ConnectService
 from integrations.providers.google import GoogleAdapter
 from integrations.providers.microsoft import MicrosoftAdapter
 from integrations.providers.facturapi import FacturapiAdapter
+from integrations.providers.quantro_invoicing import QuantroInvoicingAdapter
 from integrations.providers.quantro_internal import QuantroInternalAdapter
 from actions.executor import ActionExecutor
 from actions.policy_gate import PolicyGate
@@ -1849,15 +1850,22 @@ def _allowed_cors_origins() -> list:
     for browser credentialed XHR; keep the list tight.
 
     Env: ALLOWED_FRONTEND_ORIGINS = comma-separated absolute origins.
-    Prod defaults: https://quantro-flow.vercel.app (+ any configured custom).
+    Prod defaults always include the canonical cloud frontends
+    (www.quantroflow.cloud + apex) plus the authorized Vercel app URL.
     Localhost only when ENV/ENVIRONMENT is development/local or ALLOW_LOCALHOST_CORS=1.
     Optional Vercel Preview: allow https://*.vercel.app only when
     ALLOW_VERCEL_PREVIEW_CORS=1 (matched via a narrow regex, not '.*').
     """
     raw = (os.environ.get("ALLOWED_FRONTEND_ORIGINS") or "").strip()
     origins = [o.strip().rstrip("/") for o in raw.split(",") if o.strip()]
-    if not origins:
-        origins = ["https://quantro-flow.vercel.app"]
+    # Canonical production frontends — never rely only on Vercel.
+    for required in (
+        "https://www.quantroflow.cloud",
+        "https://quantroflow.cloud",
+        "https://quantro-flow.vercel.app",
+    ):
+        if required not in origins:
+            origins.append(required)
     env_name = (os.environ.get("ENVIRONMENT") or os.environ.get("ENV") or "").lower().strip()
     allow_local = env_name in {"development", "dev", "local"} or (
         str(os.environ.get("ALLOW_LOCALHOST_CORS") or "").lower() in {"1", "true", "yes"}
@@ -5659,11 +5667,16 @@ def _frontend_base_url() -> str:
         the user to the wrong app.
 
     FRONTEND_PUBLIC_URL must be set explicitly in every environment
-    (preview and production). If it's missing, callers must fail closed
-    (see the 500 response in the OAuth callbacks below) instead of
-    guessing a domain.
+    (preview and production). Canonical production value:
+    ``https://www.quantroflow.cloud`` (also accept apex via CORS).
+    If missing, callers must fail closed (see the 500 response in the
+    OAuth callbacks below) instead of guessing a domain.
     """
-    return (os.environ.get("FRONTEND_PUBLIC_URL") or "").strip().rstrip("/")
+    raw = (os.environ.get("FRONTEND_PUBLIC_URL") or "").strip().rstrip("/")
+    # Normalize accidental apex → www canonical (open-redirect safe: same host family only).
+    if raw == "https://quantroflow.cloud":
+        return "https://www.quantroflow.cloud"
+    return raw
 
 
 # Only these paths may be used as the OAuth "return_to" destination.
@@ -6383,9 +6396,17 @@ async def _perform_microsoft_sync_for_workspace(workspace_id: str) -> Dict[str, 
                 upsert=True,
             )
             counts["emails"] += 1
-        events = msoa.fetch_upcoming_outlook_events(access, days=30)
+        events = msoa.fetch_upcoming_outlook_events(access)  # env window + pagination
+        cal_metrics = {
+            "inserted": 0, "updated": 0, "unchanged": 0,
+            "cancelled": 0, "possible_duplicates": 0, "events": 0,
+        }
+        seen_ical: dict = {}
         for ev in events:
             event_id = str(uuid.uuid4())
+            ical = ev.get("ical_uid")
+            if ical:
+                seen_ical[ical] = seen_ical.get(ical, 0) + 1
             canonical = canonical_calendar_write(
                 workspace_id=workspace_id,
                 event_id=event_id,
@@ -6400,12 +6421,14 @@ async def _perform_microsoft_sync_for_workspace(workspace_id: str) -> Dict[str, 
                 status=ev["status"],
                 source="outlook_calendar",
                 external_url=ev.get("html_link"),
+                ical_uid=ical,
+                external_updated_at=ev.get("external_updated_at"),
                 is_simulation=False,
                 synced_at=now,
                 updated_at=now,
-                extra={"is_real": True},
+                extra={"is_real": True, "cancelled": bool(ev.get("cancelled"))},
             )
-            await upsert_calendar_external_event(
+            result = await upsert_calendar_external_event(
                 calendar_col,
                 workspace_id=workspace_id,
                 provider="microsoft",
@@ -6413,14 +6436,20 @@ async def _perform_microsoft_sync_for_workspace(workspace_id: str) -> Dict[str, 
                 canonical=canonical,
                 now=now,
             )
-            counts["events"] += 1
+            outcome = (result or {}).get("outcome") or "updated"
+            if outcome in cal_metrics:
+                cal_metrics[outcome] += 1
+            cal_metrics["events"] += 1
+        cal_metrics["possible_duplicates"] = sum(1 for n in seen_ical.values() if n > 1)
+        counts["events"] = cal_metrics["events"]
+        counts["calendar"] = cal_metrics
         await secrets_store.patch_connection(
             provider="microsoft",
             workspace_id=workspace_id,
             mongo_col=microsoft_integrations_col,
-            fields={"last_sync_at": now, "last_sync_error": None},
+            fields={"last_sync_at": now, "last_sync_error": None, "last_calendar_sync_metrics": cal_metrics},
         )
-        return {"workspace_id": workspace_id, "ok": True, "counts": counts}
+        return {"workspace_id": workspace_id, "ok": True, "counts": counts, "calendar": cal_metrics}
     except Exception as exc:  # noqa: BLE001
         await secrets_store.patch_connection(
             provider="microsoft",
@@ -6754,12 +6783,15 @@ microsoft_adapter = MicrosoftAdapter(
     microsoft_integrations_col, msoa, _perform_microsoft_sync_for_workspace, _disconnect_microsoft_workspace,
     secrets_store=secrets_store,
 )
+# Keep Facturapi adapter for legacy webhook + vault compatibility only —
+# it is NOT registered in Connect (replaced by Quantro OS "Facturación").
 facturapi_adapter = FacturapiAdapter(facturapi_connections_col, facturapi_webhook_events_col, _backend_public_url, log_audit_fn=log_audit)
+quantro_invoicing_adapter = QuantroInvoicingAdapter()
 quantro_internal_adapter = QuantroInternalAdapter()
 
 register_provider(google_adapter)
 register_provider(microsoft_adapter)
-register_provider(facturapi_adapter)
+register_provider(quantro_invoicing_adapter)
 register_provider(quantro_internal_adapter)
 
 connect_service = ConnectService()
@@ -6790,6 +6822,7 @@ action_executor = ActionExecutor(
         "goog_module": goog,
         "msoa_module": msoa,
         "facturapi_adapter": facturapi_adapter,
+        "quantro_invoicing_adapter": quantro_invoicing_adapter,
     },
 )
 
@@ -6855,10 +6888,22 @@ async def connect_facturapi(
     workspace_id: str = Depends(get_current_workspace_id),
     _m: dict = Depends(require_role("leader")),
 ):
-    """Connect Facturapi with a Test or Live secret key. The key is
-    never persisted in plaintext and never returned — see
-    integrations/providers/facturapi.py's connect()."""
-    return await facturapi_adapter.connect(workspace_id, {"secret_key": req.secret_key})
+    """Deprecated — fiscal SoT is Quantro OS (Connect provider: Facturación).
+
+    Kept so older clients get a clear 410 instead of silently writing a
+    Facturapi secret into Flow. Historical migrations / webhook routes
+    remain for data compatibility.
+    """
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "error": "deprecated",
+            "message": (
+                "Facturapi connect was removed from Quantro Flow. "
+                "Use Connect → Facturación (Quantro OS service credentials)."
+            ),
+        },
+    )
 
 
 @app.get("/api/connect/providers/google/request-permission")

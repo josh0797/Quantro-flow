@@ -9,7 +9,7 @@ cancelling one -> critical.
 from __future__ import annotations
 
 from .base import ActionDefinition, RiskLevel
-from .handlers import facturapi as facturapi_handlers
+from .handlers import quantro_invoicing as quantro_invoicing_handlers
 from .handlers import google as google_handlers
 from .handlers import microsoft as microsoft_handlers
 from .handlers import quantro_internal as quantro_handlers
@@ -97,67 +97,20 @@ def register_all_actions() -> None:
         required_scopes=["Calendars.ReadWrite"], idempotent=True, minimum_role="leader",
     ))
 
-    # ── Facturapi ────────────────────────────────────────────────────
+    # ── Facturación (Quantro OS) ──────────────────────────────────────
+    # Flow queries invoices OS already processed; never creates CFDI here.
     register_action(ActionDefinition(
-        action_id="facturapi.customer.create", provider="facturapi",
-        name="Create Facturapi customer", description="Register a new customer in Facturapi.",
-        input_schema={"legal_name": _STR_REQ, "tax_id": _STR_REQ, "tax_system": _STR_REQ,
-                      "address": _OBJ_REQ, "email": _STR, "phone": _STR},
-        risk_level=RiskLevel.LOW, handler=facturapi_handlers.customer_create, idempotent=True, minimum_role="leader",
+        action_id="quantro_invoicing.invoice.query", provider="quantro_invoicing",
+        name="Query invoice", description="Locate an invoice already processed by Quantro OS.",
+        input_schema={"q": _STR, "invoice_id": _STR, "limit": {"type": "number"}},
+        risk_level=RiskLevel.LOW, handler=quantro_invoicing_handlers.invoice_query,
+        idempotent=True, minimum_role="member",
     ))
     register_action(ActionDefinition(
-        action_id="facturapi.customer.get", provider="facturapi",
-        name="Get Facturapi customer", description="Retrieve a Facturapi customer by id.",
-        input_schema={"customer_id": _STR_REQ}, risk_level=RiskLevel.LOW,
-        handler=facturapi_handlers.customer_get, idempotent=True, minimum_role="member",
-    ))
-    register_action(ActionDefinition(
-        action_id="facturapi.customer.list", provider="facturapi",
-        name="List Facturapi customers", description="Search/list Facturapi customers.",
-        input_schema={"q": _STR, "page": {"type": "number"}}, risk_level=RiskLevel.LOW,
-        handler=facturapi_handlers.customer_list, idempotent=True, minimum_role="member",
-    ))
-    register_action(ActionDefinition(
-        action_id="facturapi.product.create", provider="facturapi",
-        name="Create Facturapi product", description="Register a new product/service in Facturapi.",
-        input_schema={"description": _STR_REQ, "product_key": _STR_REQ, "unit_key": _STR_REQ,
-                      "price": _NUM_REQ, "taxability": _STR, "sku": _STR},
-        risk_level=RiskLevel.LOW, handler=facturapi_handlers.product_create, idempotent=True, minimum_role="leader",
-    ))
-    register_action(ActionDefinition(
-        action_id="facturapi.product.get", provider="facturapi",
-        name="Get Facturapi product", description="Retrieve a Facturapi product by id.",
-        input_schema={"product_id": _STR_REQ}, risk_level=RiskLevel.LOW,
-        handler=facturapi_handlers.product_get, idempotent=True, minimum_role="member",
-    ))
-    register_action(ActionDefinition(
-        action_id="facturapi.product.list", provider="facturapi",
-        name="List Facturapi products", description="Search/list Facturapi products.",
-        input_schema={"q": _STR, "page": {"type": "number"}}, risk_level=RiskLevel.LOW,
-        handler=facturapi_handlers.product_list, idempotent=True, minimum_role="member",
-    ))
-    register_action(ActionDefinition(
-        action_id="facturapi.invoice.create", provider="facturapi",
-        name="Create CFDI invoice", description="Issue a real CFDI invoice through Facturapi.",
-        input_schema={"customer": _OBJ_REQ, "items": _ARR_REQ, "payment_form": _STR_REQ, "use": _STR_REQ,
-                      "payment_method": _STR, "currency": _STR},
-        risk_level=RiskLevel.HIGH, handler=facturapi_handlers.invoice_create, idempotent=True, minimum_role="leader",
-    ))
-    register_action(ActionDefinition(
-        action_id="facturapi.invoice.get", provider="facturapi",
-        name="Get Facturapi invoice", description="Retrieve a Facturapi invoice by id.",
-        input_schema={"invoice_id": _STR_REQ}, risk_level=RiskLevel.LOW,
-        handler=facturapi_handlers.invoice_get, idempotent=True, minimum_role="member",
-    ))
-    register_action(ActionDefinition(
-        action_id="facturapi.invoice.list", provider="facturapi",
-        name="List Facturapi invoices", description="Search/list Facturapi invoices.",
-        input_schema={"q": _STR, "page": {"type": "number"}}, risk_level=RiskLevel.LOW,
-        handler=facturapi_handlers.invoice_list, idempotent=True, minimum_role="member",
-    ))
-    register_action(ActionDefinition(
-        action_id="facturapi.invoice.cancel", provider="facturapi",
-        name="Cancel CFDI invoice", description="Request cancellation of a CFDI invoice before the SAT.",
-        input_schema={"invoice_id": _STR_REQ, "motive": _STR_REQ, "substitution": _STR},
-        risk_level=RiskLevel.CRITICAL, handler=facturapi_handlers.invoice_cancel, idempotent=True, minimum_role="leader",
+        action_id="quantro_invoicing.invoice.prepare_reply", provider="quantro_invoicing",
+        name="Prepare invoice email reply",
+        description="Build a Gmail/Outlook reply payload from Quantro OS invoice metadata.",
+        input_schema={"invoice_id": _STR, "q": _STR, "to": _STR, "channel": _STR},
+        risk_level=RiskLevel.LOW, handler=quantro_invoicing_handlers.invoice_prepare_reply,
+        idempotent=True, minimum_role="member",
     ))

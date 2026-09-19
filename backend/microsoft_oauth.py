@@ -288,50 +288,99 @@ def fetch_recent_outlook(access_token: str, limit: int = 50) -> List[Dict[str, A
     return out
 
 
-def fetch_upcoming_outlook_events(access_token: str, days: int = 30) -> List[Dict[str, Any]]:
+def calendar_sync_window() -> Tuple[datetime, datetime, int, int]:
+    """Past/lookahead window for Outlook calendar sync (env-configurable).
+
+    CALENDAR_BACKFILL_PAST_DAYS (default 90) and CALENDAR_LOOKAHEAD_DAYS
+    (default 180). Returns (start, end, past_days, lookahead_days).
+    """
+    def _days(name: str, default: int) -> int:
+        raw = (os.environ.get(name) or "").strip()
+        try:
+            n = int(raw) if raw else default
+        except ValueError:
+            n = default
+        return max(0, min(n, 730))  # hard cap ~2y
+
+    past = _days("CALENDAR_BACKFILL_PAST_DAYS", 90)
+    ahead = _days("CALENDAR_LOOKAHEAD_DAYS", 180)
     now = datetime.now(timezone.utc)
-    end = now + timedelta(days=days)
-    # Outlook calendarView requires explicit start/end window query.
+    return now - timedelta(days=past), now + timedelta(days=ahead), past, ahead
+
+
+def fetch_upcoming_outlook_events(
+    access_token: str,
+    days: Optional[int] = None,
+    *,
+    past_days: Optional[int] = None,
+    lookahead_days: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Fetch Outlook calendar events across a configurable window.
+
+    Paginate via ``@odata.nextLink``. Prefer ``calendar_sync_window()``
+    env defaults; ``days`` alone remains a lookahead-only fallback for
+    older callers (no past backfill).
+    """
+    now = datetime.now(timezone.utc)
+    if past_days is None and lookahead_days is None and days is None:
+        start_dt, end_dt, _, _ = calendar_sync_window()
+    else:
+        past = 0 if past_days is None else max(0, int(past_days))
+        ahead = int(days if days is not None else (lookahead_days if lookahead_days is not None else 180))
+        ahead = max(0, ahead)
+        start_dt = now - timedelta(days=past)
+        end_dt = now + timedelta(days=ahead)
+
     params = {
-        "startDateTime": now.isoformat(),
-        "endDateTime": end.isoformat(),
+        "startDateTime": start_dt.isoformat().replace("+00:00", "Z"),
+        "endDateTime": end_dt.isoformat().replace("+00:00", "Z"),
         "$top": "100",
         "$orderby": "start/dateTime",
-        "$select": "id,subject,bodyPreview,location,start,end,attendees,webLink,showAs",
+        "$select": (
+            "id,subject,bodyPreview,location,start,end,attendees,webLink,"
+            "showAs,iCalUId,lastModifiedDateTime,isCancelled"
+        ),
     }
-    with httpx.Client(timeout=15.0) as cx:
-        r = cx.get(
-            f"{_GRAPH_BASE}/me/calendarView",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Prefer": 'outlook.timezone="UTC"',
-            },
-            params=params,
-        )
-    r.raise_for_status()
-    items = (r.json() or {}).get("value", []) or []
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Prefer": 'outlook.timezone="UTC"',
+    }
     out: List[Dict[str, Any]] = []
-    for ev in items:
-        start = (ev.get("start") or {}).get("dateTime")
-        end_at = (ev.get("end") or {}).get("dateTime")
-        location = ((ev.get("location") or {}).get("displayName")) or ""
-        attendees = [
-            {"email": (a.get("emailAddress") or {}).get("address"),
-             "response": (a.get("status") or {}).get("response")}
-            for a in (ev.get("attendees") or [])
-            if (a.get("emailAddress") or {}).get("address")
-        ]
-        out.append({
-            "ms_id": ev.get("id"),
-            "title": ev.get("subject") or "(sin título)",
-            "description": ev.get("bodyPreview") or "",
-            "location": location,
-            "start_iso": start,
-            "end_iso": end_at,
-            "attendees": attendees,
-            "html_link": ev.get("webLink"),
-            "status": ev.get("showAs"),
-        })
+    url: Optional[str] = f"{_GRAPH_BASE}/me/calendarView"
+    with httpx.Client(timeout=30.0) as cx:
+        while url:
+            r = cx.get(url, headers=headers, params=params if url.endswith("/calendarView") else None)
+            r.raise_for_status()
+            payload = r.json() or {}
+            items = payload.get("value", []) or []
+            for ev in items:
+                start = (ev.get("start") or {}).get("dateTime")
+                end_at = (ev.get("end") or {}).get("dateTime")
+                location = ((ev.get("location") or {}).get("displayName")) or ""
+                attendees = [
+                    {"email": (a.get("emailAddress") or {}).get("address"),
+                     "response": (a.get("status") or {}).get("response")}
+                    for a in (ev.get("attendees") or [])
+                    if (a.get("emailAddress") or {}).get("address")
+                ]
+                cancelled = bool(ev.get("isCancelled"))
+                status = "cancelled" if cancelled else (ev.get("showAs") or "busy")
+                out.append({
+                    "ms_id": ev.get("id"),
+                    "ical_uid": ev.get("iCalUId") or None,
+                    "external_updated_at": ev.get("lastModifiedDateTime"),
+                    "title": ev.get("subject") or "(sin título)",
+                    "description": ev.get("bodyPreview") or "",
+                    "location": location,
+                    "start_iso": start,
+                    "end_iso": end_at,
+                    "attendees": attendees,
+                    "html_link": ev.get("webLink"),
+                    "status": status,
+                    "cancelled": cancelled,
+                })
+            url = payload.get("@odata.nextLink")
+            params = None  # nextLink already carries query
     return out
 
 

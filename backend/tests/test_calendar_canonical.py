@@ -324,6 +324,7 @@ async def test_legacy_gcal_id_sync_updates_same_row_no_duplicate():
         wrapped, workspace_id="ws1", provider="google",
         external_event_id="gcal-legacy", canonical=canonical, now=now,
     )
+    eid = eid["event_id"] if isinstance(eid, dict) else eid
     assert eid == "legacy-evt-1"
     assert len(raw._docs) == 1
     assert raw._docs[0]["external_event_id"] == "gcal-legacy"
@@ -341,6 +342,7 @@ async def test_legacy_gcal_id_sync_updates_same_row_no_duplicate():
         wrapped, workspace_id="ws1", provider="google",
         external_event_id="gcal-legacy", canonical=canonical2, now=now,
     )
+    eid2 = eid2["event_id"] if isinstance(eid2, dict) else eid2
     assert eid2 == "legacy-evt-1"
     assert len(raw._docs) == 1
     assert raw._docs[0]["title"] == "Newer"
@@ -398,6 +400,7 @@ async def test_legacy_ms_id_sync_updates_same_row_no_duplicate():
         wrapped, workspace_id="ws1", provider="microsoft",
         external_event_id="ms-legacy", canonical=canonical, now=now,
     )
+    eid = eid["event_id"] if isinstance(eid, dict) else eid
     assert eid == "ms-legacy-evt"
     assert len(raw._docs) == 1
     assert raw._docs[0]["ms_id"] == "ms-legacy"
@@ -412,6 +415,7 @@ async def test_legacy_ms_id_sync_updates_same_row_no_duplicate():
         ),
         now=now,
     )
+    eid2 = eid2["event_id"] if isinstance(eid2, dict) else eid2
     assert eid2 == "ms-legacy-evt"
     assert len(raw._docs) == 1
 
@@ -469,6 +473,7 @@ async def test_google_first_sync_insert_then_second_updates_same_event_id():
         ),
         now=now,
     )
+    eid1 = eid1["event_id"] if isinstance(eid1, dict) else eid1
     eid2 = await upsert_calendar_external_event(
         wrapped, workspace_id="ws", provider="google", external_event_id="g1",
         canonical=canonical_calendar_write(
@@ -477,6 +482,7 @@ async def test_google_first_sync_insert_then_second_updates_same_event_id():
         ),
         now=now,
     )
+    eid2 = eid2["event_id"] if isinstance(eid2, dict) else eid2
     assert eid1 == eid2 == "e-a"
     assert len(raw._docs) == 1
     assert raw._docs[0]["title"] == "T2"
