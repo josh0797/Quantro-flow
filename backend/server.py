@@ -6687,32 +6687,6 @@ async def actions_list(
     return out
 
 
-@app.get("/api/actions/{action_id}")
-async def actions_get(action_id: str, workspace_id: str = Depends(get_current_workspace_id)):
-    d = get_action(action_id)
-    if not d:
-        raise HTTPException(status_code=404, detail="Action not found")
-    adapter = get_connect_provider(d.provider)
-    connection_status = (await adapter.get_status(workspace_id)).status.value if adapter else None
-    return _serialize_action_definition(d, connection_status)
-
-
-@app.post("/api/actions/{action_id}/execute")
-async def actions_execute(
-    action_id: str, req: ExecuteActionRequest,
-    workspace_id: str = Depends(get_current_workspace_id),
-    user: User = Depends(get_current_user),
-):
-    me = await _membership_for(user.user_id, workspace_id)
-    actor_role = _normalize_role(me.get("role")) if me else "viewer"
-    return await action_executor.execute(
-        workspace_id=workspace_id, action_id=action_id, input=req.input,
-        requested_by=user.user_id, source=req.source,
-        idempotency_key=req.idempotency_key, dry_run=req.dry_run,
-        actor_role=actor_role,
-    )
-
-
 @app.get("/api/actions/executions")
 async def actions_list_executions(
     workspace_id: str = Depends(get_current_workspace_id),
@@ -6755,3 +6729,29 @@ async def actions_cancel_execution(
     _m: dict = Depends(require_role("leader")),
 ):
     return await action_executor.cancel(workspace_id, execution_id)
+@app.get("/api/actions/{action_id}")
+async def actions_get(action_id: str, workspace_id: str = Depends(get_current_workspace_id)):
+    d = get_action(action_id)
+    if not d:
+        raise HTTPException(status_code=404, detail="Action not found")
+    adapter = get_connect_provider(d.provider)
+    connection_status = (await adapter.get_status(workspace_id)).status.value if adapter else None
+    return _serialize_action_definition(d, connection_status)
+
+
+@app.post("/api/actions/{action_id}/execute")
+async def actions_execute(
+    action_id: str, req: ExecuteActionRequest,
+    workspace_id: str = Depends(get_current_workspace_id),
+    user: User = Depends(get_current_user),
+):
+    me = await _membership_for(user.user_id, workspace_id)
+    actor_role = _normalize_role(me.get("role")) if me else "viewer"
+    return await action_executor.execute(
+        workspace_id=workspace_id, action_id=action_id, input=req.input,
+        requested_by=user.user_id, source=req.source,
+        idempotency_key=req.idempotency_key, dry_run=req.dry_run,
+        actor_role=actor_role,
+    )
+
+
