@@ -424,16 +424,36 @@ class FacturapiAdapter(ProviderAdapter):
         if not event_id or not event_type:
             return {"accepted": False, "reason": "malformed_event"}
 
-        # Defense in depth: verify the Facturapi-Signature header via
-        # their own validate-signature endpoint, when we have a signing
-        # secret to check it against. Failure here does NOT block
-        # processing — our webhook_token already proved the request came
-        # through the URL only we and Facturapi know — but it's recorded
-        # for audit visibility.
+        # Signature policy:
+        # - If webhook_signing_secret exists: token + signature present +
+        #   valid are REQUIRED. Invalid/missing signature → reject, no
+        #   business processing, audit without sensitive payload.
+        # - Legacy connections without signing secret: token fallback OK,
+        #   but audit that the connection needs upgrade.
         signature_valid: Optional[bool] = None
         signing_secret = decrypt_secret(doc.get("webhook_signing_secret_encrypted"))
         secret_key = decrypt_secret(doc.get("secret_key_encrypted"))
-        if signing_secret and signature_header and secret_key:
+        workspace_id = doc["workspace_id"]
+
+        if signing_secret:
+            if not signature_header:
+                if self._log_audit:
+                    await self._log_audit(
+                        "facturapi.webhook.rejected",
+                        "Facturapi webhook missing signature",
+                        workspace_id=workspace_id,
+                        metadata={"event_id": event_id, "event_type": event_type, "reason": "missing_signature"},
+                    )
+                return {"accepted": False, "reason": "missing_signature"}
+            if not secret_key:
+                if self._log_audit:
+                    await self._log_audit(
+                        "facturapi.webhook.rejected",
+                        "Facturapi webhook cannot verify signature",
+                        workspace_id=workspace_id,
+                        metadata={"event_id": event_id, "event_type": event_type, "reason": "missing_secret_key"},
+                    )
+                return {"accepted": False, "reason": "signature_unverifiable"}
             try:
                 async with self._client(secret_key) as client:
                     vr = await client.post(
@@ -442,10 +462,31 @@ class FacturapiAdapter(ProviderAdapter):
                     )
                 signature_valid = vr.status_code < 400
             except httpx.HTTPError:
-                signature_valid = None
+                signature_valid = False
+            if not signature_valid:
+                if self._log_audit:
+                    await self._log_audit(
+                        "facturapi.webhook.rejected",
+                        "Facturapi webhook invalid signature",
+                        workspace_id=workspace_id,
+                        metadata={
+                            "event_id": event_id,
+                            "event_type": event_type,
+                            "reason": "invalid_signature",
+                        },
+                    )
+                return {"accepted": False, "reason": "invalid_signature"}
+        else:
+            # Legacy token-only path — still accept, flag upgrade needed.
+            if self._log_audit:
+                await self._log_audit(
+                    "facturapi.webhook.legacy_token_only",
+                    "Facturapi connection needs signing-secret upgrade",
+                    workspace_id=workspace_id,
+                    metadata={"event_id": event_id, "event_type": event_type, "connection_id": connection_id},
+                )
 
-        # Idempotent dedup on Facturapi's own event id.
-        workspace_id = doc["workspace_id"]
+        # Idempotent dedup on (provider, event_id) — unique constraint.
         if connect_store is None:
             existing = await self.webhook_events_col.find_one({"event_id": event_id})
         else:

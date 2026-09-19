@@ -285,6 +285,40 @@ ACTION_SCOPES = {
 }
 
 
+def missing_base_scopes(granted_scopes: Optional[List[str]]) -> List[str]:
+    """Diff granted scopes against read-only MS base Graph permissions."""
+    granted = set()
+    for s in granted_scopes or []:
+        if not s:
+            continue
+        granted.add(s.split("/")[-1] if "/" in s else s)
+    base = [s for s in MS_SCOPES if s not in {"openid", "profile", "email", "offline_access"}]
+    return [s for s in base if s not in granted]
+
+
+def build_incremental_authorization_url(
+    state: str, redirect_uri: str, additional_scopes: List[str]
+) -> str:
+    """Request base Graph scopes PLUS action write scopes (Connected Limited → Grant).
+
+    MSAL re-requests the union so previously granted refresh tokens remain
+    usable after the user consents to Mail.Send / Calendars.ReadWrite.
+    Do NOT put write scopes in the initial MS_SCOPES connect set.
+    """
+    scopes = list(_graph_scopes())
+    for s in additional_scopes:
+        bare = s.split("/")[-1] if "/" in s else s
+        if bare not in scopes:
+            scopes.append(bare)
+    app = _msal_client()
+    return app.get_authorization_request_url(
+        scopes=scopes,
+        state=state,
+        redirect_uri=redirect_uri,
+        prompt="consent",
+    )
+
+
 def send_mail(access_token: str, to: str, subject: str, body: str) -> None:
     """Send a plain-text email via Microsoft Graph. Requires Mail.Send
     — callers MUST verify it's present in stored scopes first (see

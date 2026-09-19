@@ -11,23 +11,39 @@ primary_region = "iad"
   DB_NAME = "quantro_os"
   QUANTRO_DB_PRIMARY = "supabase"
   QUANTRO_MONGO_MIRROR = "1"
-  QUANTRO_ACTIONS_PRIMARY = "mongo"
-  QUANTRO_SECRETS_PRIMARY = "mongo"
+  # Calendar stays mongo until canonical Google/MS field tests are green.
+  QUANTRO_CALENDAR_PRIMARY = "mongo"
+  # Autosync runs inside the HTTP process. Keep at least one machine warm
+  # so Fly auto_stop does not kill the sync loop (min_machines_running=0
+  # previously caused cold-start gaps / ERR_CONNECTION_CLOSED). A dedicated
+  # worker process is a later path; this is the minimum acceptable now.
+  QUANTRO_SYNC_LOCK_WINDOW_SECONDS = "300"
 
 [http_service]
   internal_port = 8000
   force_https = true
   auto_stop_machines = "stop"
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1
   processes = ["app"]
 
+  # Liveness — process up
   [[http_service.checks]]
     interval = "15s"
     timeout = "5s"
     grace_period = "30s"
     method = "GET"
     path = "/api/health"
+
+  # Readiness — used for traffic routing when Fly supports distinct ready checks.
+  # Fly http_service.checks currently gate machine health; keep /api/ready as
+  # the operational readiness probe (deploy scripts / external monitors).
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "8s"
+    grace_period = "45s"
+    method = "GET"
+    path = "/api/ready"
 
 [[vm]]
   size = "shared-cpu-1x"
