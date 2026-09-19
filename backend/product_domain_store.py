@@ -129,6 +129,7 @@ CALENDAR_CFG = DomainConfig(
     known_cols=frozenset({
         "event_id", "workspace_id",
         "external_event_id", "external_provider", "external_url",
+        "ical_uid", "external_updated_at",
         "title", "description",
         "start_time", "end_time", "location", "attendees", "status",
         "source", "contact_id",
@@ -137,7 +138,9 @@ CALENDAR_CFG = DomainConfig(
         "is_simulation", "hidden_by_real",
         "created_at", "updated_at", "synced_at",
     }),
-    dt_keys=frozenset({"start_time", "end_time", "created_at", "updated_at", "synced_at"}),
+    dt_keys=frozenset({
+        "start_time", "end_time", "created_at", "updated_at", "synced_at", "external_updated_at",
+    }),
     json_keys=frozenset({"attendees"}),
     conflict="workspace_id,event_id",
 )
@@ -240,6 +243,8 @@ def canonical_calendar_write(
     source: Optional[str] = None,
     contact_id: Optional[str] = None,
     external_url: Optional[str] = None,
+    ical_uid: Optional[str] = None,
+    external_updated_at: Any = None,
     is_simulation: bool = False,
     hidden_by_real: bool = False,
     synced_at: Any = None,
@@ -256,6 +261,7 @@ def canonical_calendar_write(
         "workspace_id": workspace_id,
         "external_provider": provider,
         "external_event_id": external_event_id,
+        "ical_uid": ical_uid,
         "title": title,
         "description": description,
         "start_time": start_time,
@@ -271,6 +277,8 @@ def canonical_calendar_write(
     }
     if provider == "google" and external_event_id:
         doc["google_event_id"] = external_event_id
+    if external_updated_at is not None:
+        doc["external_updated_at"] = external_updated_at
     if synced_at is not None:
         doc["synced_at"] = synced_at
     if created_at is not None:
@@ -329,6 +337,27 @@ async def find_calendar_event_for_external_sync(
     return await mongo.find_one({"workspace_id": workspace_id, legacy_key: external_event_id})
 
 
+def _calendar_compare_unchanged(existing: Dict[str, Any], canonical: Dict[str, Any]) -> bool:
+    """True when provider payload matches stored compare metadata (skip write)."""
+    keys = (
+        "title", "start_time", "end_time", "status", "location",
+        "ical_uid", "external_updated_at", "external_url", "description",
+    )
+    for k in keys:
+        left = existing.get(k)
+        right = canonical.get(k)
+        if left is None and right in (None, "", []):
+            continue
+        # Normalize datetimes / strings for loose equality
+        if hasattr(left, "isoformat"):
+            left = left.isoformat()
+        if hasattr(right, "isoformat"):
+            right = right.isoformat()
+        if str(left or "") != str(right or ""):
+            return False
+    return True
+
+
 async def upsert_calendar_external_event(
     calendar_col: Any,
     *,
@@ -337,13 +366,16 @@ async def upsert_calendar_external_event(
     external_event_id: str,
     canonical: Dict[str, Any],
     now: Any,
-) -> str:
+) -> Dict[str, Any]:
     """Upsert a Google/MS calendar event without duplicating legacy rows.
 
+    Returns ``{"event_id": str, "outcome": "inserted"|"updated"|"unchanged"|"cancelled"}``.
     If a legacy ``gcal_id`` / ``ms_id`` row is found, update that document in
     place, add canonical ``external_*`` fields, and preserve ``event_id``/``id``.
     Do **not** delete legacy ``gcal_id``/``ms_id``; new writes simply stop
     writing those keys (canonical payload has none).
+    Do **not** auto-merge Google/MS by title/time — identity is
+    ``(workspace_id, external_provider, external_event_id)`` (+ ``ical_uid`` stored).
     """
     provider = (provider or "").lower().strip()
     existing = await find_calendar_event_for_external_sync(
@@ -361,8 +393,13 @@ async def upsert_calendar_external_event(
     set_fields["external_provider"] = provider
     set_fields["external_event_id"] = external_event_id
 
+    status_val = (canonical.get("status") or "").lower()
+    is_cancelled = status_val == "cancelled" or bool(canonical.get("cancelled"))
+
     if existing is not None:
         event_id = existing.get("event_id") or existing.get("id") or str(uuid.uuid4())
+        if _calendar_compare_unchanged(existing, canonical):
+            return {"event_id": event_id, "outcome": "unchanged"}
         set_fields_with_id = {**set_fields, "event_id": event_id}
         mongo = getattr(calendar_col, "_mongo", calendar_col)
         if existing.get("_id") is not None and hasattr(mongo, "update_one"):
@@ -381,7 +418,8 @@ async def upsert_calendar_external_event(
         # Dual-write / SB path: preserve stable event_id via external conflict.
         if hasattr(calendar_col, "_sb_upsert_doc") and is_dual_write(CALENDAR_CFG):
             await calendar_col._sb_upsert_doc({**set_fields, "event_id": event_id})
-        return event_id
+        outcome = "cancelled" if is_cancelled else "updated"
+        return {"event_id": event_id, "outcome": outcome}
 
     event_id = canonical.get("event_id") or str(uuid.uuid4())
     await calendar_col.update_one(
@@ -396,7 +434,8 @@ async def upsert_calendar_external_event(
         },
         upsert=True,
     )
-    return event_id
+    outcome = "cancelled" if is_cancelled else "inserted"
+    return {"event_id": event_id, "outcome": outcome}
 
 
 

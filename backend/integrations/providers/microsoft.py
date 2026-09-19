@@ -24,9 +24,9 @@ BASE_SCOPES = ["Mail.Read", "Calendars.Read"]
 
 class MicrosoftAdapter(ProviderAdapter):
     provider_id = "microsoft"
-    name = "Microsoft 365"
+    name = "Microsoft Outlook"
     category = "productivity"
-    description = "Outlook Mail + Calendar. Read-only by default; Actions request write scopes via Grant."
+    description = "Microsoft Outlook Mail + Calendar. Read-only by default; Actions request write scopes via Grant."
     auth_type = AuthType.OAUTH2
     supports_sync = True
     supports_webhooks = False

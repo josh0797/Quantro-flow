@@ -2,46 +2,32 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import {
   Search, CheckCircle2, AlertTriangle, XCircle, Settings2, Loader2,
-  RefreshCw, Unlink2, Mail, Receipt, Bot, Sparkles, Users, Zap, Lock,
+  RefreshCw, Unlink2, Mail, Receipt, Bot, Sparkles, Lock,
 } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription,
 } from '@/components/ui/sheet';
-import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
-} from '@/components/ui/dialog';
 import { useLanguage } from '../context/LanguageContext';
 import {
   getConnectProviders, testConnection, syncConnection, disconnectProvider,
-  connectFacturapi, requestGooglePermission, requestMicrosoftPermission, getActions, getActionExecutions,
+  requestGooglePermission, requestMicrosoftPermission, getActions, getActionExecutions,
   startGoogleOAuth, startMicrosoftOAuth,
 } from '../lib/api';
 
-// Providers with no real backend adapter yet — shown as inert placeholders
-// per the task spec ("Providers futuros deben mostrarse como Coming Soon...
-// nunca como conectada o funcional mediante mocks"). OpenAI/CRM already
-// exist as *legacy* generic integrations (Settings → Integrations) — they
-// are not duplicated here to avoid two half-real representations of the
-// same connection; migrating them to real ProviderAdapters is the natural
-// next step (see the task's own "next provider" question).
-const COMING_SOON = [
-  { id: 'quickbooks', name: 'QuickBooks', category: 'fiscal', icon: Receipt },
-  { id: 'xero', name: 'Xero', category: 'fiscal', icon: Receipt },
-  { id: 'salesforce', name: 'Salesforce', category: 'crm', icon: Users },
-  { id: 'hubspot', name: 'HubSpot', category: 'crm', icon: Users },
-  { id: 'shopify', name: 'Shopify', category: 'automation', icon: Zap },
-];
+const CATEGORY_ORDER = ['all', 'productivity', 'fiscal', 'ai', 'automation', 'internal'];
 
-const CATEGORY_ORDER = ['all', 'productivity', 'fiscal', 'crm', 'ai', 'automation', 'internal'];
-
-const PROVIDER_ICON = { google: Mail, microsoft: Mail, facturapi: Receipt, quantro_internal: Sparkles };
+const PROVIDER_ICON = {
+  google: Mail,
+  microsoft: Mail,
+  quantro_invoicing: Receipt,
+  quantro_internal: Sparkles,
+};
 
 function statusTone(status) {
   switch (status) {
@@ -103,78 +89,6 @@ function ProviderCard({ provider, onOpen, t }) {
         </div>
       </div>
     </Card>
-  );
-}
-
-function ComingSoonCard({ item, t }) {
-  const Icon = item.icon;
-  return (
-    <Card data-testid={`connect-provider-card-${item.id}`} className="p-5 bg-[hsl(var(--card)/0.5)] border-dashed border-[hsl(var(--border))] opacity-70">
-      <div className="flex items-start gap-3">
-        <div className="w-10 h-10 shrink-0 rounded-lg bg-[hsl(var(--muted)/0.5)] flex items-center justify-center text-muted-foreground">
-          <Icon size={18} />
-        </div>
-        <div className="flex-1 min-w-0 space-y-2">
-          <div className="flex items-start justify-between gap-2">
-            <h3 className="text-sm font-semibold text-foreground truncate">{item.name}</h3>
-            <Badge variant="outline" className="text-[10px] text-muted-foreground">
-              {t('integrations.webhook.coming_soon_badge')}
-            </Badge>
-          </div>
-        </div>
-      </div>
-    </Card>
-  );
-}
-
-function FacturapiConnectDialog({ open, onClose, onConnected, t }) {
-  const [secretKey, setSecretKey] = useState('');
-  const [connecting, setConnecting] = useState(false);
-
-  const submit = async () => {
-    if (!secretKey.trim()) return;
-    setConnecting(true);
-    try {
-      await connectFacturapi(secretKey.trim());
-      toast.success(t('connect.toasts.connected', { provider: 'Facturapi' }));
-      setSecretKey('');
-      onConnected();
-      onClose();
-    } catch (err) {
-      toast.error(err?.response?.data?.message || t('connect.toasts.action_failed'));
-    } finally {
-      setConnecting(false);
-    }
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent data-testid="facturapi-connect-dialog" className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>{t('connect.facturapi_modal.title')}</DialogTitle>
-          <DialogDescription>{t('connect.facturapi_modal.description')}</DialogDescription>
-        </DialogHeader>
-        <div className="space-y-2 py-2">
-          <Label htmlFor="facturapi-secret-key">{t('connect.facturapi_modal.secret_key_label')}</Label>
-          <Input
-            id="facturapi-secret-key"
-            data-testid="facturapi-secret-key-input"
-            type="password"
-            autoComplete="off"
-            placeholder={t('connect.facturapi_modal.secret_key_placeholder')}
-            value={secretKey}
-            onChange={(e) => setSecretKey(e.target.value)}
-            className="font-mono text-sm"
-          />
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={connecting}>{t('actions.execute_modal.cancel')}</Button>
-          <Button data-testid="facturapi-connect-submit" onClick={submit} disabled={connecting || !secretKey.trim()}>
-            {connecting ? (<><Loader2 size={14} className="animate-spin mr-2" />{t('connect.facturapi_modal.connecting')}</>) : t('connect.facturapi_modal.connect_button')}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }
 
@@ -248,6 +162,7 @@ function ProviderDrawer({ provider, open, onClose, onChanged, t }) {
   };
 
   const isQuantroInternal = provider.provider_id === 'quantro_internal';
+  const isInvoicing = provider.provider_id === 'quantro_invoicing';
 
   return (
     <Sheet open={open} onOpenChange={(o) => !o && onClose()}>
@@ -284,12 +199,12 @@ function ProviderDrawer({ provider, open, onClose, onChanged, t }) {
             )}
             <div className="flex flex-wrap gap-2 pt-2">
               {provider.status === 'disconnected' && provider.provider_id === 'google' && (
-                <Button size="sm" onClick={() => startGoogleOAuth('/settings').then(({ auth_url }) => { window.location.href = auth_url; })}>{t('connect.card.connect')}</Button>
+                <Button size="sm" onClick={() => startGoogleOAuth('/connect').then(({ auth_url }) => { window.location.href = auth_url; })}>{t('connect.card.connect')}</Button>
               )}
               {provider.status === 'disconnected' && provider.provider_id === 'microsoft' && (
-                <Button size="sm" onClick={() => startMicrosoftOAuth('/settings').then(({ auth_url }) => { window.location.href = auth_url; })}>{t('connect.card.connect')}</Button>
+                <Button size="sm" onClick={() => startMicrosoftOAuth('/connect').then(({ auth_url }) => { window.location.href = auth_url; })}>{t('connect.card.connect')}</Button>
               )}
-              {provider.status !== 'disconnected' && !isQuantroInternal && (
+              {provider.status !== 'disconnected' && !isQuantroInternal && !isInvoicing && (
                 <>
                   <Button size="sm" variant="outline" onClick={handleTest} disabled={busy} data-testid="drawer-test-button">
                     {busy ? <Loader2 size={14} className="animate-spin mr-2" /> : <RefreshCw size={14} className="mr-2" />}
@@ -305,6 +220,12 @@ function ProviderDrawer({ provider, open, onClose, onChanged, t }) {
                     <Unlink2 size={14} className="mr-2" />{t('connect.drawer.overview_disconnect')}
                   </Button>
                 </>
+              )}
+              {isInvoicing && (
+                <Button size="sm" variant="outline" onClick={handleTest} disabled={busy} data-testid="drawer-test-button">
+                  {busy ? <Loader2 size={14} className="animate-spin mr-2" /> : <RefreshCw size={14} className="mr-2" />}
+                  {t('connect.drawer.overview_test')}
+                </Button>
               )}
             </div>
           </TabsContent>
@@ -382,7 +303,6 @@ export default function Connect() {
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState('all');
   const [selected, setSelected] = useState(null);
-  const [facturapiDialogOpen, setFacturapiDialogOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -398,12 +318,6 @@ export default function Connect() {
 
   useEffect(() => { load(); }, [load]);
 
-  const comingSoon = useMemo(
-    () => COMING_SOON.filter((c) => category === 'all' || c.category === category)
-      .filter((c) => c.name.toLowerCase().includes(search.toLowerCase())),
-    [category, search],
-  );
-
   const filteredProviders = useMemo(
     () => providers
       .filter((p) => category === 'all' || p.category === category)
@@ -411,13 +325,11 @@ export default function Connect() {
     [providers, category, search],
   );
 
-  const handleOpen = (provider) => {
-    if (provider.provider_id === 'facturapi' && provider.status === 'disconnected') {
-      setFacturapiDialogOpen(true);
-      return;
-    }
-    setSelected(provider);
-  };
+  // Hide empty categories (crm etc.) that have no live providers after removals.
+  const visibleCategories = useMemo(() => {
+    const present = new Set(providers.map((p) => p.category));
+    return CATEGORY_ORDER.filter((c) => c === 'all' || present.has(c));
+  }, [providers]);
 
   return (
     <div data-testid="connect-page" className="max-w-6xl mx-auto px-4 md:px-6 py-6 space-y-6">
@@ -443,7 +355,7 @@ export default function Connect() {
       </div>
 
       <div className="flex flex-wrap gap-2" data-testid="connect-category-filters">
-        {CATEGORY_ORDER.map((cat) => (
+        {visibleCategories.map((cat) => (
           <button
             key={cat}
             data-testid={`connect-category-${cat}`}
@@ -466,9 +378,8 @@ export default function Connect() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3" data-testid="connect-provider-grid">
           {filteredProviders.map((p) => (
-            <ProviderCard key={p.provider_id} provider={p} onOpen={handleOpen} t={t} />
+            <ProviderCard key={p.provider_id} provider={p} onOpen={setSelected} t={t} />
           ))}
-          {comingSoon.map((c) => <ComingSoonCard key={c.id} item={c} t={t} />)}
         </div>
       )}
 
@@ -477,13 +388,6 @@ export default function Connect() {
         open={!!selected}
         onClose={() => setSelected(null)}
         onChanged={load}
-        t={t}
-      />
-
-      <FacturapiConnectDialog
-        open={facturapiDialogOpen}
-        onClose={() => setFacturapiDialogOpen(false)}
-        onConnected={load}
         t={t}
       />
     </div>

@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 import { useAuth } from '../../contexts/AuthContext';
 import { useLanguage } from '../../context/LanguageContext';
 import { OnboardingProvider, useOnboarding } from './OnboardingContext';
-import { syncGoogleData, syncMicrosoftData, startGoogleOAuth } from '../../lib/api';
+import { syncGoogleData, syncMicrosoftData, startGoogleOAuth, startMicrosoftOAuth } from '../../lib/api';
 import { Zap, LogOut } from 'lucide-react';
 
 /**
@@ -213,8 +213,8 @@ function ProviderCallbackHandler() {
         action: {
           label: t('welcome.connect_modal.reauthorize_cta'),
           onClick: () => {
-            if (provider !== 'google') return; // Microsoft not wired up yet.
-            startGoogleOAuth(location.pathname).then(({ auth_url }) => {
+            const start = provider === 'microsoft' ? startMicrosoftOAuth : startGoogleOAuth;
+            start(location.pathname).then(({ auth_url }) => {
               if (auth_url) window.location.href = auth_url;
             });
           },

@@ -153,9 +153,9 @@ class PolicyEngine:
     def _default_minimum_role(self, action_def: ActionDefinition) -> str:
         if action_def.risk_level in (RiskLevel.HIGH, RiskLevel.CRITICAL):
             return "leader"
-        if action_def.provider in ("google", "microsoft", "facturapi") and action_def.risk_level == RiskLevel.MEDIUM:
+        if action_def.provider in ("google", "microsoft", "quantro_invoicing") and action_def.risk_level == RiskLevel.MEDIUM:
             return "leader"
-        if action_def.provider == "facturapi" and action_def.action_id.endswith(".create"):
+        if action_def.provider == "quantro_invoicing" and "create" in action_def.action_id:
             return "leader"
         # read/list and internal low-risk writes
         if action_def.action_id.endswith(".get") or action_def.action_id.endswith(".list"):
