@@ -180,12 +180,55 @@ def exchange_code_for_tokens(
     return result, profile
 
 
-def refresh_access_token(refresh_token: str) -> Dict[str, Any]:
+_OIDC_RESERVED_SCOPES = frozenset({"openid", "profile", "email", "offline_access"})
+
+
+def normalize_refresh_scopes(scopes: Optional[Any] = None) -> List[str]:
+    """Normalize stored connection scopes for MSAL refresh.
+
+    Accepts a list or a space-separated string (as returned by MSAL's
+    ``scope`` field). Strips OIDC reserved scopes that MSAL rejects /
+    adds itself. Falls back to ``_graph_scopes()`` when nothing remains
+    so refresh never runs with an empty scope list.
+    """
+    if scopes is None:
+        return _graph_scopes()
+    if isinstance(scopes, str):
+        raw = scopes.split()
+    elif isinstance(scopes, (list, tuple, set)):
+        raw = list(scopes)
+    else:
+        return _graph_scopes()
+
+    out: List[str] = []
+    seen = set()
+    for s in raw:
+        if not s or not isinstance(s, str):
+            continue
+        bare = s.split("/")[-1] if "/" in s else s
+        if bare in _OIDC_RESERVED_SCOPES:
+            continue
+        if bare and bare not in seen:
+            seen.add(bare)
+            out.append(bare)
+    return out or _graph_scopes()
+
+
+def refresh_access_token(
+    refresh_token: str,
+    scopes: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """Exchange a refresh token for a new access token. MSAL handles
-    rotation if the IdP returns a new refresh token."""
+    rotation if the IdP returns a new refresh token.
+
+    Pass the connection's stored Graph scopes (including incremental
+    Action writes like Mail.Send / Calendars.ReadWrite) so refresh does
+    not silently drop them and fall back to base read scopes only.
+    """
     app = _msal_client()
+    refresh_scopes = normalize_refresh_scopes(scopes)
     result = app.acquire_token_by_refresh_token(
-        refresh_token=refresh_token, scopes=_graph_scopes(),
+        refresh_token=refresh_token, scopes=refresh_scopes,
     )
     if "error" in result:
         raise RuntimeError(f"MSAL refresh error: {result.get('error_description')}")
@@ -204,7 +247,10 @@ def maybe_refresh_dict(stored: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             return None
     if not stored.get("refresh_token_plain"):
         return None
-    fresh = refresh_access_token(stored["refresh_token_plain"])
+    fresh = refresh_access_token(
+        stored["refresh_token_plain"],
+        scopes=normalize_refresh_scopes(stored.get("scopes")),
+    )
     return fresh
 
 

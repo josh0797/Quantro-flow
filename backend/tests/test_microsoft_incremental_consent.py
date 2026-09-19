@@ -130,3 +130,116 @@ def test_connected_limited_to_connected_when_action_scopes_present():
     ]
     status2 = "ok" if not missing_action2 else "connected_limited"
     assert status2 == "connected_limited"
+
+
+def test_normalize_refresh_scopes_strips_oidc_and_preserves_writes():
+    import microsoft_oauth as msoa
+
+    normalized = msoa.normalize_refresh_scopes(
+        ["openid", "profile", "email", "offline_access", "Mail.Read", "Mail.Send", "User.Read"]
+    )
+    assert "Mail.Send" in normalized
+    assert "Mail.Read" in normalized
+    assert "openid" not in normalized
+    assert "offline_access" not in normalized
+
+
+def test_normalize_refresh_scopes_string_and_empty_fallback():
+    import microsoft_oauth as msoa
+
+    from_str = msoa.normalize_refresh_scopes("Mail.Read Mail.Send offline_access")
+    assert from_str == ["Mail.Read", "Mail.Send"]
+
+    assert msoa.normalize_refresh_scopes(None) == msoa._graph_scopes()
+    assert msoa.normalize_refresh_scopes([]) == msoa._graph_scopes()
+    assert msoa.normalize_refresh_scopes("openid offline_access") == msoa._graph_scopes()
+
+
+def test_refresh_access_token_passes_stored_action_scopes(monkeypatch):
+    import microsoft_oauth as msoa
+
+    captured = {}
+
+    class FakeApp:
+        def acquire_token_by_refresh_token(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "access_token": "at-new",
+                "expires_in": 3600,
+                "scope": "Mail.Read Calendars.Read User.Read Mail.Send",
+            }
+
+    monkeypatch.setattr(msoa, "_msal_client", lambda: FakeApp())
+    result = msoa.refresh_access_token(
+        "rt",
+        scopes=["Mail.Read", "Calendars.Read", "User.Read", "Mail.Send", "offline_access"],
+    )
+    assert "Mail.Send" in captured["scopes"]
+    assert "offline_access" not in captured["scopes"]
+    assert result["access_token"] == "at-new"
+    # No new refresh_token in result — callers keep the prior one.
+    assert "refresh_token" not in result
+
+
+def test_refresh_access_token_falls_back_to_graph_scopes(monkeypatch):
+    import microsoft_oauth as msoa
+
+    captured = {}
+
+    class FakeApp:
+        def acquire_token_by_refresh_token(self, **kwargs):
+            captured.update(kwargs)
+            return {"access_token": "at", "expires_in": 3600}
+
+    monkeypatch.setattr(msoa, "_msal_client", lambda: FakeApp())
+    msoa.refresh_access_token("rt", scopes=None)
+    assert captured["scopes"] == msoa._graph_scopes()
+    msoa.refresh_access_token("rt", scopes=[])
+    assert captured["scopes"] == msoa._graph_scopes()
+
+
+@pytest.mark.asyncio
+async def test_load_microsoft_credentials_passes_doc_scopes_on_refresh(monkeypatch):
+    """server._load_microsoft_credentials must refresh with stored Action scopes."""
+    import server as srv
+    import microsoft_oauth as msoa
+
+    past = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    doc = {
+        "access_token": "enc-at",
+        "refresh_token": "enc-rt",
+        "expires_at": past,
+        "scopes": ["Mail.Read", "Calendars.Read", "User.Read", "Mail.Send", "offline_access"],
+    }
+    captured = {}
+    patched = {}
+
+    async def fake_get_connection(**kwargs):
+        return dict(doc)
+
+    async def fake_patch_connection(**kwargs):
+        patched.update(kwargs.get("fields") or {})
+
+    def fake_refresh(refresh_token, scopes=None):
+        captured["refresh_token"] = refresh_token
+        captured["scopes"] = scopes
+        return {
+            "access_token": "at-fresh",
+            "expires_in": 3600,
+            "scope": "Mail.Read Calendars.Read User.Read Mail.Send",
+            # omit refresh_token — prior must be kept
+        }
+
+    monkeypatch.setattr(srv.secrets_store, "get_connection", fake_get_connection)
+    monkeypatch.setattr(srv.secrets_store, "patch_connection", fake_patch_connection)
+    monkeypatch.setattr(msoa, "decrypt_token", lambda v: "plain-" + (v or ""))
+    monkeypatch.setattr(msoa, "encrypt_token", lambda v: "enc-" + (v or ""))
+    monkeypatch.setattr(msoa, "refresh_access_token", fake_refresh)
+
+    access, out_doc = await srv._load_microsoft_credentials("ws-1")
+    assert access == "at-fresh"
+    assert captured["scopes"] == msoa.normalize_refresh_scopes(doc["scopes"])
+    assert "Mail.Send" in captured["scopes"]
+    assert patched["refresh_token"] == "enc-plain-enc-rt"  # prior plain re-encrypted
+    assert patched["scopes"] == ["Mail.Read", "Calendars.Read", "User.Read", "Mail.Send"]
+    assert out_doc.get("scopes") == patched["scopes"]

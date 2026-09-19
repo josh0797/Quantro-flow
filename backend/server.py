@@ -6321,21 +6321,35 @@ async def _load_microsoft_credentials(workspace_id: str) -> Tuple[Optional[str],
         needs_refresh = datetime.now(timezone.utc) >= expires_at - timedelta(seconds=60)
     if needs_refresh and refresh_plain:
         try:
-            fresh = msoa.refresh_access_token(refresh_plain)
+            # Preserve incremental Action scopes (Mail.Send / Calendars.ReadWrite)
+            # — refreshing with base _graph_scopes() alone drops writes after ~1h.
+            fresh = msoa.refresh_access_token(
+                refresh_plain,
+                scopes=msoa.normalize_refresh_scopes(doc.get("scopes")),
+            )
             access_plain = fresh.get("access_token") or access_plain
             new_refresh = fresh.get("refresh_token") or refresh_plain
             new_expiry = datetime.now(timezone.utc) + timedelta(seconds=int(fresh.get("expires_in") or 3600))
+            patch_fields = {
+                "access_token": msoa.encrypt_token(access_plain),
+                "refresh_token": msoa.encrypt_token(new_refresh),
+                "expires_at": new_expiry,
+                "updated_at": datetime.now(timezone.utc),
+            }
+            # Align stored scopes with the token MSAL actually returned.
+            result_scope = fresh.get("scope")
+            if result_scope:
+                patch_fields["scopes"] = (
+                    result_scope.split() if isinstance(result_scope, str) else list(result_scope)
+                )
             await secrets_store.patch_connection(
                 provider="microsoft",
                 workspace_id=workspace_id,
                 mongo_col=microsoft_integrations_col,
-                fields={
-                    "access_token": msoa.encrypt_token(access_plain),
-                    "refresh_token": msoa.encrypt_token(new_refresh),
-                    "expires_at": new_expiry,
-                    "updated_at": datetime.now(timezone.utc),
-                },
+                fields=patch_fields,
             )
+            if "scopes" in patch_fields:
+                doc = {**doc, "scopes": patch_fields["scopes"]}
         except Exception:  # noqa: BLE001
             return None, doc
     return access_plain, doc
