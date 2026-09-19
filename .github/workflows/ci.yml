@@ -10,6 +10,10 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Required checks for main (configure in GitHub branch protection):
+#   - Backend
+#   - Frontend
+#   - Vercel (deployment / preview check from Vercel GitHub integration)
 jobs:
   backend:
     name: Backend
@@ -34,22 +38,32 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt pytest pytest-asyncio httpx
 
-      - name: Phase identity / OAuth / actions tests
+      - name: Phase 1–4 + 6 identity / OAuth / actions / Facturapi / inbox
         run: |
           PYTHONPATH=backend pytest \
             test_phase1_identity_sot.py \
             test_phase2_oauth_secrets.py \
             test_phase3_actions_postgres.py \
+            test_phase4_facturapi_connect.py \
+            test_phase6_inbox_items.py \
             -q
 
-      - name: Backend package tests
+      - name: Backend package tests (includes hardening)
         working-directory: backend
         run: PYTHONPATH=. pytest tests/ -q
 
-      - name: Import smoke (oauth / secrets / actions store)
+      - name: Import smoke (oauth / secrets / actions / product domains)
         working-directory: backend
+        env:
+          SUPABASE_URL: https://example.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: test-role
+          FRONTEND_PUBLIC_URL: https://quantro-flow.vercel.app
+          ALLOWED_FRONTEND_ORIGINS: https://quantro-flow.vercel.app
+          QUANTRO_CALENDAR_PRIMARY: mongo
+          MONGO_URL: mongodb://localhost:27017
+          DB_NAME: quantro_test
         run: |
-          PYTHONPATH=. python -c "import google_oauth; import provider_secrets_store; import actions.store"
+          PYTHONPATH=. python -c "import google_oauth; import microsoft_oauth; import provider_secrets_store; import product_domain_store; import actions.store"
 
   frontend:
     name: Frontend
@@ -71,13 +85,15 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend dependencies
+        # Do not hide errors with CI=false on install; only disable CRA eslint plugin noise.
         env:
-          CI: "false"
           DISABLE_ESLINT_PLUGIN: "true"
         run: npm ci
 
       - name: Build frontend
         env:
-          CI: "false"
           DISABLE_ESLINT_PLUGIN: "true"
+          # CRA treats warnings as errors when CI=true; keep build signal without blanket CI=false.
+          CI: "true"
+          GENERATE_SOURCEMAP: "false"
         run: npm run build

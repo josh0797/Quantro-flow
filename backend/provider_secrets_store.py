@@ -544,13 +544,16 @@ async def put_oauth_state(
     return_to: Optional[str],
     redirect_uri: Optional[str],
     code_verifier: Optional[str] = None,
+    requested_scopes: Optional[List[str]] = None,
     created_at: Optional[datetime] = None,
     expires_at: Optional[datetime] = None,
 ) -> None:
     """Persist CSRF state. Dual-write always when Supabase is configured.
 
     ``code_verifier`` is the short-lived Google PKCE verifier (nullable for
-    Microsoft / legacy rows). Deleted with the row on consume.
+    Microsoft / legacy rows). ``requested_scopes`` is the Graph scope list
+    used for Microsoft incremental consent (nullable for Google / initial
+    connect). Deleted with the row on consume.
     """
     if provider not in OAUTH_PROVIDERS:
         raise ValueError(f"unknown oauth provider: {provider}")
@@ -566,6 +569,7 @@ async def put_oauth_state(
         "return_to": return_to,
         "redirect_uri": redirect_uri,
         "code_verifier": code_verifier,
+        "requested_scopes": list(requested_scopes) if requested_scopes is not None else None,
         "created_at": created,
         "expires_at": expires,
     }
@@ -582,6 +586,7 @@ async def put_oauth_state(
             "return_to": return_to,
             "redirect_uri": redirect_uri,
             "code_verifier": code_verifier,
+            "requested_scopes": list(requested_scopes) if requested_scopes is not None else None,
             "created_at": _iso(created),
             "expires_at": _iso(expires),
         }

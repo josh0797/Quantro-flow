@@ -38,3 +38,10 @@ python scripts/backfill_mongo_to_supabase.py --table calendar_events
 
 Supported via `scripts/backfill_mongo_to_supabase.py` Phase 6.2–6.3 migrators (mirrors `product_domain_store.DomainConfig`).
 
+## Calendar primary (hardening)
+
+`QUANTRO_CALENDAR_PRIMARY` must remain **`mongo`** until the canonical
+`external_event_id` / `external_provider` / `start_time` model + tests are green.
+Do not recommend supabase as calendar primary in runbooks until then.
+See `docs/flip-audit-report.md` and migration `20260919010000_calendar_events_canonical.sql`.
+

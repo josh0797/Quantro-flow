@@ -1170,16 +1170,53 @@ _PHASE6_DOMAINS = {
         "table": "calendar_events",
         "app_id": "event_id",
         "conflict": "workspace_id,event_id",
-        "dt_keys": {"start_time", "end_time", "created_at", "updated_at"},
+        "dt_keys": {"start_time", "end_time", "created_at", "updated_at", "synced_at"},
         "known": {
-            "event_id", "workspace_id", "title", "description",
+            "event_id", "workspace_id",
+            "external_event_id", "external_provider", "external_url",
+            "title", "description",
             "start_time", "end_time", "location", "attendees", "status",
             "source", "contact_id", "google_event_id",
             "is_simulation", "hidden_by_real",
-            "created_at", "updated_at",
+            "created_at", "updated_at", "synced_at",
         },
     },
 }
+
+
+def _normalize_calendar_mongo_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Map legacy gcal_id/ms_id/start/end/html_link/id → canonical before upsert."""
+    out = dict(row)
+    if out.get("id") and not out.get("event_id"):
+        out["event_id"] = out["id"]
+    if out.get("gcal_id") and not out.get("external_event_id"):
+        out["external_event_id"] = out["gcal_id"]
+        out.setdefault("external_provider", "google")
+    if out.get("ms_id") and not out.get("external_event_id"):
+        out["external_event_id"] = out["ms_id"]
+        out.setdefault("external_provider", "microsoft")
+    if out.get("google_event_id") and not out.get("external_event_id"):
+        out["external_event_id"] = out["google_event_id"]
+        out.setdefault("external_provider", "google")
+    if out.get("start") and not out.get("start_time"):
+        out["start_time"] = out["start"]
+    if out.get("end") and not out.get("end_time"):
+        out["end_time"] = out["end"]
+    if out.get("html_link") and not out.get("external_url"):
+        out["external_url"] = out["html_link"]
+    provider = (out.get("external_provider") or "").lower().strip()
+    if provider not in {"google", "microsoft", "internal"}:
+        src = (out.get("source") or "").lower()
+        if "google" in src:
+            provider = "google"
+        elif "outlook" in src or "microsoft" in src:
+            provider = "microsoft"
+        else:
+            provider = "internal"
+        out["external_provider"] = provider
+    if out.get("external_provider") == "google" and out.get("external_event_id"):
+        out.setdefault("google_event_id", out["external_event_id"])
+    return out
 
 
 async def migrate_product_domain(
@@ -1202,6 +1239,8 @@ async def migrate_product_domain(
         if limit and seen >= limit:
             break
         seen += 1
+        if domain_key == "calendar_events":
+            row = _normalize_calendar_mongo_row(row)
         wid = row.get("workspace_id")
         aid = row.get(app_id) or row.get("id")
         if not wid or not aid:

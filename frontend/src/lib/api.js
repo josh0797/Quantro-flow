@@ -230,6 +230,8 @@ export const disconnectProvider = (provider) => api.delete(`/connect/providers/$
 export const connectFacturapi = (secret_key) => api.post('/connect/providers/facturapi/connect', { secret_key }).then(r => r.data);
 export const requestGooglePermission = (action_id, return_to) =>
   api.get('/connect/providers/google/request-permission', { params: { action_id, return_to } }).then(r => r.data);
+export const requestMicrosoftPermission = (action_id, return_to) =>
+  api.get('/connect/providers/microsoft/request-permission', { params: { action_id, return_to } }).then(r => r.data);
 
 // Quantro Actions
 export const getActions = (params = {}) => api.get('/actions', { params }).then(r => r.data);

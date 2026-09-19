@@ -119,23 +119,41 @@ def _graph_scopes() -> List[str]:
     return [s for s in MS_SCOPES if s not in {"openid", "profile", "email", "offline_access"}]
 
 
-def build_authorization_url(state: str, redirect_uri: str) -> str:
+def build_authorization_url(
+    state: str,
+    redirect_uri: str,
+    scopes: Optional[List[str]] = None,
+) -> str:
+    """Initial connect uses read/base Graph scopes only.
+
+    Pass ``scopes`` explicitly for incremental consent (base + action writes).
+    """
     app = _msal_client()
     return app.get_authorization_request_url(
-        scopes=_graph_scopes(),
+        scopes=list(scopes) if scopes is not None else _graph_scopes(),
         state=state,
         redirect_uri=redirect_uri,
         prompt="select_account",  # let multi-account users pick deliberately
     )
 
 
-def exchange_code_for_tokens(code: str, redirect_uri: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def exchange_code_for_tokens(
+    code: str,
+    redirect_uri: str,
+    scopes: Optional[List[str]] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Returns (token_payload, profile). ``token_payload`` has
     ``access_token``, ``refresh_token``, ``expires_in`` and the granted
-    ``scope`` string. ``profile`` is a best-effort /me lookup."""
+    ``scope`` string. ``profile`` is a best-effort /me lookup.
+
+    ``scopes`` must match the authorization request (incremental consent
+    stores the requested set in OAuth state and passes it here).
+    """
     app = _msal_client()
     result = app.acquire_token_by_authorization_code(
-        code=code, scopes=_graph_scopes(), redirect_uri=redirect_uri,
+        code=code,
+        scopes=list(scopes) if scopes is not None else _graph_scopes(),
+        redirect_uri=redirect_uri,
     )
     if "error" in result:
         raise RuntimeError(f"MSAL error: {result.get('error')} - {result.get('error_description')}")
@@ -162,12 +180,55 @@ def exchange_code_for_tokens(code: str, redirect_uri: str) -> Tuple[Dict[str, An
     return result, profile
 
 
-def refresh_access_token(refresh_token: str) -> Dict[str, Any]:
+_OIDC_RESERVED_SCOPES = frozenset({"openid", "profile", "email", "offline_access"})
+
+
+def normalize_refresh_scopes(scopes: Optional[Any] = None) -> List[str]:
+    """Normalize stored connection scopes for MSAL refresh.
+
+    Accepts a list or a space-separated string (as returned by MSAL's
+    ``scope`` field). Strips OIDC reserved scopes that MSAL rejects /
+    adds itself. Falls back to ``_graph_scopes()`` when nothing remains
+    so refresh never runs with an empty scope list.
+    """
+    if scopes is None:
+        return _graph_scopes()
+    if isinstance(scopes, str):
+        raw = scopes.split()
+    elif isinstance(scopes, (list, tuple, set)):
+        raw = list(scopes)
+    else:
+        return _graph_scopes()
+
+    out: List[str] = []
+    seen = set()
+    for s in raw:
+        if not s or not isinstance(s, str):
+            continue
+        bare = s.split("/")[-1] if "/" in s else s
+        if bare in _OIDC_RESERVED_SCOPES:
+            continue
+        if bare and bare not in seen:
+            seen.add(bare)
+            out.append(bare)
+    return out or _graph_scopes()
+
+
+def refresh_access_token(
+    refresh_token: str,
+    scopes: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """Exchange a refresh token for a new access token. MSAL handles
-    rotation if the IdP returns a new refresh token."""
+    rotation if the IdP returns a new refresh token.
+
+    Pass the connection's stored Graph scopes (including incremental
+    Action writes like Mail.Send / Calendars.ReadWrite) so refresh does
+    not silently drop them and fall back to base read scopes only.
+    """
     app = _msal_client()
+    refresh_scopes = normalize_refresh_scopes(scopes)
     result = app.acquire_token_by_refresh_token(
-        refresh_token=refresh_token, scopes=_graph_scopes(),
+        refresh_token=refresh_token, scopes=refresh_scopes,
     )
     if "error" in result:
         raise RuntimeError(f"MSAL refresh error: {result.get('error_description')}")
@@ -186,7 +247,10 @@ def maybe_refresh_dict(stored: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             return None
     if not stored.get("refresh_token_plain"):
         return None
-    fresh = refresh_access_token(stored["refresh_token_plain"])
+    fresh = refresh_access_token(
+        stored["refresh_token_plain"],
+        scopes=normalize_refresh_scopes(stored.get("scopes")),
+    )
     return fresh
 
 
@@ -274,15 +338,55 @@ def fetch_upcoming_outlook_events(access_token: str, days: int = 30) -> List[Dic
 # ─── Quantro Actions — incremental write-scope authorization ──────────
 # Mirrors google_oauth.py's ACTION_SCOPES. NOTE (see module docstring on
 # MS_SCOPES): Graph/MSAL don't support Google-style incremental consent
-# — requesting these requires adding them to MS_SCOPES and having the
-# user re-run /api/integrations/microsoft/start, which re-prompts for
-# the full scope set. Handlers below correctly report
-# reauthorization_required rather than silently failing in the
-# meantime; wiring the actual re-consent UX is a follow-up.
+# — requesting these uses /api/connect/providers/microsoft/request-permission
+# (incremental consent). Handlers report reauthorization_required when
+# action scopes are missing; Connect "Grant Permission" upgrades Limited → Connected.
 ACTION_SCOPES = {
     "microsoft.mail.send": "Mail.Send",
     "microsoft.calendar.event.create": "Calendars.ReadWrite",
 }
+
+
+def missing_base_scopes(granted_scopes: Optional[List[str]]) -> List[str]:
+    """Diff granted scopes against read-only MS base Graph permissions."""
+    granted = set()
+    for s in granted_scopes or []:
+        if not s:
+            continue
+        granted.add(s.split("/")[-1] if "/" in s else s)
+    base = [s for s in MS_SCOPES if s not in {"openid", "profile", "email", "offline_access"}]
+    return [s for s in base if s not in granted]
+
+
+def scopes_for_incremental(additional_scopes: List[str]) -> List[str]:
+    """Base Graph scopes plus action write scopes (Mail.Send / Calendars.ReadWrite)."""
+    scopes = list(_graph_scopes())
+    for s in additional_scopes or []:
+        bare = s.split("/")[-1] if "/" in s else s
+        if bare and bare not in scopes:
+            scopes.append(bare)
+    return scopes
+
+
+def build_incremental_authorization_url(
+    state: str, redirect_uri: str, additional_scopes: List[str]
+) -> str:
+    """Request base Graph scopes PLUS action write scopes (Connected Limited → Grant).
+
+    MSAL re-requests the union so previously granted refresh tokens remain
+    usable after the user consents to Mail.Send / Calendars.ReadWrite.
+    Do NOT put write scopes in the initial MS_SCOPES connect set.
+    Caller must persist ``scopes_for_incremental(additional_scopes)`` in OAuth
+    state and pass that same list to ``exchange_code_for_tokens``.
+    """
+    scopes = scopes_for_incremental(additional_scopes)
+    app = _msal_client()
+    return app.get_authorization_request_url(
+        scopes=scopes,
+        state=state,
+        redirect_uri=redirect_uri,
+        prompt="consent",
+    )
 
 
 def send_mail(access_token: str, to: str, subject: str, body: str) -> None:

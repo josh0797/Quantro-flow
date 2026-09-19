@@ -50,9 +50,12 @@ from actions.store import (
     wrap_action_policies_col,
 )
 from inbox_store import wrap_inbox_col
+from sync_lock import acquire_sync_lock_lease
 from product_domain_store import (
     wrap_activity_col, wrap_content_items_col, wrap_content_templates_col,
     wrap_contacts_col, wrap_calendar_col, product_domains_health,
+    canonical_calendar_write, normalize_calendar_doc,
+    upsert_calendar_external_event,
 )
 
 # ─── Config ────────────────────────────────────────────────────────────
@@ -1670,20 +1673,33 @@ async def _perform_google_sync_for_workspace(workspace_id: str) -> Dict[str, Any
             counts["emails"] += 1
         events = goog.fetch_upcoming_calendar(creds, days=30)
         for ev in events:
-            await calendar_col.update_one(
-                {"workspace_id": workspace_id, "gcal_id": ev["gcal_id"]},
-                {
-                    "$set": {
-                        "workspace_id": workspace_id, "source": "google_calendar",
-                        "gcal_id": ev["gcal_id"], "title": ev["title"],
-                        "description": ev["description"], "location": ev["location"],
-                        "start": ev["start_iso"], "end": ev["end_iso"],
-                        "attendees": ev["attendees"], "html_link": ev["html_link"],
-                        "status": ev["status"], "is_real": True, "is_simulation": False, "synced_at": now,
-                    },
-                    "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": now},
-                },
-                upsert=True,
+            event_id = str(uuid.uuid4())
+            canonical = canonical_calendar_write(
+                workspace_id=workspace_id,
+                event_id=event_id,
+                external_provider="google",
+                external_event_id=ev["gcal_id"],
+                title=ev["title"],
+                description=ev["description"],
+                start_time=ev["start_iso"],
+                end_time=ev["end_iso"],
+                location=ev["location"],
+                attendees=ev["attendees"],
+                status=ev["status"],
+                source="google_calendar",
+                external_url=ev.get("html_link"),
+                is_simulation=False,
+                synced_at=now,
+                updated_at=now,
+                extra={"is_real": True},
+            )
+            await upsert_calendar_external_event(
+                calendar_col,
+                workspace_id=workspace_id,
+                provider="google",
+                external_event_id=ev["gcal_id"],
+                canonical=canonical,
+                now=now,
             )
             counts["events"] += 1
         await secrets_store.patch_connection(
@@ -1720,9 +1736,51 @@ async def _perform_google_sync_for_workspace(workspace_id: str) -> Dict[str, Any
         return {"workspace_id": workspace_id, "error": str(exc)[:200]}
 
 
+# In-process + Mongo sync locks so multi-instance does not double-sync
+# the same provider+workspace inside a sync window.
+_SYNC_LOCK_WINDOW_SECONDS = int(os.environ.get("QUANTRO_SYNC_LOCK_WINDOW_SECONDS") or "300")
+_local_sync_locks: Dict[str, float] = {}
+
+
+async def _acquire_sync_lock(provider: str, workspace_id: str, owner_id: Optional[str] = None) -> bool:
+    """Return True if this instance should run sync for provider+workspace.
+
+    Prefer atomic Mongo lease (multi-instance); fall back to in-process
+    window if Mongo is unavailable.
+    """
+    import time as _time
+    key = f"{provider}:{workspace_id}"
+    now = _time.time()
+    local_expires = _local_sync_locks.get(key) or 0
+    if local_expires > now:
+        return False
+    acquired = False
+    try:
+        lock_col = db["sync_locks"]
+        acquired = await acquire_sync_lock_lease(
+            lock_col,
+            provider=provider,
+            workspace_id=workspace_id,
+            window_seconds=_SYNC_LOCK_WINDOW_SECONDS,
+            owner_id=owner_id,
+        )
+    except Exception:  # noqa: BLE001
+        # Mongo unavailable — single-process fallback only.
+        acquired = True
+    if not acquired:
+        return False
+    _local_sync_locks[key] = now + _SYNC_LOCK_WINDOW_SECONDS
+    return True
+
+
 async def _periodic_provider_sync_loop() -> None:
     """Forever loop. Wakes up every interval and dispatches sync for
-    every connected, non-paused workspace across every provider."""
+    every connected, non-paused workspace across every provider.
+
+    Requires min_machines_running>=1 (see fly.toml) so auto_stop does not
+    kill the HTTP process that hosts this loop. Dedicated worker is a
+    later path; for now keep-alive machine + per provider/workspace lock.
+    """
     # Small initial delay so the first tick happens AFTER startup
     # finishes (avoids contending with seed/backfill jobs).
     await asyncio.sleep(60)
@@ -1732,6 +1790,8 @@ async def _periodic_provider_sync_loop() -> None:
             for wid in await secrets_store.list_autosync_workspace_ids(
                 provider="google", mongo_col=google_integrations_col,
             ):
+                if not await _acquire_sync_lock("google", wid):
+                    continue
                 res = await _perform_google_sync_for_workspace(wid)
                 if res.get("error"):
                     print(f"[sync:google] {wid} failed: {res['error']}")
@@ -1742,6 +1802,8 @@ async def _periodic_provider_sync_loop() -> None:
                     provider="microsoft", mongo_col=microsoft_integrations_col,
                 ):
                     try:
+                        if not await _acquire_sync_lock("microsoft", wid):
+                            continue
                         res = await ms_sync(wid)
                         if res.get("error"):
                             print(f"[sync:microsoft] {wid} failed: {res['error']}")
@@ -1780,16 +1842,45 @@ async def migrate_legacy_role_names() -> None:
 
 app = FastAPI(title="Quantro Flow | Business OS", lifespan=lifespan)
 
-app.add_middleware(
-    CORSMiddleware,
-    # When allow_credentials=True, browsers refuse wildcard origins.
-    # We echo back the caller's origin instead, which is safe because
-    # auth is enforced by the session cookie, not by origin allowlisting.
-    allow_origin_regex=".*",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def _allowed_cors_origins() -> list:
+    """Explicit CORS allowlist — never a universal wildcard.
+
+    Auth is Bearer JWT (Supabase), not cookie-based. Origins still matter
+    for browser credentialed XHR; keep the list tight.
+
+    Env: ALLOWED_FRONTEND_ORIGINS = comma-separated absolute origins.
+    Prod defaults: https://quantro-flow.vercel.app (+ any configured custom).
+    Localhost only when ENV/ENVIRONMENT is development/local or ALLOW_LOCALHOST_CORS=1.
+    Optional Vercel Preview: allow https://*.vercel.app only when
+    ALLOW_VERCEL_PREVIEW_CORS=1 (matched via a narrow regex, not '.*').
+    """
+    raw = (os.environ.get("ALLOWED_FRONTEND_ORIGINS") or "").strip()
+    origins = [o.strip().rstrip("/") for o in raw.split(",") if o.strip()]
+    if not origins:
+        origins = ["https://quantro-flow.vercel.app"]
+    env_name = (os.environ.get("ENVIRONMENT") or os.environ.get("ENV") or "").lower().strip()
+    allow_local = env_name in {"development", "dev", "local"} or (
+        str(os.environ.get("ALLOW_LOCALHOST_CORS") or "").lower() in {"1", "true", "yes"}
+    )
+    if allow_local:
+        for loc in ("http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173"):
+            if loc not in origins:
+                origins.append(loc)
+    return origins
+
+
+_CORS_ORIGINS = _allowed_cors_origins()
+_CORS_KWARGS = {
+    "allow_origins": _CORS_ORIGINS,
+    "allow_credentials": True,
+    "allow_methods": ["*"],
+    "allow_headers": ["*"],
+}
+# Narrow preview strategy — only when explicitly enabled; never allow_origin_regex=".*"
+if str(os.environ.get("ALLOW_VERCEL_PREVIEW_CORS") or "").lower() in {"1", "true", "yes"}:
+    _CORS_KWARGS["allow_origin_regex"] = r"https://[a-z0-9-]+\.vercel\.app"
+
+app.add_middleware(CORSMiddleware, **_CORS_KWARGS)
 
 # ─── Auth Endpoints (Supabase-backed) ─────────────────────────────────
 # Note: sign-in / sign-up / sign-out all happen on the frontend against
@@ -3458,15 +3549,98 @@ async def export_audit(
 
 
 
-# ─── Health ────────────────────────────────────────────────────────────
+# ─── Health (liveness) vs Ready (readiness) ────────────────────────────
 @app.get("/api/health")
 async def health():
+    """Liveness only — 200 if the process is up. No dependency checks."""
     return {
-        "status": "running",
+        "status": "ok",
         "service": "Quantro Flow | Business OS",
-        "timestamp": datetime.utcnow().isoformat(),
-        "product_domains": product_domains_health(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+@app.get("/api/ready")
+async def ready():
+    """Readiness — critical deps must be reachable. 503 if not.
+
+    Checks Supabase reachability (when configured), primary store flags,
+    Actions store, Connect/provider secrets store, and essential config.
+    Never returns secrets.
+    """
+    from fastapi.responses import JSONResponse
+
+    checks: Dict[str, Any] = {}
+    ok = True
+
+    # Essential config (booleans only)
+    checks["supabase_url_configured"] = bool((os.environ.get("SUPABASE_URL") or "").strip())
+    checks["supabase_service_role_configured"] = bool((os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip())
+    checks["frontend_public_url_configured"] = bool((os.environ.get("FRONTEND_PUBLIC_URL") or "").strip())
+
+    # Supabase reachability (service role HEAD/GET on a tiny REST probe)
+    sb_ok = False
+    if checks["supabase_url_configured"] and checks["supabase_service_role_configured"]:
+        try:
+            import httpx as _httpx
+            sb_url = os.environ["SUPABASE_URL"].rstrip("/")
+            key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+            async with _httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    f"{sb_url}/rest/v1/",
+                    headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                )
+            sb_ok = resp.status_code < 500
+        except Exception as exc:  # noqa: BLE001
+            checks["supabase_error"] = type(exc).__name__
+            sb_ok = False
+    else:
+        # If Supabase is primary for any critical path, missing config = not ready
+        sb_ok = False
+    checks["supabase_reachable"] = sb_ok
+    if not sb_ok:
+        ok = False
+
+    # Store primary flags (no secrets)
+    try:
+        checks["secrets"] = secrets_store.secrets_health()
+    except Exception as exc:  # noqa: BLE001
+        checks["secrets"] = {"error": type(exc).__name__}
+        ok = False
+
+    try:
+        checks["product_domains"] = product_domains_health()
+    except Exception as exc:  # noqa: BLE001
+        checks["product_domains"] = {"error": type(exc).__name__}
+
+    try:
+        from actions import store as actions_store
+        if hasattr(actions_store, "actions_health"):
+            checks["actions"] = actions_store.actions_health()
+        else:
+            primary = (os.environ.get("QUANTRO_ACTIONS_PRIMARY") or "mongo").lower()
+            checks["actions"] = {"actions_primary": primary, "configured": True}
+    except Exception as exc:  # noqa: BLE001
+        checks["actions"] = {"error": type(exc).__name__}
+
+    # Connect registry loaded
+    try:
+        providers = list_connect_providers()
+        checks["connect_providers"] = {"count": len(providers), "ok": len(providers) > 0}
+        if not providers:
+            ok = False
+    except Exception as exc:  # noqa: BLE001
+        checks["connect_providers"] = {"error": type(exc).__name__}
+        ok = False
+
+    body = {
+        "status": "ready" if ok else "not_ready",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "checks": checks,
+    }
+    if ok:
+        return body
+    return JSONResponse(status_code=503, content=body)
 
 # ─── System Health / Self-Healing Surface ─────────────────────────────
 @app.get("/api/system/health")
@@ -4283,21 +4457,23 @@ async def get_calendar_events(workspace_id: str = Depends(get_current_workspace_
 
 @app.post("/api/calendar", status_code=201)
 async def create_calendar_event(req: CreateEventRequest, workspace_id: str = Depends(get_current_workspace_id)):
-    event = {
-        "event_id": str(uuid.uuid4()),
-        "title": req.title,
-        "description": req.description,
-        "start_time": req.start_time,
-        "end_time": req.end_time,
-        "location": req.location,
-        "attendees": req.attendees,
-        "status": "confirmed",
-        "source": "manual",
-        "created_at": now_iso(),
-        "contact_id": req.contact_id,
-        "is_simulation": await is_simulation_mode(workspace_id),
-        "workspace_id": workspace_id,
-    }
+    event = canonical_calendar_write(
+        workspace_id=workspace_id,
+        event_id=str(uuid.uuid4()),
+        external_provider="internal",
+        title=req.title,
+        description=req.description,
+        start_time=req.start_time,
+        end_time=req.end_time,
+        location=req.location,
+        attendees=req.attendees or [],
+        status="confirmed",
+        source="manual",
+        contact_id=req.contact_id,
+        is_simulation=await is_simulation_mode(workspace_id),
+        created_at=now_iso(),
+        updated_at=now_iso(),
+    )
     await calendar_col.insert_one(event)
     await log_activity("calendar", "Event created", f"New event: {req.title}", event["event_id"], "calendar", workspace_id=workspace_id)
     return serialize_doc(event)
@@ -5493,12 +5669,35 @@ def _frontend_base_url() -> str:
 # Only these paths may be used as the OAuth "return_to" destination.
 # Keeps /start + the callback from ever building a redirect to an
 # arbitrary attacker-supplied path (open redirect via ?return_to=).
-ALLOWED_OAUTH_RETURN_PATHS = {"/welcome/inbox", "/welcome/calendar"}
+# Absolute URLs, protocol-relative (//evil), hosts, and unknown paths → default.
+ALLOWED_OAUTH_RETURN_PATHS = {
+    "/connect",
+    "/actions",
+    "/settings",
+    "/welcome/inbox",
+    "/welcome/calendar",
+}
 DEFAULT_OAUTH_RETURN_PATH = "/welcome/inbox"
 
 
 def _sanitize_return_to(value: Optional[str]) -> str:
-    return value if value in ALLOWED_OAUTH_RETURN_PATHS else DEFAULT_OAUTH_RETURN_PATH
+    if not value or not isinstance(value, str):
+        return DEFAULT_OAUTH_RETURN_PATH
+    candidate = value.strip()
+    # Reject absolute URLs, protocol-relative, backslashes, query/fragment, hosts
+    if (
+        "://" in candidate
+        or candidate.startswith("//")
+        or "\\" in candidate
+        or any(ch in candidate for ch in ("@", "?", "#"))
+        or not candidate.startswith("/")
+    ):
+        return DEFAULT_OAUTH_RETURN_PATH
+    # Path only — exact allowlist (no nested traversal)
+    path = candidate.split("?")[0].split("#")[0]
+    if path in ALLOWED_OAUTH_RETURN_PATHS:
+        return path
+    return DEFAULT_OAUTH_RETURN_PATH
 
 
 # Google (and Microsoft) can pass arbitrary strings through ?error= on
@@ -5591,10 +5790,20 @@ async def google_oauth_callback(
     # missing it even though we requested it. Compare against what we
     # require so we never mark a partial grant as fully connected.
     granted_scopes = list(creds.scopes or [])
-    missing_scopes = goog.missing_required_scopes(granted_scopes)
-    is_connected = not missing_scopes
-    integration_status = "ok" if is_connected else "permission_missing"
-    reauthorization_required = not is_connected
+    missing_base = goog.missing_required_scopes(granted_scopes)
+    missing_action = [s for s in goog.ACTION_SCOPES.values() if s not in set(granted_scopes)]
+    is_connected = not missing_base  # base scopes enough for read sync
+    if missing_base:
+        integration_status = "permission_missing"
+        missing_scopes = missing_base
+    elif missing_action:
+        # Base-only → Connected Limited (not full CONNECTED, not REAUTH)
+        integration_status = "connected_limited"
+        missing_scopes = missing_action
+    else:
+        integration_status = "ok"
+        missing_scopes = []
+    reauthorization_required = bool(missing_base)
 
     # Google does not always return a fresh refresh_token on every grant
     # (e.g. some reconnect edge cases even with prompt=consent). Never let
@@ -5768,31 +5977,33 @@ async def google_oauth_sync(
         raise HTTPException(status_code=502, detail=f"Calendar fetch failed: {exc}") from exc
 
     for ev in events:
-        await calendar_col.update_one(
-            {"workspace_id": workspace_id, "gcal_id": ev["gcal_id"]},
-            {
-                "$set": {
-                    "workspace_id": workspace_id,
-                    "source": "google_calendar",
-                    "gcal_id": ev["gcal_id"],
-                    "title": ev["title"],
-                    "description": ev["description"],
-                    "location": ev["location"],
-                    "start": ev["start_iso"],
-                    "end": ev["end_iso"],
-                    "attendees": ev["attendees"],
-                    "html_link": ev["html_link"],
-                    "status": ev["status"],
-                    "is_real": True,
-                    "is_simulation": False,
-                    "synced_at": now,
-                },
-                "$setOnInsert": {
-                    "id": str(uuid.uuid4()),
-                    "created_at": now,
-                },
-            },
-            upsert=True,
+        event_id = str(uuid.uuid4())
+        canonical = canonical_calendar_write(
+            workspace_id=workspace_id,
+            event_id=event_id,
+            external_provider="google",
+            external_event_id=ev["gcal_id"],
+            title=ev["title"],
+            description=ev["description"],
+            start_time=ev["start_iso"],
+            end_time=ev["end_iso"],
+            location=ev["location"],
+            attendees=ev["attendees"],
+            status=ev["status"],
+            source="google_calendar",
+            external_url=ev.get("html_link"),
+            is_simulation=False,
+            synced_at=now,
+            updated_at=now,
+            extra={"is_real": True},
+        )
+        await upsert_calendar_external_event(
+            calendar_col,
+            workspace_id=workspace_id,
+            provider="google",
+            external_event_id=ev["gcal_id"],
+            canonical=canonical,
+            now=now,
         )
         counts["events"] += 1
 
@@ -5959,7 +6170,7 @@ async def microsoft_oauth_start(
         state=state,
         user_id=user.user_id,
         workspace_id=workspace_id,
-        return_to=return_to or "/welcome/inbox",
+        return_to=_sanitize_return_to(return_to),
         redirect_uri=redirect_uri,
         created_at=datetime.now(timezone.utc),
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
@@ -5976,20 +6187,28 @@ async def microsoft_oauth_callback(
     error: Optional[str] = None,
     error_description: Optional[str] = None,
 ):
-    # NOTE: Microsoft OAuth business logic (scopes, tokens, return_to
-    # handling) is intentionally left untouched per this task's scope —
-    # only the frontend URL resolution is swapped to the safe helper
-    # since the old `_frontend_url_from` (Origin/Referer trust) no
-    # longer exists.
-    fe = _frontend_base_url() or ""
-    base_redirect = (fe or "").rstrip("/")
+    """Microsoft OAuth callback — same hardening as Google:
+    state required, FRONTEND_PUBLIC_URL required in prod (fail-closed),
+    sanitized OAuth errors, sanitized return_to from OAuth state,
+    no Origin/Referer for redirects.
+    """
+    fe = _frontend_base_url()
+    if not fe:
+        print("[microsoft_oauth_callback] FRONTEND_PUBLIC_URL is not set — cannot bounce back safely.")
+        return PlainTextResponse(
+            "OAuth misconfiguration: FRONTEND_PUBLIC_URL is not set on the backend. "
+            "Contact the workspace administrator.",
+            status_code=500,
+        )
+    base_redirect = fe
+    return_path = DEFAULT_OAUTH_RETURN_PATH
 
     def _bounce(qs: str) -> RedirectResponse:
-        target = (base_redirect or "") + "/welcome/inbox" + ("?" + qs if qs else "")
+        target = base_redirect + return_path + ("?" + qs if qs else "")
         return RedirectResponse(url=target, status_code=303)
 
     if error:
-        return _bounce(f"microsoft_connected=error&reason={error}")
+        return _bounce(f"microsoft_connected=error&reason={_safe_oauth_error_code(error)}")
     if not code or not state:
         return _bounce("microsoft_connected=error&reason=missing_code_or_state")
 
@@ -6005,16 +6224,36 @@ async def microsoft_oauth_callback(
     redirect_uri = state_doc.get("redirect_uri") or msoa.resolve_redirect_uri(str(request.base_url))
     workspace_id = state_doc.get("workspace_id")
     user_id = state_doc.get("user_id")
-    return_to = state_doc.get("return_to") or "/welcome/inbox"
+    return_to = _sanitize_return_to(state_doc.get("return_to"))
+    return_path = return_to
 
     try:
-        token_payload, profile = msoa.exchange_code_for_tokens(code, redirect_uri)
+        requested_scopes = state_doc.get("requested_scopes") or None
+        token_payload, profile = msoa.exchange_code_for_tokens(
+            code, redirect_uri, scopes=requested_scopes,
+        )
     except Exception as exc:  # noqa: BLE001
-        return _bounce(f"microsoft_connected=error&reason=exchange_failed&detail={str(exc)[:80]}")
+        print(f"[microsoft_oauth_callback] token exchange failed for workspace={workspace_id}: {exc}")
+        return _bounce("microsoft_connected=error&reason=exchange_failed")
 
     expires_in = int(token_payload.get("expires_in") or 3600)
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
     granted_scopes = (token_payload.get("scope") or "").split()
+    missing_base = msoa.missing_base_scopes(granted_scopes)
+    missing_action = [
+        s for s in msoa.ACTION_SCOPES.values()
+        if s not in granted_scopes and s not in {x.split("/")[-1] for x in granted_scopes}
+    ]
+    is_base_ok = not missing_base
+    # Preserve refresh token on reconnect (same as Google).
+    existing_doc = await secrets_store.get_connection(
+        provider="microsoft",
+        workspace_id=workspace_id,
+        mongo_col=microsoft_integrations_col,
+        projection={"_id": 0, "refresh_token": 1},
+    )
+    new_refresh = msoa.encrypt_token(token_payload.get("refresh_token"))
+    refresh_to_store = new_refresh or (existing_doc or {}).get("refresh_token")
 
     await secrets_store.upsert_connection(
         provider="microsoft",
@@ -6024,11 +6263,15 @@ async def microsoft_oauth_callback(
             "workspace_id": workspace_id,
             "user_id": user_id,
             "access_token": msoa.encrypt_token(token_payload.get("access_token")),
-            "refresh_token": msoa.encrypt_token(token_payload.get("refresh_token")),
+            "refresh_token": refresh_to_store,
             "expires_at": expires_at,
             "scopes": granted_scopes or msoa.MS_SCOPES,
-            "connected": True,
-            "status": "ok",
+            "connected": is_base_ok,
+            "status": "ok" if is_base_ok and not missing_action else (
+                "permission_missing" if not is_base_ok else "connected_limited"
+            ),
+            "reauthorization_required": not is_base_ok,
+            "missing_scopes": missing_base or missing_action,
             "account_email": (profile or {}).get("email"),
             "account_name": (profile or {}).get("name"),
             "ms_user_id": (profile or {}).get("ms_user_id"),
@@ -6047,7 +6290,13 @@ async def microsoft_oauth_callback(
     except Exception:  # noqa: BLE001
         pass
 
-    qs = f"microsoft_connected=success&account={(profile or {}).get('email') or ''}&return_to={return_to}"
+    if missing_base:
+        qs = (
+            f"microsoft_connected=error&reason=permission_missing"
+            f"&missing_scopes={','.join(missing_base)}&return_to={return_to}"
+        )
+    else:
+        qs = f"microsoft_connected=success&account={(profile or {}).get('email') or ''}&return_to={return_to}"
     return _bounce(qs)
 
 
@@ -6072,21 +6321,35 @@ async def _load_microsoft_credentials(workspace_id: str) -> Tuple[Optional[str],
         needs_refresh = datetime.now(timezone.utc) >= expires_at - timedelta(seconds=60)
     if needs_refresh and refresh_plain:
         try:
-            fresh = msoa.refresh_access_token(refresh_plain)
+            # Preserve incremental Action scopes (Mail.Send / Calendars.ReadWrite)
+            # — refreshing with base _graph_scopes() alone drops writes after ~1h.
+            fresh = msoa.refresh_access_token(
+                refresh_plain,
+                scopes=msoa.normalize_refresh_scopes(doc.get("scopes")),
+            )
             access_plain = fresh.get("access_token") or access_plain
             new_refresh = fresh.get("refresh_token") or refresh_plain
             new_expiry = datetime.now(timezone.utc) + timedelta(seconds=int(fresh.get("expires_in") or 3600))
+            patch_fields = {
+                "access_token": msoa.encrypt_token(access_plain),
+                "refresh_token": msoa.encrypt_token(new_refresh),
+                "expires_at": new_expiry,
+                "updated_at": datetime.now(timezone.utc),
+            }
+            # Align stored scopes with the token MSAL actually returned.
+            result_scope = fresh.get("scope")
+            if result_scope:
+                patch_fields["scopes"] = (
+                    result_scope.split() if isinstance(result_scope, str) else list(result_scope)
+                )
             await secrets_store.patch_connection(
                 provider="microsoft",
                 workspace_id=workspace_id,
                 mongo_col=microsoft_integrations_col,
-                fields={
-                    "access_token": msoa.encrypt_token(access_plain),
-                    "refresh_token": msoa.encrypt_token(new_refresh),
-                    "expires_at": new_expiry,
-                    "updated_at": datetime.now(timezone.utc),
-                },
+                fields=patch_fields,
             )
+            if "scopes" in patch_fields:
+                doc = {**doc, "scopes": patch_fields["scopes"]}
         except Exception:  # noqa: BLE001
             return None, doc
     return access_plain, doc
@@ -6122,20 +6385,33 @@ async def _perform_microsoft_sync_for_workspace(workspace_id: str) -> Dict[str, 
             counts["emails"] += 1
         events = msoa.fetch_upcoming_outlook_events(access, days=30)
         for ev in events:
-            await calendar_col.update_one(
-                {"workspace_id": workspace_id, "ms_id": ev["ms_id"]},
-                {
-                    "$set": {
-                        "workspace_id": workspace_id, "source": "outlook_calendar",
-                        "ms_id": ev["ms_id"], "title": ev["title"],
-                        "description": ev["description"], "location": ev["location"],
-                        "start": ev["start_iso"], "end": ev["end_iso"],
-                        "attendees": ev["attendees"], "html_link": ev["html_link"],
-                        "status": ev["status"], "is_real": True, "is_simulation": False, "synced_at": now,
-                    },
-                    "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": now},
-                },
-                upsert=True,
+            event_id = str(uuid.uuid4())
+            canonical = canonical_calendar_write(
+                workspace_id=workspace_id,
+                event_id=event_id,
+                external_provider="microsoft",
+                external_event_id=ev["ms_id"],
+                title=ev["title"],
+                description=ev["description"],
+                start_time=ev["start_iso"],
+                end_time=ev["end_iso"],
+                location=ev["location"],
+                attendees=ev["attendees"],
+                status=ev["status"],
+                source="outlook_calendar",
+                external_url=ev.get("html_link"),
+                is_simulation=False,
+                synced_at=now,
+                updated_at=now,
+                extra={"is_real": True},
+            )
+            await upsert_calendar_external_event(
+                calendar_col,
+                workspace_id=workspace_id,
+                provider="microsoft",
+                external_event_id=ev["ms_id"],
+                canonical=canonical,
+                now=now,
             )
             counts["events"] += 1
         await secrets_store.patch_connection(
@@ -6470,8 +6746,14 @@ def _backend_public_url() -> Optional[str]:
     return (os.environ.get("BACKEND_PUBLIC_URL") or "").strip() or None
 
 
-google_adapter = GoogleAdapter(google_integrations_col, goog, _perform_google_sync_for_workspace, _disconnect_google_workspace)
-microsoft_adapter = MicrosoftAdapter(microsoft_integrations_col, msoa, _perform_microsoft_sync_for_workspace, _disconnect_microsoft_workspace)
+google_adapter = GoogleAdapter(
+    google_integrations_col, goog, _perform_google_sync_for_workspace, _disconnect_google_workspace,
+    secrets_store=secrets_store,
+)
+microsoft_adapter = MicrosoftAdapter(
+    microsoft_integrations_col, msoa, _perform_microsoft_sync_for_workspace, _disconnect_microsoft_workspace,
+    secrets_store=secrets_store,
+)
 facturapi_adapter = FacturapiAdapter(facturapi_connections_col, facturapi_webhook_events_col, _backend_public_url, log_audit_fn=log_audit)
 quantro_internal_adapter = QuantroInternalAdapter()
 
@@ -6614,6 +6896,48 @@ async def connect_google_request_permission(
         return_to=_sanitize_return_to(return_to),
         redirect_uri=redirect_uri,
         code_verifier=code_verifier,
+        created_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    return {"auth_url": auth_url, "state": state}
+
+
+@app.get("/api/connect/providers/microsoft/request-permission")
+async def connect_microsoft_request_permission(
+    request: Request,
+    action_id: str,
+    return_to: Optional[str] = None,
+    workspace_id: str = Depends(get_current_workspace_id),
+    user: User = Depends(get_current_user),
+):
+    """Incremental Microsoft consent for Action write scopes (Mail.Send /
+    Calendars.ReadWrite). Connected Limited → Grant → OAuth → Connected.
+    Reuses the same state + callback as /api/integrations/microsoft/start.
+    """
+    if not msoa.is_oauth_configured():
+        raise HTTPException(status_code=503, detail="Microsoft OAuth is not configured.")
+    scope = msoa.ACTION_SCOPES.get(action_id)
+    if not scope:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No additional Microsoft scope is defined for action '{action_id}'",
+        )
+    base_url = str(request.base_url).rstrip("/")
+    redirect_uri = msoa.resolve_redirect_uri(base_url)
+    state = uuid.uuid4().hex
+    requested_scopes = msoa.scopes_for_incremental([scope])
+    auth_url = msoa.build_incremental_authorization_url(
+        state=state, redirect_uri=redirect_uri, additional_scopes=[scope]
+    )
+    await secrets_store.put_oauth_state(
+        provider="microsoft",
+        mongo_col=microsoft_oauth_state_col,
+        state=state,
+        user_id=user.user_id,
+        workspace_id=workspace_id,
+        return_to=_sanitize_return_to(return_to),
+        redirect_uri=redirect_uri,
+        requested_scopes=requested_scopes,
         created_at=datetime.now(timezone.utc),
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
     )

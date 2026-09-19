@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -126,16 +127,277 @@ CALENDAR_CFG = DomainConfig(
     primary_env="QUANTRO_CALENDAR_PRIMARY",
     mirror_env="QUANTRO_CALENDAR_MONGO_MIRROR",
     known_cols=frozenset({
-        "event_id", "workspace_id", "title", "description",
+        "event_id", "workspace_id",
+        "external_event_id", "external_provider", "external_url",
+        "title", "description",
         "start_time", "end_time", "location", "attendees", "status",
-        "source", "contact_id", "google_event_id",
+        "source", "contact_id",
+        # legacy column kept readable during transition
+        "google_event_id",
         "is_simulation", "hidden_by_real",
-        "created_at", "updated_at",
+        "created_at", "updated_at", "synced_at",
     }),
-    dt_keys=frozenset({"start_time", "end_time", "created_at", "updated_at"}),
+    dt_keys=frozenset({"start_time", "end_time", "created_at", "updated_at", "synced_at"}),
     json_keys=frozenset({"attendees"}),
     conflict="workspace_id,event_id",
 )
+
+# Valid external_provider values for canonical calendar rows.
+CALENDAR_EXTERNAL_PROVIDERS = frozenset({"google", "microsoft", "internal"})
+
+
+def normalize_calendar_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Map legacy Mongo Google/MS shapes onto the canonical calendar model.
+
+    Legacy inputs accepted on read/backfill:
+      gcal_id / ms_id / google_event_id / id → external_event_id + event_id
+      start / end → start_time / end_time
+      html_link → external_url
+
+    New writes should already be canonical; this is idempotent.
+    """
+    if not doc:
+        return {}
+    out = dict(doc)
+
+    # App / Mongo id aliases
+    if out.get("id") and not out.get("event_id"):
+        out["event_id"] = out["id"]
+
+    # External provider ids
+    if out.get("gcal_id") and not out.get("external_event_id"):
+        out["external_event_id"] = out["gcal_id"]
+        out.setdefault("external_provider", "google")
+    if out.get("ms_id") and not out.get("external_event_id"):
+        out["external_event_id"] = out["ms_id"]
+        out.setdefault("external_provider", "microsoft")
+    if out.get("google_event_id") and not out.get("external_event_id"):
+        out["external_event_id"] = out["google_event_id"]
+        out.setdefault("external_provider", "google")
+
+    # Time + URL aliases
+    if out.get("start") and not out.get("start_time"):
+        out["start_time"] = out["start"]
+    if out.get("end") and not out.get("end_time"):
+        out["end_time"] = out["end"]
+    if out.get("html_link") and not out.get("external_url"):
+        out["external_url"] = out["html_link"]
+
+    # Infer provider from source when still unset
+    provider = (out.get("external_provider") or "").lower().strip()
+    if provider not in CALENDAR_EXTERNAL_PROVIDERS:
+        src = (out.get("source") or "").lower()
+        if "google" in src:
+            provider = "google"
+        elif "outlook" in src or "microsoft" in src or "ms_" in src:
+            provider = "microsoft"
+        else:
+            provider = "internal"
+        out["external_provider"] = provider
+
+    # Keep google_event_id populated for older readers when provider=google
+    if out.get("external_provider") == "google" and out.get("external_event_id"):
+        out.setdefault("google_event_id", out["external_event_id"])
+
+    return out
+
+
+def normalize_calendar_query(query: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate legacy filter keys so Supabase primary reads hit canonical cols."""
+    if not query:
+        return {}
+    q = dict(query)
+    if "gcal_id" in q:
+        q["external_event_id"] = q.pop("gcal_id")
+        q.setdefault("external_provider", "google")
+    if "ms_id" in q:
+        q["external_event_id"] = q.pop("ms_id")
+        q.setdefault("external_provider", "microsoft")
+    if "google_event_id" in q and "external_event_id" not in q:
+        q["external_event_id"] = q.pop("google_event_id")
+        q.setdefault("external_provider", "google")
+    if "id" in q and "event_id" not in q:
+        q["event_id"] = q.pop("id")
+    # Drop pure-Mongo aliases that are not SB columns
+    for legacy in ("start", "end", "html_link", "gcal_id", "ms_id"):
+        q.pop(legacy, None)
+    return q
+
+
+def canonical_calendar_write(
+    *,
+    workspace_id: str,
+    event_id: str,
+    external_provider: str,
+    external_event_id: Optional[str] = None,
+    title: Optional[str] = None,
+    description: Optional[str] = None,
+    start_time: Any = None,
+    end_time: Any = None,
+    location: Optional[str] = None,
+    attendees: Any = None,
+    status: Optional[str] = None,
+    source: Optional[str] = None,
+    contact_id: Optional[str] = None,
+    external_url: Optional[str] = None,
+    is_simulation: bool = False,
+    hidden_by_real: bool = False,
+    synced_at: Any = None,
+    created_at: Any = None,
+    updated_at: Any = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build a canonical calendar document for new writes (sync + internal)."""
+    provider = (external_provider or "internal").lower().strip()
+    if provider not in CALENDAR_EXTERNAL_PROVIDERS:
+        provider = "internal"
+    doc: Dict[str, Any] = {
+        "event_id": event_id,
+        "workspace_id": workspace_id,
+        "external_provider": provider,
+        "external_event_id": external_event_id,
+        "title": title,
+        "description": description,
+        "start_time": start_time,
+        "end_time": end_time,
+        "location": location,
+        "attendees": attendees if attendees is not None else [],
+        "status": status,
+        "source": source,
+        "contact_id": contact_id,
+        "external_url": external_url,
+        "is_simulation": bool(is_simulation),
+        "hidden_by_real": bool(hidden_by_real),
+    }
+    if provider == "google" and external_event_id:
+        doc["google_event_id"] = external_event_id
+    if synced_at is not None:
+        doc["synced_at"] = synced_at
+    if created_at is not None:
+        doc["created_at"] = created_at
+    if updated_at is not None:
+        doc["updated_at"] = updated_at
+    if extra:
+        doc.update(extra)
+    return normalize_calendar_doc(doc)
+
+
+def calendar_on_conflict(doc: Dict[str, Any]) -> str:
+    """PostgREST ``on_conflict`` target for calendar_events only.
+
+    External syncs mint a fresh UUID ``event_id`` each pass, so upserting on
+    ``workspace_id,event_id`` creates duplicates and fights the unique
+    ``(workspace_id, external_provider, external_event_id)`` index.
+    Internal rows (null external_event_id) keep ``workspace_id,event_id``.
+    """
+    if doc.get("external_event_id"):
+        return "workspace_id,external_provider,external_event_id"
+    return "workspace_id,event_id"
+
+
+async def find_calendar_event_for_external_sync(
+    calendar_col: Any,
+    *,
+    workspace_id: str,
+    provider: str,
+    external_event_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Resolve an existing calendar row for Google/MS sync.
+
+    Lookup order (transition-safe):
+      1. Canonical ``workspace_id + external_provider + external_event_id``
+      2. Legacy Google ``workspace_id + gcal_id`` / MS ``workspace_id + ms_id``
+    """
+    if not external_event_id:
+        return None
+    provider = (provider or "").lower().strip()
+    doc = await calendar_col.find_one(
+        {
+            "workspace_id": workspace_id,
+            "external_provider": provider,
+            "external_event_id": external_event_id,
+        }
+    )
+    if doc:
+        return doc
+    # Legacy keys live only on Mongo; DualWriteCollection remaps gcal_id/ms_id
+    # to external_event_id, so query the underlying collection directly.
+    mongo = getattr(calendar_col, "_mongo", calendar_col)
+    legacy_key = "gcal_id" if provider == "google" else ("ms_id" if provider == "microsoft" else None)
+    if not legacy_key or not hasattr(mongo, "find_one"):
+        return None
+    return await mongo.find_one({"workspace_id": workspace_id, legacy_key: external_event_id})
+
+
+async def upsert_calendar_external_event(
+    calendar_col: Any,
+    *,
+    workspace_id: str,
+    provider: str,
+    external_event_id: str,
+    canonical: Dict[str, Any],
+    now: Any,
+) -> str:
+    """Upsert a Google/MS calendar event without duplicating legacy rows.
+
+    If a legacy ``gcal_id`` / ``ms_id`` row is found, update that document in
+    place, add canonical ``external_*`` fields, and preserve ``event_id``/``id``.
+    Do **not** delete legacy ``gcal_id``/``ms_id``; new writes simply stop
+    writing those keys (canonical payload has none).
+    """
+    provider = (provider or "").lower().strip()
+    existing = await find_calendar_event_for_external_sync(
+        calendar_col,
+        workspace_id=workspace_id,
+        provider=provider,
+        external_event_id=external_event_id,
+    )
+    set_fields = {
+        k: v
+        for k, v in canonical.items()
+        if k not in ("event_id", "id", "_id")
+    }
+    set_fields["workspace_id"] = workspace_id
+    set_fields["external_provider"] = provider
+    set_fields["external_event_id"] = external_event_id
+
+    if existing is not None:
+        event_id = existing.get("event_id") or existing.get("id") or str(uuid.uuid4())
+        set_fields_with_id = {**set_fields, "event_id": event_id}
+        mongo = getattr(calendar_col, "_mongo", calendar_col)
+        if existing.get("_id") is not None and hasattr(mongo, "update_one"):
+            await mongo.update_one({"_id": existing["_id"]}, {"$set": set_fields_with_id})
+        elif existing.get("event_id"):
+            await calendar_col.update_one(
+                {"workspace_id": workspace_id, "event_id": event_id},
+                {"$set": set_fields},
+            )
+        else:
+            legacy_key = "gcal_id" if provider == "google" else "ms_id"
+            await mongo.update_one(
+                {"workspace_id": workspace_id, legacy_key: external_event_id},
+                {"$set": set_fields_with_id},
+            )
+        # Dual-write / SB path: preserve stable event_id via external conflict.
+        if hasattr(calendar_col, "_sb_upsert_doc") and is_dual_write(CALENDAR_CFG):
+            await calendar_col._sb_upsert_doc({**set_fields, "event_id": event_id})
+        return event_id
+
+    event_id = canonical.get("event_id") or str(uuid.uuid4())
+    await calendar_col.update_one(
+        {
+            "workspace_id": workspace_id,
+            "external_provider": provider,
+            "external_event_id": external_event_id,
+        },
+        {
+            "$set": set_fields,
+            "$setOnInsert": {"event_id": event_id, "created_at": now},
+        },
+        upsert=True,
+    )
+    return event_id
+
 
 
 def _primary(cfg: DomainConfig) -> str:
@@ -230,6 +492,8 @@ def _parse_dt(value: Any) -> Any:
 def mongo_to_sb(cfg: DomainConfig, doc: Dict[str, Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     src = dict(doc)
+    if cfg.name == "calendar":
+        src = normalize_calendar_doc(src)
     if "id" in src and cfg.app_id_field not in src:
         src[cfg.app_id_field] = src["id"]
     for k, v in src.items():
@@ -306,9 +570,14 @@ class DualWriteCollection:
         self.table = cfg.table
 
     def find(self, query: Optional[Dict[str, Any]] = None, projection: Optional[Dict[str, int]] = None):
-        return _LazyFindCursor(self, query or {}, projection)
+        q = query or {}
+        if self.cfg.name == "calendar":
+            q = normalize_calendar_query(q)
+        return _LazyFindCursor(self, q, projection)
 
     async def find_one(self, query: Dict[str, Any], projection: Optional[Dict[str, int]] = None):
+        if self.cfg.name == "calendar":
+            query = normalize_calendar_query(query)
         if is_supabase_primary(self.cfg):
             row = await self._sb_find_one(query)
             if row is not None:
@@ -320,6 +589,8 @@ class DualWriteCollection:
         return doc
 
     async def count_documents(self, query: Dict[str, Any]) -> int:
+        if self.cfg.name == "calendar":
+            query = normalize_calendar_query(query)
         if is_supabase_primary(self.cfg):
             n = await self._sb_count(query)
             if n is not None:
@@ -327,6 +598,8 @@ class DualWriteCollection:
         return await self._mongo.count_documents(query)
 
     async def insert_one(self, doc: Dict[str, Any]):
+        if self.cfg.name == "calendar":
+            doc = normalize_calendar_doc(doc)
         if is_mongo_write(self.cfg):
             result = await self._mongo.insert_one(doc)
         else:
@@ -338,6 +611,8 @@ class DualWriteCollection:
         return result
 
     async def insert_many(self, docs: List[Dict[str, Any]]):
+        if self.cfg.name == "calendar":
+            docs = [normalize_calendar_doc(d) for d in docs]
         if is_mongo_write(self.cfg):
             result = await self._mongo.insert_many(docs)
         else:
@@ -350,6 +625,12 @@ class DualWriteCollection:
         return result
 
     async def update_one(self, query: Dict[str, Any], update: Dict[str, Any], upsert: bool = False):
+        if self.cfg.name == "calendar":
+            query = normalize_calendar_query(query)
+            if "$set" in update:
+                update = {**update, "$set": normalize_calendar_doc(update["$set"])}
+            if "$setOnInsert" in update:
+                update = {**update, "$setOnInsert": normalize_calendar_doc(update["$setOnInsert"])}
         if is_mongo_write(self.cfg):
             result = await self._mongo.update_one(query, update, upsert=upsert)
         else:
@@ -363,6 +644,10 @@ class DualWriteCollection:
         return result
 
     async def update_many(self, query: Dict[str, Any], update: Dict[str, Any]):
+        if self.cfg.name == "calendar":
+            query = normalize_calendar_query(query)
+            if "$set" in update:
+                update = {**update, "$set": normalize_calendar_doc(update["$set"])}
         if is_mongo_write(self.cfg):
             result = await self._mongo.update_many(query, update)
         else:
@@ -375,6 +660,8 @@ class DualWriteCollection:
         return result
 
     async def delete_one(self, query: Dict[str, Any]):
+        if self.cfg.name == "calendar":
+            query = normalize_calendar_query(query)
         if is_mongo_write(self.cfg):
             result = await self._mongo.delete_one(query)
         else:
@@ -386,6 +673,8 @@ class DualWriteCollection:
         return result
 
     async def delete_many(self, query: Dict[str, Any]):
+        if self.cfg.name == "calendar":
+            query = normalize_calendar_query(query)
         if is_mongo_write(self.cfg):
             result = await self._mongo.delete_many(query)
         else:
@@ -429,13 +718,29 @@ class DualWriteCollection:
         return None
 
     async def _sb_upsert_doc(self, doc: Dict[str, Any]) -> bool:
+        if self.cfg.name == "calendar":
+            doc = normalize_calendar_doc(doc)
         payload = mongo_to_sb(self.cfg, doc)
         if not payload.get("workspace_id") or not payload.get(self.cfg.app_id_field):
             logger.warning("%s upsert skip — missing workspace_id/%s", self.cfg.name, self.cfg.app_id_field)
             return False
+        conflict = self.cfg.conflict
+        if self.cfg.name == "calendar":
+            conflict = calendar_on_conflict(payload)
+            # Preserve original event_id when upserting by external identity.
+            if payload.get("external_event_id"):
+                existing = await self._sb_find_one(
+                    {
+                        "workspace_id": payload["workspace_id"],
+                        "external_provider": payload.get("external_provider"),
+                        "external_event_id": payload["external_event_id"],
+                    }
+                )
+                if existing and existing.get("event_id"):
+                    payload["event_id"] = existing["event_id"]
         resp = await _sb_request(
             "POST",
-            f"/rest/v1/{self.table}?on_conflict={self.cfg.conflict}",
+            f"/rest/v1/{self.table}?on_conflict={conflict}",
             json=payload,
             prefer="resolution=merge-duplicates,return=minimal",
         )
@@ -449,7 +754,8 @@ class DualWriteCollection:
         set_on_insert = update.get("$setOnInsert") or {}
         unset = update.get("$unset") or {}
         if upsert:
-            merged = {**{k: query.get(k) for k in ("workspace_id", self.cfg.app_id_field) if k in query}}
+            merge_keys = ("workspace_id", self.cfg.app_id_field, "external_provider", "external_event_id")
+            merged = {**{k: query.get(k) for k in merge_keys if k in query}}
             merged.update(set_on_insert)
             merged.update(fields)
             if not merged.get(self.cfg.app_id_field):
