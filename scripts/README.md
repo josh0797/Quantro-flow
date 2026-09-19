@@ -14,6 +14,13 @@ Migración one-shot de los datos legacy de Mongo a las tablas reales de Supabase
 | `workspace_invites`     | → | `invitations`      |
 | `audit_log`             | → | `org_audit_logs`   |
 | `google_integrations` / `microsoft_integrations` | → | `provider_connections` (Phase 2) |
+| `action_executions` | → | `action_executions` (Phase 3) |
+| `automation_policies` / `action_policies` | → | same names (Phase 3) |
+| `inbox_items` | → | `inbox_items` (Phase 6.1) |
+| `activity_events` | → | `activity_events` (Phase 6.2) |
+| `content_items` / `content_templates` | → | same names (Phase 6.2) |
+| `contacts` | → | `contacts` (Phase 6.3) |
+| `calendar_events` | → | `calendar_events` (Phase 6.3) |
 
 ### Pre-requisitos
 
@@ -38,6 +45,12 @@ python backfill_mongo_to_supabase.py --table members
 python backfill_mongo_to_supabase.py --table invites
 python backfill_mongo_to_supabase.py --table audit
 python backfill_mongo_to_supabase.py --table provider_connections
+python backfill_mongo_to_supabase.py --table inbox_items
+python backfill_mongo_to_supabase.py --table activity_events
+python backfill_mongo_to_supabase.py --table content_items
+python backfill_mongo_to_supabase.py --table content_templates
+python backfill_mongo_to_supabase.py --table contacts
+python backfill_mongo_to_supabase.py --table calendar_events
 
 # 3) Spot-check con 50 filas.
 python backfill_mongo_to_supabase.py --limit 50
