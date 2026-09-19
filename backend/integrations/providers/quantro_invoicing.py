@@ -153,7 +153,7 @@ class QuantroInvoicingAdapter(ProviderAdapter):
             params["q"] = q
         if invoice_id:
             params["invoice_id"] = invoice_id
-        data = await self._request("GET", "/api/service/invoices", params=params)
+        data = await self._request("GET", "/service-invoices", params=params)
         if isinstance(data, list):
             return {"invoices": data}
         if isinstance(data, dict):

@@ -61,7 +61,7 @@ gh pr create --base main --title "feat(connect): Outlook, cloud CORS, Quantro OS
 
 ## 6. Remaining risks
 - Production still blocked for Outlook until Entra secrets set.
-- Quantro OS `/api/service/invoices` contract assumed; adjust path if OS API differs.
+- Quantro OS `/service-invoices` contract assumed; adjust path if OS API differs.
 - Facturapi webhook route + vault code kept for compatibility; Connect UI no longer uses them; 410 on old connect endpoint.
 - Historical migrations retaining “Facturapi” name intentionally retained.
 - First-time calendar sync metrics include `possible_duplicates` by repeated `ical_uid` in one Graph page set (informational; no auto-merge across Google/MS).

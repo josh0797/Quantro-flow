@@ -258,7 +258,7 @@ async def test_quantro_invoicing_query_and_prepare_reply(monkeypatch):
 
     async def fake_request(method, path, *, params=None, json=None):
         assert method == "GET"
-        assert path == "/api/service/invoices"
+        assert path == "/service-invoices"
         assert params["workspace_id"] == "ws1"
         return {"invoices": invoices}
 
