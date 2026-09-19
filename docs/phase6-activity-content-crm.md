@@ -22,3 +22,19 @@ Store: `backend/product_domain_store.py` (wired in `server.py`)
 - Dual-write requires `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`
 - Upsert conflict: `(workspace_id, <app_id>)`
 - No automatic primary flip in this PR
+
+## Backfill CLI
+
+After dual-write is live, historical Mongo rows can be copied with:
+
+```bash
+python scripts/backfill_mongo_to_supabase.py --table activity_events
+python scripts/backfill_mongo_to_supabase.py --table content_items
+python scripts/backfill_mongo_to_supabase.py --table content_templates
+python scripts/backfill_mongo_to_supabase.py --table contacts
+python scripts/backfill_mongo_to_supabase.py --table calendar_events
+# then --execute --yes once dry-run looks clean
+```
+
+Supported via `scripts/backfill_mongo_to_supabase.py` Phase 6.2–6.3 migrators (mirrors `product_domain_store.DomainConfig`).
+

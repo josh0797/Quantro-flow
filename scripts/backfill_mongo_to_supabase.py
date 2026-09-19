@@ -30,7 +30,8 @@ Safety guarantees
   (``members``, ``invites``, ``audit``, ``provider_connections``,
   ``facturapi_connections``, ``webhook_events``, ``integrations_config``,
   ``action_executions``, ``automation_policies``, ``action_policies``,
-  ``inbox_items``, ``all``).
+  ``inbox_items``, ``activity_events``, ``content_items``, ``content_templates``,
+  ``contacts``, ``calendar_events``, ``all``).
 
 Examples
 --------
@@ -1113,6 +1114,153 @@ async def migrate_integrations_config(
             reporter.error("integrations_config", key, f"http {status}: {str(body)[:120]}")
 
 
+
+# ── Phase 6.2–6.3: activity / content / CRM / calendar ────────────────
+# Mirrors backend/product_domain_store.DomainConfig known_cols + conflicts.
+_PHASE6_DOMAINS = {
+    "activity_events": {
+        "mongo": "activity_events",
+        "table": "activity_events",
+        "app_id": "event_id",
+        "conflict": "workspace_id,event_id",
+        "dt_keys": {"timestamp", "created_at", "updated_at"},
+        "known": {
+            "event_id", "workspace_id", "event_type", "title", "description",
+            "related_id", "related_type", "timestamp", "is_simulation",
+            "created_at", "updated_at",
+        },
+    },
+    "content_items": {
+        "mongo": "content_items",
+        "table": "content_items",
+        "app_id": "content_id",
+        "conflict": "workspace_id,content_id",
+        "dt_keys": {"created_at", "updated_at"},
+        "known": {
+            "content_id", "workspace_id", "type", "title", "content", "status",
+            "created_by", "is_simulation", "created_at", "updated_at",
+        },
+    },
+    "content_templates": {
+        "mongo": "content_templates",
+        "table": "content_templates",
+        "app_id": "template_id",
+        "conflict": "workspace_id,template_id",
+        "dt_keys": {"created_at", "updated_at"},
+        "known": {
+            "template_id", "workspace_id", "name", "category", "body", "channel",
+            "is_default", "is_simulation", "created_at", "updated_at",
+        },
+    },
+    "contacts": {
+        "mongo": "contacts",
+        "table": "contacts",
+        "app_id": "contact_id",
+        "conflict": "workspace_id,contact_id",
+        "dt_keys": {"ghl_last_sync", "created_at", "updated_at"},
+        "known": {
+            "contact_id", "workspace_id", "name", "email", "phone", "type",
+            "lifecycle_stage", "source", "notes", "tags",
+            "ghl_sync_status", "ghl_last_sync", "ghl_id",
+            "is_simulation", "created_at", "updated_at",
+        },
+    },
+    "calendar_events": {
+        "mongo": "calendar_events",
+        "table": "calendar_events",
+        "app_id": "event_id",
+        "conflict": "workspace_id,event_id",
+        "dt_keys": {"start_time", "end_time", "created_at", "updated_at"},
+        "known": {
+            "event_id", "workspace_id", "title", "description",
+            "start_time", "end_time", "location", "attendees", "status",
+            "source", "contact_id", "google_event_id",
+            "is_simulation", "hidden_by_real",
+            "created_at", "updated_at",
+        },
+    },
+}
+
+
+async def migrate_product_domain(
+    db, sb: SupabaseClient, reporter: Reporter, *,
+    domain_key: str, execute: bool, limit: Optional[int],
+) -> None:
+    """Generic Phase 6.2–6.3 Mongo → Supabase upsert for product domains."""
+    cfg = _PHASE6_DOMAINS[domain_key]
+    mongo_name = cfg["mongo"]
+    table = cfg["table"]
+    app_id = cfg["app_id"]
+    conflict = cfg["conflict"]
+    dt_keys = cfg["dt_keys"]
+    known = cfg["known"]
+    print(f"\n--- {mongo_name} → {table} ---")
+    seen = 0
+    dry_seen: set = set()
+    cursor = db[mongo_name].find({})
+    async for row in cursor:
+        if limit and seen >= limit:
+            break
+        seen += 1
+        wid = row.get("workspace_id")
+        aid = row.get(app_id) or row.get("id")
+        if not wid or not aid:
+            reporter.bump(table, "skip:missing_key")
+            continue
+        key = f"{wid}:{aid}"
+
+        status, body = await sb.get(
+            f"/rest/v1/{table}",
+            {
+                "workspace_id": f"eq.{wid}",
+                app_id: f"eq.{aid}",
+                "select": app_id,
+                "limit": "1",
+            },
+        )
+        if status == 200 and isinstance(body, list) and body:
+            print(f"  [skip:duplicate] workspace_id={wid} {app_id}={aid}")
+            reporter.bump(table, "skip:duplicate")
+            continue
+        if key in dry_seen:
+            reporter.bump(table, "skip:duplicate_in_run")
+            continue
+
+        payload: Dict[str, Any] = {app_id: aid, "workspace_id": wid}
+        for k, v in row.items():
+            if k in {"_id", "id", app_id, "workspace_id"}:
+                continue
+            if k not in known:
+                continue
+            if k in dt_keys:
+                payload[k] = _iso_ts(v)
+            else:
+                payload[k] = v
+
+        if not execute:
+            hint = row.get("title") or row.get("name") or row.get("email") or row.get("event_type") or "?"
+            if isinstance(hint, str):
+                hint = hint[:60]
+            print(f"  [dry] would upsert ws={wid} {app_id}={aid} hint={hint!r}")
+            reporter.bump(table, "dry:would_insert")
+            dry_seen.add(key)
+            continue
+
+        status, body = await sb.post(
+            f"/rest/v1/{table}?on_conflict={conflict}",
+            payload,
+            prefer="resolution=merge-duplicates,return=minimal",
+        )
+        if status < 400:
+            print(f"  [ok] upserted ws={wid} {app_id}={aid}")
+            reporter.bump(table, "upserted")
+            dry_seen.add(key)
+        else:
+            print(f"  [error:{status}] ws={wid} {app_id}={aid} body={str(body)[:160]}")
+            reporter.bump(table, f"error:{status}")
+            reporter.error(table, key, f"http {status}: {str(body)[:80]}")
+
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 # ── Phase 6.1: inbox_items ────────────────────────────────────────────
@@ -1180,8 +1328,12 @@ async def migrate_inbox_items(
             "hidden_by_real": row.get("hidden_by_real"),
             "priority": row.get("priority"),
             "synced_at": _iso_ts(row.get("synced_at")),
-            "created_at": _iso_ts(row.get("created_at")),
         }
+        # Omit created_at when missing — column is NOT NULL DEFAULT now();
+        # explicit null triggers Postgres 23502.
+        created_at = _iso_ts(row.get("created_at"))
+        if created_at is not None:
+            payload["created_at"] = created_at
 
         if not execute:
             subj = (row.get("subject") or "")[:60]
@@ -1280,6 +1432,15 @@ async def main(args: argparse.Namespace) -> None:
         await migrate_inbox_items(
             db, sb, reporter, execute=args.execute, limit=args.limit,
         )
+    for domain_key in (
+        "activity_events", "content_items", "content_templates",
+        "contacts", "calendar_events",
+    ):
+        if table in (domain_key, "all"):
+            await migrate_product_domain(
+                db, sb, reporter, domain_key=domain_key,
+                execute=args.execute, limit=args.limit,
+            )
 
     reporter.print_summary()
 
@@ -1313,7 +1474,8 @@ def parse_args() -> argparse.Namespace:
             "members", "invites", "audit", "provider_connections",
             "facturapi_connections", "webhook_events", "integrations_config",
             "action_executions", "automation_policies", "action_policies",
-            "inbox_items", "all",
+            "inbox_items", "activity_events", "content_items", "content_templates",
+            "contacts", "calendar_events", "all",
         ],
         default="all",
         help="Restrict which collection to process (default: all).",
