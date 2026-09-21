@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Settings as SettingsIcon, Plug, Bot, Building2, Users, Loader2, Zap, ExternalLink } from 'lucide-react';
+import { Settings as SettingsIcon, Plug, Bot, Building2, Users, Loader2, Zap, ExternalLink, BookOpen, Sparkles, Workflow } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -16,12 +16,16 @@ import IntegrationsPanel from '../components/IntegrationsPanel';
 import LanguageSwitcher from '../components/LanguageSwitcher';
 // SimulationModeToggle removed from Settings (UI cleanup — no longer surfaced)
 import { useLanguage } from '../context/LanguageContext';
+import { HUB_ROUTES, buildHubUrl, buildDemoUrl, buildWorkflowUrl, useFlowHelpEntries, trackHelp } from '../lib/productHub';
 
 export default function Settings() {
   const { profile, updateProfile, refetch } = useBusinessProfile();
-  const { t } = useLanguage();
+  const { t, lang } = useLanguage();
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState('integrations');
+  // Help & Learning entries come from the published Product Capability Registry (static fallback offline).
+  const helpEntries = useFlowHelpEntries();
+  const L = (localized) => (localized ? localized[lang] ?? localized.en ?? '' : '');
 
   // Business Profile state
   const [profileForm, setProfileForm] = useState({
@@ -84,7 +88,7 @@ export default function Settings() {
 
         {/* Tabs */}
         <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-          <TabsList className="grid w-full grid-cols-4 bg-[hsl(var(--muted)/0.3)]">
+          <TabsList className="grid w-full grid-cols-5 bg-[hsl(var(--muted)/0.3)]">
             <TabsTrigger value="integrations" className="flex items-center gap-2">
               <Plug size={14} />
               <span>{t('settings.tabs.integrations')}</span>
@@ -100,6 +104,10 @@ export default function Settings() {
             <TabsTrigger value="workspace" className="flex items-center gap-2">
               <Users size={14} />
               <span>{t('settings.tabs.workspace')}</span>
+            </TabsTrigger>
+            <TabsTrigger value="help" className="flex items-center gap-2" data-testid="settings-tab-help">
+              <BookOpen size={14} />
+              <span>{t('settings.tabs.help')}</span>
             </TabsTrigger>
           </TabsList>
 
@@ -336,6 +344,78 @@ export default function Settings() {
                   </p>
                 </div>
               </div>
+            </Card>
+          </TabsContent>
+
+          {/* Help & Learning Tab — links to the Quantro Product Hub (registry-driven, new tab) */}
+          <TabsContent value="help" className="space-y-4 mt-6" data-testid="settings-help">
+            <Card className="p-6 bg-[hsl(var(--card))] border-[hsl(var(--border))]">
+              <h3 className="text-lg font-semibold text-foreground mb-1">{t('settings.help.heading')}</h3>
+              <p className="text-sm text-muted-foreground mb-6">{t('settings.help.description')}</p>
+
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-3">{t('settings.help.modules_title')}</p>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {helpEntries.map((entry) => (
+                  <a
+                    key={entry.id}
+                    href={entry.learnUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    data-testid={`help-link-${entry.id}`}
+                    onClick={() => trackHelp('help_link_opened', { source: 'settings', capability: entry.id })}
+                    className="flex items-start gap-3 rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--background))] p-4 hover:border-[hsl(var(--primary)/0.5)] transition-colors"
+                  >
+                    <BookOpen size={16} className="mt-0.5 text-[hsl(var(--primary))] shrink-0" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm font-medium text-foreground">{L(entry.title)}</span>
+                      {entry.description && (
+                        <span className="block text-xs text-muted-foreground mt-0.5 line-clamp-2">{L(entry.description)}</span>
+                      )}
+                      {entry.duration && (
+                        <span className="block text-[11px] text-muted-foreground mt-1">{t('settings.help.tutorial_duration', { duration: entry.duration })}</span>
+                      )}
+                    </span>
+                    <ExternalLink size={14} className="text-muted-foreground shrink-0" />
+                  </a>
+                ))}
+              </div>
+
+              <div className="mt-6 space-y-2">
+                {[
+                  { id: 'overview', label: t('settings.help.overview'), href: buildHubUrl(HUB_ROUTES.overview), icon: Sparkles },
+                  { id: 'flow', label: t('settings.help.flow_overview'), href: buildHubUrl(HUB_ROUTES.flow), icon: BookOpen },
+                  { id: 'tutorials', label: t('settings.help.tutorials'), href: buildHubUrl(HUB_ROUTES.tutorials), icon: BookOpen },
+                  { id: 'workflows', label: t('settings.help.workflows'), href: buildHubUrl(HUB_ROUTES.workflows), icon: Workflow },
+                  { id: 'workflow-invoice', label: t('settings.help.workflow_invoice'), href: buildWorkflowUrl('invoice-request-to-reply'), icon: Workflow },
+                ].map(({ id, label, href, icon: Icon }) => (
+                  <a
+                    key={id}
+                    href={href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    data-testid={`help-hub-${id}`}
+                    onClick={() => trackHelp('help_link_opened', { source: 'settings', link: id })}
+                    className="flex items-center gap-3 rounded-lg border border-[hsl(var(--border))] px-4 py-3 text-sm text-foreground hover:border-[hsl(var(--primary)/0.5)] transition-colors"
+                  >
+                    <Icon size={15} className="text-[hsl(var(--primary))]" />
+                    <span className="flex-1">{label}</span>
+                    <ExternalLink size={14} className="text-muted-foreground" />
+                  </a>
+                ))}
+              </div>
+            </Card>
+
+            <Card className="p-6 bg-[hsl(var(--primary)/0.06)] border-[hsl(var(--primary)/0.25)] flex items-center justify-between gap-4 flex-wrap">
+              <div>
+                <p className="text-sm font-semibold text-foreground">{t('settings.help.demo_title')}</p>
+                <p className="text-xs text-muted-foreground mt-1">{t('settings.help.demo_description')}</p>
+              </div>
+              <Button asChild size="sm" data-testid="help-live-demo">
+                <a href={buildDemoUrl()} target="_blank" rel="noopener noreferrer" onClick={() => trackHelp('live_demo_started', { source: 'flow_settings' })}>
+                  <Sparkles size={14} className="mr-2" />
+                  {t('settings.help.demo_cta')}
+                </a>
+              </Button>
             </Card>
           </TabsContent>
         </Tabs>

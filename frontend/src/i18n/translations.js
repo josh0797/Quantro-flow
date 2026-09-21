@@ -711,6 +711,23 @@ export const translations = {
         automation: 'Automatización',
         business_profile: 'Perfil del Negocio',
         workspace: 'Espacio de Trabajo',
+        help: 'Ayuda y aprendizaje',
+      },
+      help: {
+        heading: 'Ayuda y aprendizaje',
+        description:
+          'Tutoriales, workflows y la demo en vivo viven en el Product Hub de Quantro. Los enlaces abren en una pestaña nueva.',
+        modules_title: 'Aprende cada módulo de Quantro Flow',
+        tutorial_duration: 'Tutorial · {{duration}}',
+        overview: 'Visión general del producto',
+        flow_overview: 'Visión general de Quantro Flow',
+        tutorials: 'Todos los tutoriales',
+        workflows: 'Workflows entre Quantro OS y Flow',
+        workflow_invoice: 'De la solicitud de factura a la respuesta automática',
+        demo_title: 'Explora la demo en vivo',
+        demo_description:
+          'Atlas Market Group corriendo en Quantro OS: datos reales de ejemplo, sin efectos externos.',
+        demo_cta: 'Abrir la demo',
       },
       automation: {
         heading: 'Automatización',
@@ -1347,6 +1364,10 @@ export const translations = {
         label: 'Agente de Triage',
         description: 'Clasifica y enruta items entrantes de la bandeja.',
       },
+    },
+    help: {
+      learn: 'Aprender',
+      learn_about_module: 'Aprende sobre este módulo en el Product Hub (se abre en una pestaña nueva)',
     },
   },
 
@@ -2036,6 +2057,23 @@ export const translations = {
         automation: 'Automation',
         business_profile: 'Business Profile',
         workspace: 'Workspace',
+        help: 'Help & Learning',
+      },
+      help: {
+        heading: 'Help & Learning',
+        description:
+          'Tutorials, workflows and the live demo live in the Quantro Product Hub. Links open in a new tab.',
+        modules_title: 'Learn every Quantro Flow module',
+        tutorial_duration: 'Tutorial · {{duration}}',
+        overview: 'Product overview',
+        flow_overview: 'Quantro Flow overview',
+        tutorials: 'All tutorials',
+        workflows: 'Workflows across Quantro OS and Flow',
+        workflow_invoice: 'From invoice request to automated reply',
+        demo_title: 'Explore the live demo',
+        demo_description:
+          'Atlas Market Group running on Quantro OS: realistic sample data, no external side effects.',
+        demo_cta: 'Open the demo',
       },
       automation: {
         heading: 'Automation Settings',
@@ -2668,6 +2706,10 @@ export const translations = {
         label: 'Triage Agent',
         description: 'Classifies and routes incoming inbox items.',
       },
+    },
+    help: {
+      learn: 'Learn',
+      learn_about_module: 'Learn about this module in the Product Hub (opens in a new tab)',
     },
   },
 };
