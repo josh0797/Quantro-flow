@@ -6786,7 +6786,9 @@ microsoft_adapter = MicrosoftAdapter(
 # Keep Facturapi adapter for legacy webhook + vault compatibility only —
 # it is NOT registered in Connect (replaced by Quantro OS "Facturación").
 facturapi_adapter = FacturapiAdapter(facturapi_connections_col, facturapi_webhook_events_col, _backend_public_url, log_audit_fn=log_audit)
-quantro_invoicing_adapter = QuantroInvoicingAdapter()
+# Invoice lookups are scoped to the Supabase organization mapped to the
+# workspace; OS refuses unscoped calls, so the resolver is required.
+quantro_invoicing_adapter = QuantroInvoicingAdapter(resolve_org_id=workspace_to_org_id)
 quantro_internal_adapter = QuantroInternalAdapter()
 
 register_provider(google_adapter)
