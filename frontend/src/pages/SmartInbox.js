@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import LearnLink from '../components/LearnLink';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
@@ -302,7 +303,10 @@ export default function SmartInbox() {
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="font-display text-2xl font-semibold tracking-tight">{t('smart_inbox.title')}</h1>
+          <h1 className="font-display text-2xl font-semibold tracking-tight flex items-center gap-3">
+            {t('smart_inbox.title')}
+            <LearnLink route="inbox" />
+          </h1>
           <p className="text-sm text-muted-foreground mt-1">Intelligent message processing and workflow automation</p>
         </div>
         <div className="flex items-center gap-3">

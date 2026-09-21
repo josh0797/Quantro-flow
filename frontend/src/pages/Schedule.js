@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import LearnLink from '../components/LearnLink';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
@@ -167,7 +168,10 @@ export default function Schedule() {
 
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="font-display text-2xl font-semibold tracking-tight">{meetingsLabel}</h1>
+          <h1 className="font-display text-2xl font-semibold tracking-tight flex items-center gap-3">
+            {meetingsLabel}
+            <LearnLink route="schedule" />
+          </h1>
           <p className="text-sm text-muted-foreground mt-1">{industryConfig.name} · {t('schedule.subtitle')}</p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>

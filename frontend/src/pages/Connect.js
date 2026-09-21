@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import LearnLink from '../components/LearnLink';
 import { toast } from 'sonner';
 import {
   Search, CheckCircle2, AlertTriangle, XCircle, Settings2, Loader2,
@@ -337,6 +338,7 @@ export default function Connect() {
         <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
           <Bot size={22} className="text-[hsl(var(--primary))]" />
           {t('connect.title')}
+          <LearnLink route="connect" className="ml-1" />
         </h1>
         <p className="text-sm text-muted-foreground max-w-xl">{t('connect.subtitle')}</p>
       </header>
