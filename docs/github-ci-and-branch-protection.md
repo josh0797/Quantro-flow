@@ -17,3 +17,9 @@ Backend runs at least:
 - `backend/tests/` (product domains, calendar canonical, adapters, CORS helpers, Facturapi, etc.)
 
 Do not hide build errors with blanket `CI=false` on install.
+
+## Security audits (added 2026-09-23)
+
+- Frontend job runs `npm audit --audit-level=high` after `npm ci`.
+- Backend job runs `pip-audit -r requirements.txt`.
+- Full ISP SoT: `josh0797/konta` → `docs/security/`.
