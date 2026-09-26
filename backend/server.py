@@ -361,8 +361,9 @@ async def get_current_user(request: Request) -> User:
     user_doc = await _upsert_user_from_claims(claims)
     user = User(**{k: user_doc.get(k) for k in ["user_id", "email", "name", "picture", "current_workspace_id"]})
     # Forward the raw access_token so AI billing can read Supabase under
-    # the user's own RLS context (no service-role key needed for reads
-    # or for the decrement_ai_credits RPC).
+    # the user's own RLS context. The decrement_ai_credits RPC is called
+    # with the service-role key (see ai_billing.rpc_decrement_credits);
+    # the token is only used there to confirm the charged user_id.
     user.access_token = token
     return user
 
