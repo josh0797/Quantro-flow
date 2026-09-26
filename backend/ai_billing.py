@@ -25,6 +25,8 @@ when the migration lands, fill that single function in.
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional, Literal, List, Dict, Any
+import base64
+import json
 import logging
 import os
 
@@ -259,6 +261,27 @@ async def fetch_profile(user_id: str, access_token: str) -> Dict[str, Any]:
     return {}
 
 
+def _jwt_subject(access_token: str) -> Optional[str]:
+    """Return the ``sub`` claim of a JWT **without** verifying it.
+
+    Only used as a defense-in-depth consistency check inside
+    ``rpc_decrement_credits``: the token was already signature-verified
+    by ``server.get_current_user`` (which also derives ``user.user_id``
+    from this same ``sub``). Returns None for anything that isn't a
+    well-formed JWT.
+    """
+    try:
+        parts = (access_token or "").split(".")
+        if len(parts) != 3:
+            return None
+        payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload_b64.encode("ascii")))
+        sub = claims.get("sub") if isinstance(claims, dict) else None
+        return str(sub) if sub else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def rpc_decrement_credits(
     user_id: str,
     amount: float,
@@ -267,18 +290,38 @@ async def rpc_decrement_credits(
     """Atomically deduct ``amount`` USD from profiles.ai_credits_used
     via the ``decrement_ai_credits`` Postgres function.
 
-    The RPC is granted to ``authenticated`` so the user's own JWT is
-    sufficient — no service-role key required. Best-effort: failures
-    must never break the user's request.
+    The RPC is called with the **service-role** key (``_service_headers``),
+    never with the end user's JWT: ``decrement_ai_credits(uuid, numeric)``
+    is SECURITY DEFINER and charges whatever ``p_user_id`` it receives
+    (it does not use ``auth.uid()``), so EXECUTE is being revoked from
+    ``authenticated`` and only ``service_role`` may call it.
+
+    Authorization therefore lives here, in the backend: ``access_token``
+    is still required (proof the request comes from a verified caller)
+    and its ``sub`` must match ``user_id`` — a user can only ever be
+    charged on their own profile. Best-effort: failures must never break
+    the user's request.
     """
     cost = max(0.0, float(amount or 0.0))
     if cost == 0.0 or not SUPABASE_URL or not user_id or not access_token:
+        return
+    token_sub = _jwt_subject(access_token)
+    if token_sub != str(user_id):
+        logger.warning(
+            "ai_billing.rpc_decrement_credits skipped: token subject does not match user_id",
+        )
+        return
+    headers = _service_headers()
+    if not headers:
+        logger.warning(
+            "ai_billing.rpc_decrement_credits skipped: SUPABASE_SERVICE_ROLE_KEY not configured",
+        )
         return
     url = f"{SUPABASE_URL}/rest/v1/rpc/decrement_ai_credits"
     payload = {"p_user_id": user_id, "p_amount": cost}
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
-            r = await client.post(url, headers=_user_headers(access_token), json=payload)
+            r = await client.post(url, headers=headers, json=payload)
         if r.status_code >= 400:
             logger.warning(
                 "ai_billing.rpc_decrement_credits non-2xx status=%s body=%s",
