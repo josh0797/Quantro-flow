@@ -11,6 +11,11 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 load_dotenv()
 
+# Sentry (quantro-flow-api) — no-op unless the SENTRY_DSN secret is set.
+# Must run before FastAPI() is created so the integrations can hook in.
+from observability import init_sentry
+init_sentry()
+
 import httpx
 import jwt as pyjwt
 from jwt import PyJWKClient, InvalidTokenError, ExpiredSignatureError
