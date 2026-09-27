@@ -390,7 +390,11 @@ export default function PlanAndUsage() {
               >
                 {credits.source === 'quantro' && t('plan_usage.credits_source_quantro')}
                 {credits.source === 'user_api' && t('plan_usage.credits_source_user')}
-                {credits.source === 'blocked' && t('plan_usage.credits_source_blocked')}
+                {credits.source === 'blocked' && (
+                  credits.reason === 'plan_no_credits'
+                    ? t('plan_usage.credits_source_not_included')
+                    : t('plan_usage.credits_source_blocked')
+                )}
               </Badge>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -430,18 +434,27 @@ export default function PlanAndUsage() {
               )}
               {credits.source === 'blocked' && (
                 <div data-testid="credits-blocked" className="space-y-2 text-xs text-[hsl(var(--destructive))] bg-[hsl(var(--destructive)/0.08)] border border-[hsl(var(--destructive)/0.2)] rounded-md px-3 py-2">
-                  <p>{t('plan_usage.credits_blocked_message')}</p>
+                  <p>
+                    {credits.reason === 'plan_no_credits'
+                      ? t('plan_usage.credits_plan_not_included')
+                      : t('plan_usage.credits_blocked_message')}
+                  </p>
                   <div className="flex gap-2">
-                    <Button
-                      data-testid="credits-add-key-btn"
-                      size="sm"
-                      variant="outline"
-                      onClick={() => navigate('/settings')}
-                      className="border-[hsl(var(--border))] h-8 text-xs"
-                    >
-                      <Key size={12} className="mr-1.5" />
-                      {t('plan_usage.add_own_api_key')}
-                    </Button>
+                    {/* Flow can't read a user's own OpenAI key yet
+                        (ai_billing.get_user_api_key is a stub), so a plan
+                        without included credits only gets the upgrade path. */}
+                    {credits.reason !== 'plan_no_credits' && (
+                      <Button
+                        data-testid="credits-add-key-btn"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => navigate('/settings')}
+                        className="border-[hsl(var(--border))] h-8 text-xs"
+                      >
+                        <Key size={12} className="mr-1.5" />
+                        {t('plan_usage.add_own_api_key')}
+                      </Button>
+                    )}
                     <Button
                       data-testid="credits-upgrade-btn"
                       size="sm"
