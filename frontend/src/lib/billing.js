@@ -32,16 +32,30 @@ export const TEST_USERS = [
 export const TEST_USER_LIMIT = 15000;
 
 // ---------- AI CREDITS (USD-based, real cost per request) ----------
-// Each plan ships with a fixed monthly bag of "credits" measured in USD.
-// Every request consumes its real Stripe-grade cost based on the model's
-// per-token pricing. When the user's bag hits 0 we fall back to the
-// user-supplied OpenAI API key (if configured); otherwise smart features
-// are blocked.
+// Pro and Enterprise ship with a fixed monthly bag of "credits" measured in
+// USD; Essential includes no Quantro AI credits (a balance already stored
+// on an Essential profile is still honoured until it runs out — never
+// clawed back). Every request consumes its real Stripe-grade cost based on
+// the model's per-token pricing. When the user's bag hits 0 we fall back to
+// the user-supplied OpenAI API key (if configured); otherwise smart
+// features are blocked.
 export const PLAN_CREDITS = {
-  essential: 5,    // $5 USD / month
+  essential: 0,    // no Quantro AI credits included
   pro: 10,         // $10 USD / month
   enterprise: 20,  // $20 USD / month
 };
+
+/**
+ * Pricing-card bullet for the AI credits a plan includes. Plans with a bag
+ * get the usual "$N USD en créditos IA / mes" string; a plan with none gets
+ * an explicit "not included" entry ({ label, included: false }) so the card
+ * never renders "$0 USD en créditos IA / mes".
+ */
+export function planCreditsFeature(planKey) {
+  const credits = Number(PLAN_CREDITS[planKey] || 0);
+  if (credits > 0) return `$${credits} USD en créditos IA / mes`;
+  return { label: 'Créditos IA no incluidos', included: false };
+}
 
 // Internal QA accounts always get the top tier in credits + calls.
 export const TEST_USER_CREDITS = 20;
@@ -107,7 +121,7 @@ export const PLANS = [
       'CRM + Inbox con ejecución automática',
       'AI Coach (limitado)',
       'Automatizaciones básicas',
-      `$${PLAN_CREDITS.essential} USD en créditos IA / mes`,
+      planCreditsFeature('essential'),
       'Contabilidad básica',
       'CFDI 4.0',
     ],
@@ -131,7 +145,7 @@ export const PLANS = [
       'Decisiones + plan de acción',
       'Automatizaciones avanzadas',
       'Multiusuario (3 asientos)',
-      `$${PLAN_CREDITS.pro} USD en créditos IA / mes`,
+      planCreditsFeature('pro'),
       'Contabilidad avanzada',
     ],
     seats: 3,
@@ -151,7 +165,7 @@ export const PLANS = [
       'Multiusuario (10 asientos)',
       'Lean Management completo',
       'Quantro Revenue',
-      `$${PLAN_CREDITS.enterprise} USD en créditos IA / mes`,
+      planCreditsFeature('enterprise'),
       'Onboarding dedicado',
       'Soporte prioritario',
       'Agentes personalizados (próximamente)',
@@ -232,13 +246,15 @@ export function getOpenAIUsageLimit({ email, profile }) {
  *     hasOwnApiKey: bool,   // whether the user has supplied their own key
  *     source: 'quantro' | 'user_api' | 'blocked',
  *     blocked: bool,        // true ⇒ cannot use smart features
- *     reason: string,
+ *     reason: string,       // 'plan_no_credits' when blocked on a plan
+ *                           // that includes no Quantro credits (Essential)
  *   }
  */
 export function getCreditsState({ email, profile }) {
   const lcEmail = String(email || '').toLowerCase();
   const isTestUser = lcEmail && TEST_USERS.includes(lcEmail);
   const planKey = (profile?.plan || '').toLowerCase();
+  const planIncludesNoCredits = !isTestUser && planKey in PLAN_CREDITS && PLAN_CREDITS[planKey] <= 0;
   const baseTotal = isTestUser
     ? TEST_USER_CREDITS
     : (planKey in PLAN_CREDITS ? PLAN_CREDITS[planKey] : 0);
@@ -263,7 +279,10 @@ export function getCreditsState({ email, profile }) {
   } else {
     source = 'blocked';
     blocked = true;
-    reason = 'no_credits_no_user_key';
+    // Mirrors ai_billing.resolve_credits_state: a plan that includes no
+    // Quantro credits (Essential) gets its own reason so the UI doesn't
+    // tell the user they "used up" credits they were never given.
+    reason = planIncludesNoCredits ? 'plan_no_credits' : 'no_credits_no_user_key';
   }
 
   return { total, used, remaining, percent, hasOwnApiKey, source, blocked, reason };

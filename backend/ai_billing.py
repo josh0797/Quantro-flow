@@ -5,7 +5,8 @@ UI never advertises a different bag of credits than what the backend
 actually charges. Keep both files in lock-step on every change.
 
 Responsibilities:
-  * Define per-plan monthly credit allowance (`PLAN_CREDITS`).
+  * Define per-plan monthly credit allowance (`PLAN_CREDITS`). Essential
+    includes no Quantro AI credits; Pro and Enterprise include $10 / $20.
   * Compute the real USD cost of an OpenAI request from token usage.
   * Decrement profiles.ai_credits_used (and recompute remaining) after
     each successful request, persisting one row in `ai_credit_usage`.
@@ -34,8 +35,13 @@ from fastapi import HTTPException
 logger = logging.getLogger("quantro.ai_billing")
 
 # ---------- Constants (lock-step with billing.js) ----------
+# Quantro AI credits (USD) included in each plan per month. Essential
+# includes none: an Essential user only runs on Quantro's key while a
+# balance already stored on their profile lasts (balances granted before
+# this change are never clawed back); after that they are blocked with
+# reason "plan_no_credits" and must upgrade.
 PLAN_CREDITS = {
-    "essential": 5.0,    # $5 USD / month
+    "essential": 0.0,    # no Quantro AI credits included
     "pro": 10.0,         # $10 USD / month
     "enterprise": 20.0,  # $20 USD / month
 }
@@ -113,17 +119,29 @@ def resolve_credits_state(
         2. profiles.ai_credits_remaining > 0  → source = "quantro"
         3. user supplied own OpenAI key       → source = "user_api"
         4. otherwise                          → source = "blocked"
+                                                (reason "plan_no_credits"
+                                                when the plan includes no
+                                                Quantro credits, e.g.
+                                                Essential)
     """
     profile = profile or {}
     lc_email = (email or "").lower().strip()
     is_test_user = bool(lc_email) and lc_email in TEST_USERS
     plan_key = (profile.get("plan") or "").lower()
     has_coupon = bool(profile.get("has_coupon"))
+    plan_includes_no_credits = (
+        not is_test_user
+        and plan_key in PLAN_CREDITS
+        and PLAN_CREDITS[plan_key] <= 0
+    )
 
     base_total = (
         TEST_USER_CREDITS if is_test_user
         else float(PLAN_CREDITS.get(plan_key, 0.0))
     )
+    # A stored total of 0/NULL falls back to the plan's included amount.
+    # Essential's is 0, so this never grants Essential anything; Pro and
+    # Enterprise keep their existing behaviour.
     total = float(profile.get("ai_credits_total") or base_total or 0.0)
     used = max(0.0, float(profile.get("ai_credits_used") or 0.0))
     remaining_raw = profile.get("ai_credits_remaining")
@@ -168,7 +186,11 @@ def resolve_credits_state(
     return CreditsState(
         total=total, used=used, remaining=remaining,
         has_own_api_key=False,
-        source="blocked", blocked=True, reason="no_credits_no_user_key",
+        source="blocked", blocked=True,
+        reason=(
+            "plan_no_credits" if plan_includes_no_credits
+            else "no_credits_no_user_key"
+        ),
     )
 
 
@@ -199,6 +221,16 @@ def format_block_message(language: str = "es", reason: str = "") -> str:
             "Las cuentas de prueba no incluyen cr\u00e9ditos de Quantro IA. "
             "Agrega tu propia API key de OpenAI en Configuraci\u00f3n para "
             "usar las funciones inteligentes."
+        )
+    if reason == "plan_no_credits":
+        if language == "en":
+            return (
+                "Your plan doesn’t include Quantro AI credits. "
+                "Upgrade to Pro to use smart features."
+            )
+        return (
+            "Tu plan no incluye créditos IA de Quantro. "
+            "Actualiza a Pro para usar las funciones inteligentes."
         )
     if language == "en":
         return (
