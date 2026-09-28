@@ -18,9 +18,11 @@ Auth modes:
                 lookups, invite accept, and audit fan-out.
 
 Phase 1: ``QUANTRO_DB_PRIMARY`` defaults to ``supabase``. Set it to
-``mongo`` to roll back reads. ``QUANTRO_MONGO_MIRROR`` (default on)
-keeps optional Mongo identity writes during the cutover; set to ``0``
-to freeze the Mongo mirror.
+``mongo`` to roll back reads. ``QUANTRO_MONGO_MIRROR`` (default OFF since
+the Mongo exit) is read by server.py's ``_local_identity_writes``: Flow's
+own workspace_members / invites / audit docs now live in Supabase
+(``flow_documents``) and are always written; the flag only matters while
+those docs are still on Mongo (``QUANTRO_DOCS_PRIMARY=mongo``).
 """
 from __future__ import annotations
 
@@ -29,6 +31,8 @@ import os
 from typing import Any, Dict, List, Optional
 
 import httpx
+
+import storage_flags
 
 logger = logging.getLogger("quantro.supabase_admin")
 
@@ -44,12 +48,9 @@ SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 #                 when configured (Phase 7c dual-write).
 DB_PRIMARY = (os.environ.get("QUANTRO_DB_PRIMARY") or "supabase").lower().strip()
 
-# Optional Mongo mirror for identity collections. Default "1" so a
-# rollback to QUANTRO_DB_PRIMARY=mongo still has recent rows. Set to
-# "0"/"false"/"off" to stop writing workspace_members / invites /
-# audit_log once Supabase SoT is trusted.
-_MONGO_MIRROR_RAW = (os.environ.get("QUANTRO_MONGO_MIRROR") or "1").lower().strip()
-MONGO_MIRROR = _MONGO_MIRROR_RAW not in {"0", "false", "no", "off"}
+# Optional Mongo mirror for identity collections. Unset → off (fail-safe
+# default since the Mongo exit; see storage_flags.py).
+MONGO_MIRROR = storage_flags.parse_mirror(None)
 
 # Default Quantro org for the legacy single-tenant workspace. Surfaced
 # so the workspace-id mapping helper can resolve ``DEFAULT_WORKSPACE_ID``

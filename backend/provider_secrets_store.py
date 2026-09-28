@@ -7,17 +7,18 @@ API-key values.
 
 Flags
 -----
-``QUANTRO_SECRETS_PRIMARY`` (default ``mongo``):
+``QUANTRO_SECRETS_PRIMARY`` (default ``supabase`` since the Mongo exit —
+see storage_flags.py):
   * ``mongo``     — reads from Mongo; dual-write Supabase when configured.
-  * ``supabase``  — reads from Supabase first (Mongo fallback); Mongo
-                    writes gated by ``QUANTRO_MONGO_MIRROR`` (default on).
-
-Safest Phase 2 first-PR default: dual-write ON, read still Mongo, so
-deploys that have not applied the migration / backfill keep working.
+  * ``supabase``  — reads/writes Supabase. ``QUANTRO_MONGO_MIRROR`` (default
+                    off) keeps Mongo as a mirror: writes are replayed there and
+                    a Supabase miss falls back to Mongo. Mirror off → Mongo is
+                    never touched and Supabase failures raise
+                    ``sb_rest.SupabaseStoreError`` instead of being dropped.
 
 All Supabase calls use the **service role** only (RLS: no anon/
 authenticated policies on secret tables). Missing tables / transport
-errors degrade gracefully: log + keep Mongo.
+errors degrade gracefully while Mongo is still primary or mirrored.
 """
 from __future__ import annotations
 
@@ -28,17 +29,20 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+import mongo_compat as mc
+import storage_flags
+from sb_rest import SupabaseStoreError
+
 logger = logging.getLogger("quantro.provider_secrets_store")
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
-# Phase 2 secrets SoT. Default mongo until backfill + migration are live.
-_SECRETS_PRIMARY_RAW = (os.environ.get("QUANTRO_SECRETS_PRIMARY") or "mongo").lower().strip()
-SECRETS_PRIMARY = _SECRETS_PRIMARY_RAW if _SECRETS_PRIMARY_RAW in {"mongo", "supabase"} else "mongo"
+# Secrets SoT. Unset → supabase (fail-safe default since the Mongo exit).
+SECRETS_PRIMARY = storage_flags.parse_primary("QUANTRO_SECRETS_PRIMARY")
 
-_MONGO_MIRROR_RAW = (os.environ.get("QUANTRO_MONGO_MIRROR") or "1").lower().strip()
-MONGO_MIRROR = _MONGO_MIRROR_RAW not in {"0", "false", "no", "off"}
+# Shared mirror flag. Unset → off.
+MONGO_MIRROR = storage_flags.parse_mirror(None)
 
 VALID_PROVIDERS = frozenset({"google", "microsoft", "facturapi"})
 OAUTH_PROVIDERS = frozenset({"google", "microsoft"})  # CSRF state providers
@@ -68,6 +72,20 @@ def is_secrets_mongo_write_enabled() -> bool:
     if SECRETS_PRIMARY != "supabase":
         return True
     return MONGO_MIRROR
+
+
+def _mongo_fallback_ok(mongo_col) -> bool:
+    """Supabase primary may consult Mongo only while it is kept as a mirror."""
+    return mongo_col is not None and MONGO_MIRROR
+
+
+# Mongo integration-doc keys that must never be copied into ``meta``.
+_SECRETISH = ("token", "secret", "password", "api_key", "apikey", "private", "credential", "code_verifier")
+
+
+def _meta_safe_key(key: str) -> bool:
+    low = key.lower()
+    return not any(part in low for part in _SECRETISH)
 
 
 def secrets_health() -> Dict[str, Any]:
@@ -210,7 +228,18 @@ def _connection_mongo_to_sb(provider: str, workspace_id: str, fields: Dict[str, 
                 out[mongo_key] = list(value) if value is not None else []
             else:
                 out[mongo_key] = value
-        # Ignore unknown keys quietly (e.g. legacy fields).
+        elif mongo_key == "provider_user_id":
+            if value is not None:
+                out["provider_user_id"] = value
+        elif mongo_key == "created_at":
+            out["created_at"] = _iso(value)
+        elif mongo_key != "id" and _meta_safe_key(str(mongo_key)):
+            # Keep non-secret extras (e.g. last_calendar_sync_metrics) so a
+            # Supabase-only deployment does not lose them. Secret-looking
+            # keys are never copied here.
+            meta = dict(out.get("meta") or {})
+            meta[str(mongo_key)] = mc.to_json(value)
+            out["meta"] = meta
     # Facturapi: derive connected from status when not explicit.
     if provider == "facturapi" and "connected" not in out and "status" in out:
         out["connected"] = out.get("status") == "connected"
@@ -258,6 +287,9 @@ def _connection_sb_to_mongo(row: Dict[str, Any]) -> Dict[str, Any]:
     meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
     if meta.get("last_error") is not None:
         out["last_error"] = meta.get("last_error")
+    for mk, mv in meta.items():
+        if mk != "last_error" and mk not in out and _meta_safe_key(mk):
+            out[mk] = mc.from_json(mv)
     # Restore provider-specific id aliases expected by existing callers.
     provider = row.get("provider")
     puid = row.get("provider_user_id")
@@ -280,22 +312,30 @@ def _apply_projection(doc: Dict[str, Any], projection: Optional[Dict[str, int]])
     return {k: doc.get(k) for k in include if k in doc or k in projection}
 
 
+
 # ── Connections ───────────────────────────────────────────────────────
-async def _sb_get_connection(provider: str, workspace_id: str) -> Optional[Dict[str, Any]]:
+_UNREAD = object()  # sentinel: Supabase could not be read (error / not configured)
+
+
+async def _sb_get_connection_row(params: Dict[str, str]) -> Any:
+    """Row dict, None (no row) or _UNREAD (request failed)."""
     resp = await _sb_request(
         "GET",
         "/rest/v1/provider_connections",
-        params={
-            "workspace_id": f"eq.{workspace_id}",
-            "provider": f"eq.{provider}",
-            "select": "*",
-            "limit": "1",
-        },
+        params={**params, "select": "*", "limit": "1"},
     )
     if resp is None or resp.status_code != 200:
-        return None
+        return _UNREAD
     rows = resp.json() or []
     return rows[0] if rows else None
+
+
+async def _sb_get_connection(provider: str, workspace_id: str) -> Optional[Dict[str, Any]]:
+    row = await _sb_get_connection_row({
+        "workspace_id": f"eq.{workspace_id}",
+        "provider": f"eq.{provider}",
+    })
+    return None if row is _UNREAD else row
 
 
 async def _sb_upsert_connection(payload: Dict[str, Any]) -> bool:
@@ -317,9 +357,10 @@ async def _sb_upsert_connection(payload: Dict[str, Any]) -> bool:
     return True
 
 
-async def _sb_patch_connection(provider: str, workspace_id: str, patch: Dict[str, Any]) -> bool:
+async def _sb_patch_connection_rows(provider: str, workspace_id: str, patch: Dict[str, Any]) -> Optional[int]:
+    """Rows patched, or None on failure."""
     if not patch:
-        return True
+        return 0
     resp = await _sb_request(
         "PATCH",
         "/rest/v1/provider_connections",
@@ -327,18 +368,28 @@ async def _sb_patch_connection(provider: str, workspace_id: str, patch: Dict[str
         params={
             "workspace_id": f"eq.{workspace_id}",
             "provider": f"eq.{provider}",
+            "select": "workspace_id",
         },
-        prefer="return=minimal",
+        prefer="return=representation",
     )
     if resp is None:
-        return False
+        return None
     if resp.status_code >= 400:
         logger.warning(
             "provider_secrets_store patch connection %s: %s",
             resp.status_code, (resp.text or "")[:200],
         )
-        return False
-    return True
+        return None
+    try:
+        body = resp.json()
+    except Exception:  # noqa: BLE001
+        body = None
+    # Older callers/mocks answer 204 with no body — count that as one row.
+    return len(body) if isinstance(body, list) else 1
+
+
+async def _sb_patch_connection(provider: str, workspace_id: str, patch: Dict[str, Any]) -> bool:
+    return (await _sb_patch_connection_rows(provider, workspace_id, patch)) is not None
 
 
 async def _sb_delete_connection(provider: str, workspace_id: str) -> bool:
@@ -363,18 +414,27 @@ async def get_connection(
     mongo_col,
     projection: Optional[Dict[str, int]] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Read one integration doc. Primary store first; Mongo fallback when
-    secrets primary is supabase."""
+    """Read one integration doc from the primary store.
+
+    Supabase primary: Mongo is consulted only while it is kept as a mirror
+    (``QUANTRO_MONGO_MIRROR``); with the mirror off a Supabase read failure
+    raises instead of looking like "not connected"."""
     if provider not in VALID_PROVIDERS:
         raise ValueError(f"unknown provider: {provider}")
 
     if is_secrets_supabase_primary():
-        row = await _sb_get_connection(provider, workspace_id)
-        if row:
+        row = await _sb_get_connection_row({
+            "workspace_id": f"eq.{workspace_id}",
+            "provider": f"eq.{provider}",
+        })
+        if row is not _UNREAD and row:
             return _apply_projection(_connection_sb_to_mongo(row), projection)
-        # Fallback to Mongo (pre-backfill / dual-write lag).
-        doc = await mongo_col.find_one({"workspace_id": workspace_id}, projection)
-        return doc
+        if _mongo_fallback_ok(mongo_col):
+            # Mirror kept: tolerate pre-backfill rows / a Supabase blip.
+            return await mongo_col.find_one({"workspace_id": workspace_id}, projection)
+        if row is _UNREAD:
+            raise SupabaseStoreError("provider_connections read failed", table="provider_connections")
+        return None
 
     doc = await mongo_col.find_one({"workspace_id": workspace_id}, projection)
     return doc
@@ -403,7 +463,9 @@ async def upsert_connection(
 
     if is_secrets_dual_write_enabled():
         payload = _connection_mongo_to_sb(provider, workspace_id, set_fields)
-        await _sb_upsert_connection(payload)
+        ok = await _sb_upsert_connection(payload)
+        if not ok and is_secrets_supabase_primary():
+            raise SupabaseStoreError("provider_connections upsert failed", table="provider_connections")
 
 
 async def patch_connection(
@@ -428,15 +490,25 @@ async def patch_connection(
         # Don't send identity keys on patch — filter is workspace+provider.
         patch.pop("workspace_id", None)
         patch.pop("provider", None)
-        ok = await _sb_patch_connection(provider, workspace_id, patch)
-        # If no row yet (patch hit 0 rows / table empty), try upsert so
-        # dual-write still lands after a Mongo-only historical connect.
-        if not ok:
-            full = dict(fields)
-            full["workspace_id"] = workspace_id
-            await _sb_upsert_connection(
-                _connection_mongo_to_sb(provider, workspace_id, full)
-            )
+        n = await _sb_patch_connection_rows(provider, workspace_id, patch)
+        if n is None:
+            if is_secrets_supabase_primary():
+                raise SupabaseStoreError("provider_connections patch failed", table="provider_connections")
+            return
+        if n == 0 and is_secrets_mongo_write_enabled():
+            # The connection only exists in Mongo (connected before the
+            # dual-write, never backfilled). Copy the WHOLE Mongo doc —
+            # never a bare patch, which would create a token-less row that
+            # later reads as "not connected".
+            try:
+                full = await mongo_col.find_one({"workspace_id": workspace_id})
+            except Exception:  # noqa: BLE001
+                full = None
+            if full:
+                merged = {k: v for k, v in dict(full).items() if k != "_id"}
+                merged.update(fields)
+                merged["workspace_id"] = workspace_id
+                await _sb_upsert_connection(_connection_mongo_to_sb(provider, workspace_id, merged))
 
 
 async def delete_connection(
@@ -452,7 +524,9 @@ async def delete_connection(
         await mongo_col.delete_one({"workspace_id": workspace_id})
 
     if is_secrets_dual_write_enabled():
-        await _sb_delete_connection(provider, workspace_id)
+        ok = await _sb_delete_connection(provider, workspace_id)
+        if not ok and is_secrets_supabase_primary():
+            raise SupabaseStoreError("provider_connections delete failed", table="provider_connections")
 
 
 async def list_autosync_workspace_ids(
@@ -470,14 +544,16 @@ async def list_autosync_workspace_ids(
             "/rest/v1/provider_connections",
             params={
                 "provider": f"eq.{provider}",
-                "auto_sync_paused": "eq.false",
+                "auto_sync_paused": "not.is.true",
                 "select": "workspace_id",
             },
         )
         if resp is not None and resp.status_code == 200:
             rows = resp.json() or []
             return [r["workspace_id"] for r in rows if r.get("workspace_id")]
-        # fall through to Mongo
+        if not _mongo_fallback_ok(mongo_col):
+            raise SupabaseStoreError("provider_connections autosync list failed", table="provider_connections")
+        # fall through to Mongo (mirror kept)
 
     out: List[str] = []
     cursor = mongo_col.find(
@@ -495,20 +571,11 @@ async def list_autosync_workspace_ids(
 async def _sb_get_connection_by_connection_id(
     provider: str, connection_id: str,
 ) -> Optional[Dict[str, Any]]:
-    resp = await _sb_request(
-        "GET",
-        "/rest/v1/provider_connections",
-        params={
-            "provider": f"eq.{provider}",
-            "connection_id": f"eq.{connection_id}",
-            "select": "*",
-            "limit": "1",
-        },
-    )
-    if resp is None or resp.status_code != 200:
-        return None
-    rows = resp.json() or []
-    return rows[0] if rows else None
+    row = await _sb_get_connection_row({
+        "provider": f"eq.{provider}",
+        "connection_id": f"eq.{connection_id}",
+    })
+    return None if row is _UNREAD else row
 
 
 async def get_connection_by_connection_id(
@@ -523,11 +590,17 @@ async def get_connection_by_connection_id(
         raise ValueError(f"unknown provider: {provider}")
 
     if is_secrets_supabase_primary():
-        row = await _sb_get_connection_by_connection_id(provider, connection_id)
-        if row:
+        row = await _sb_get_connection_row({
+            "provider": f"eq.{provider}",
+            "connection_id": f"eq.{connection_id}",
+        })
+        if row is not _UNREAD and row:
             return _apply_projection(_connection_sb_to_mongo(row), projection)
-        doc = await mongo_col.find_one({"connection_id": connection_id}, projection)
-        return doc
+        if _mongo_fallback_ok(mongo_col):
+            return await mongo_col.find_one({"connection_id": connection_id}, projection)
+        if row is _UNREAD:
+            raise SupabaseStoreError("provider_connections read failed", table="provider_connections")
+        return None
 
     doc = await mongo_col.find_one({"connection_id": connection_id}, projection)
     return doc
@@ -596,11 +669,16 @@ async def put_oauth_state(
             json=payload,
             prefer="return=minimal",
         )
-        if resp is not None and resp.status_code >= 400:
-            logger.warning(
-                "provider_secrets_store put_oauth_state %s: %s",
-                resp.status_code, (resp.text or "")[:200],
-            )
+        if resp is None or resp.status_code >= 400:
+            if resp is not None:
+                logger.warning(
+                    "provider_secrets_store put_oauth_state %s: %s",
+                    resp.status_code, (resp.text or "")[:200],
+                )
+            if is_secrets_supabase_primary() and not MONGO_MIRROR:
+                # Without a Mongo twin the callback would fail with
+                # invalid_state — fail now, where the user can retry.
+                raise SupabaseStoreError("oauth_states insert failed", table="oauth_states")
 
 
 async def consume_oauth_state(
@@ -612,7 +690,8 @@ async def consume_oauth_state(
     """Atomically read+delete state. Tries primary then the other store.
 
     Short-lived rows: we dual-write on put, so consume checks both to
-    tolerate partial writes / primary flip mid-flow.
+    tolerate partial writes / primary flip mid-flow. With Supabase primary
+    and the mirror off, Mongo is not consulted at all.
     """
     if provider not in OAUTH_PROVIDERS:
         raise ValueError(f"unknown oauth provider: {provider}")
@@ -621,7 +700,8 @@ async def consume_oauth_state(
         return await mongo_col.find_one_and_delete({"state": state})
 
     async def _from_sb() -> Optional[Dict[str, Any]]:
-        # SELECT then DELETE (PostgREST has no find_one_and_delete).
+        # PostgREST has no find_one_and_delete: SELECT, then DELETE … RETURNING.
+        # If the DELETE returns no row another callback consumed it first.
         resp = await _sb_request(
             "GET",
             "/rest/v1/oauth_states",
@@ -637,13 +717,20 @@ async def consume_oauth_state(
         rows = resp.json() or []
         if not rows:
             return None
-        row = rows[0]
-        await _sb_request(
+        deleted = await _sb_request(
             "DELETE",
             "/rest/v1/oauth_states",
-            params={"state": f"eq.{state}"},
-            prefer="return=minimal",
+            params={"state": f"eq.{state}", "select": "state"},
+            prefer="return=representation",
         )
+        if deleted is not None and deleted.status_code < 400:
+            try:
+                body = deleted.json()
+            except Exception:  # noqa: BLE001
+                body = None
+            if isinstance(body, list) and not body:
+                return None  # lost the race — already consumed
+        row = rows[0]
         return {
             "state": row.get("state"),
             "user_id": row.get("user_id"),
@@ -651,6 +738,9 @@ async def consume_oauth_state(
             "return_to": row.get("return_to"),
             "redirect_uri": row.get("redirect_uri"),
             "code_verifier": row.get("code_verifier"),
+            # Microsoft incremental consent needs the exact scope list the
+            # authorization request used (server.py microsoft callback).
+            "requested_scopes": row.get("requested_scopes"),
             "created_at": _parse_dt(row.get("created_at")),
             "expires_at": _parse_dt(row.get("expires_at")),
             "provider": row.get("provider"),
@@ -659,13 +749,16 @@ async def consume_oauth_state(
     if is_secrets_supabase_primary():
         doc = await _from_sb()
         if doc:
-            # Best-effort cleanup of Mongo twin.
-            try:
-                await mongo_col.find_one_and_delete({"state": state})
-            except Exception:  # noqa: BLE001
-                pass
+            if MONGO_MIRROR:
+                # Best-effort cleanup of the Mongo twin.
+                try:
+                    await mongo_col.find_one_and_delete({"state": state})
+                except Exception:  # noqa: BLE001
+                    pass
             return doc
-        return await _from_mongo()
+        if MONGO_MIRROR:
+            return await _from_mongo()
+        return None
 
     doc = await _from_mongo()
     if doc:

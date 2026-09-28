@@ -1,28 +1,27 @@
 # Mongo inventory (remaining dependencies)
 
-Classification of Mongo / Motor usage after the Supabase dual-write migration.
-**Do not delete Mongo** while any production path still uses Motor.
+> **Superseded by the Mongo exit — see [mongo-exit-runbook.md](mongo-exit-runbook.md).**
+> Since `feat/flow-off-mongo` every domain below has a Supabase home and an
+> unset storage flag means Supabase / no mirror (`backend/storage_flags.py`).
+> Mongo is only reachable through `backend/mongo_legacy.py` (lazy; never
+> connects while every flag says Supabase). `GET /api/ready → checks.storage`
+> shows the live routing.
 
-| Area | Collection(s) / path | Class | Notes |
-|------|----------------------|-------|-------|
-| Identity / workspaces | `users`, `workspaces`, `workspace_members` | DUAL_WRITE / transitional | Phase 1 SoT moves to Supabase org_*; Mongo still used for membership APIs |
-| Provider OAuth secrets | `google_integrations`, `microsoft_integrations` | MIGRATED_PRIMARY_SUPABASE | `QUANTRO_SECRETS_PRIMARY=supabase`, mirror ON |
-| OAuth CSRF state | `google_oauth_state`, `microsoft_oauth_state` | MIGRATED_PRIMARY_SUPABASE | via `provider_secrets_store` |
-| Facturapi Connect | `facturapi_connections`, webhook events | MIGRATED_PRIMARY_SUPABASE | Phase 4 connect_store |
-| Actions | actions / executions / policies | DUAL_WRITE | `QUANTRO_ACTIONS_PRIMARY` (verify Fly) |
-| Inbox | `inbox_items` | MIGRATED_PRIMARY_SUPABASE | Phase 6.1 |
-| Activity | `activity_events` | MIGRATED_PRIMARY_SUPABASE | Phase 6.2 |
-| Content | `content_items`, `content_templates` | MIGRATED_PRIMARY_SUPABASE | Phase 6.2 |
-| Contacts | `contacts` | MIGRATED_PRIMARY_SUPABASE | Phase 6.3 |
-| Calendar | `calendar_events` | MONGO_PRIMARY | **Must stay mongo** until canonical external_* tests green (`QUANTRO_CALENDAR_PRIMARY=mongo`) |
-| Business profile / simulation | `business_profile` | MONGO_PRIMARY | Not yet migrated |
-| Integrations catalog | `integrations_config` | DUAL_WRITE | Phase 4 |
-| System health / audit | `system_health`, audit logs | MONGO_PRIMARY | Operational |
-| Sync locks | `sync_locks` | MONGO_PRIMARY | Multi-instance autosync idempotency |
-| Agents / other product | `agents`, misc | MONGO_PRIMARY / LEGACY_UNUSED | Inventory per feature before flip |
-
-Legend:
-- **MIGRATED_PRIMARY_SUPABASE** — reads prefer Supabase; Mongo mirror optional
-- **DUAL_WRITE** — writing both; primary flag may still be mongo or supabase
-- **MONGO_PRIMARY** — production primary is still Mongo
-- **LEGACY_UNUSED** — code paths unused in prod; keep until confirmed dead
+| Area | Mongo collection(s) | Supabase home | Flag (domain) |
+|------|---------------------|---------------|---------------|
+| Identity / workspaces | `users`, `workspaces`, `workspace_members`, `workspace_invites`, `audit_log`, `people_onboarding_steps` | `flow_documents` (+ `org_members` / `invitations` / `org_audit_logs` / `people_onboarding_steps` for mapped orgs) | `QUANTRO_DOCS_PRIMARY` |
+| Business profile / simulation | `business_profile` | `flow_documents` | docs |
+| Agents / onboarding / escalation | `agents`, `onboarding_tasks`, `escalation_rules` | `flow_documents` | docs |
+| System health | `system_health_events` | `flow_documents` | docs |
+| Sync locks | `sync_locks` | `flow_sync_locks` | docs |
+| Provider OAuth secrets | `google_integrations`, `microsoft_integrations` | `provider_connections` | `QUANTRO_SECRETS_PRIMARY` |
+| OAuth CSRF state | `google_oauth_state`, `microsoft_oauth_state` | `oauth_states` | secrets |
+| Facturapi Connect | `facturapi_connections`, `facturapi_webhook_events` | `provider_connections`, `webhook_events` | secrets |
+| Integrations catalog | `integrations_config` | `integrations_config` (+ `secrets_enc` ciphertext) | `QUANTRO_INTEGRATIONS_CONFIG_PRIMARY` |
+| Actions | `action_executions`, `automation_policies`, `action_policies` | same names | `QUANTRO_ACTIONS_PRIMARY` |
+| Inbox | `inbox_items` | `inbox_items` | `QUANTRO_INBOX_PRIMARY` |
+| Activity | `activity_events` | `activity_events` | `QUANTRO_ACTIVITY_PRIMARY` |
+| Content | `content_items`, `content_templates` | same names | `QUANTRO_CONTENT_PRIMARY` |
+| Contacts | `contacts` | `contacts` | `QUANTRO_CONTACTS_PRIMARY` |
+| Calendar | `calendar_events` | `calendar_events` | `QUANTRO_CALENDAR_PRIMARY` |
+| Unused | `user_sessions` | — (frozen since Phase 1) | — |

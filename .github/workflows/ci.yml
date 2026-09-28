@@ -63,7 +63,7 @@ jobs:
           MONGO_URL: mongodb://localhost:27017
           DB_NAME: quantro_test
         run: |
-          PYTHONPATH=. python -c "import google_oauth; import microsoft_oauth; import provider_secrets_store; import product_domain_store; import actions.store"
+          PYTHONPATH=. python -c "import google_oauth; import microsoft_oauth; import provider_secrets_store; import product_domain_store; import actions.store; import doc_store; import mongo_legacy; import storage_flags; import scripts.mongo_to_supabase"
 
   frontend:
     name: Frontend

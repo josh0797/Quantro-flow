@@ -8,6 +8,7 @@ the scope is missing, matching the task spec's error model exactly.
 """
 from __future__ import annotations
 
+import provider_secrets_store
 from errors import QuantroError
 from ..base import ActionContext, ActionResult
 
@@ -15,7 +16,11 @@ from ..base import ActionContext, ActionResult
 async def _load_creds_or_raise(ctx: ActionContext, action_id: str):
     goog = ctx.dep("goog_module")
     col = ctx.dep("google_integrations_col")
-    doc = await col.find_one({"workspace_id": ctx.workspace_id})
+    # Through provider_secrets_store (Supabase primary) — never a raw
+    # Mongo read, which returned stale/missing docs once secrets moved.
+    doc = await provider_secrets_store.get_connection(
+        provider="google", workspace_id=ctx.workspace_id, mongo_col=col,
+    )
     if not doc:
         raise QuantroError("provider_not_connected", "Google is not connected for this workspace")
 

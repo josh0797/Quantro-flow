@@ -72,7 +72,7 @@ def test_default_primary_is_mongo():
     assert store.ACTIONS_PRIMARY == "mongo"
     assert store.is_actions_dual_write_enabled() is True
     assert store.is_actions_mongo_write_enabled() is True
-    assert store.actions_health()["escalation_rules"] == "deferred_mongo"
+    assert store.actions_health()["escalation_rules"] == "flow_documents"
 
 
 def test_flip_primary_supabase():

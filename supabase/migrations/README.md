@@ -1,5 +1,14 @@
 # Supabase — Database migrations
 
+> **Mongo exit:** every table Flow needs to run without MongoDB — including
+> the ones below that were applied out of band — is (re)stated idempotently
+> in Quantro OS `supabase/migrations/20261026090500_flow_off_mongo.sql`
+> (plus `flow_documents` / `flow_sync_locks`). The full unique indexes for
+> the sync upserts are a separate migration,
+> `20261026090600_flow_sync_unique_indexes.sql`, applied only after this
+> repo's `feat/flow-off-mongo` release is deployed. See
+> `docs/mongo-exit-runbook.md`.
+
 > ⚠️ **Historical. Do not re-run anything in this directory.** Quantro Flow
 > shares one Supabase project (`ukootpnechabpmwsmxsi`) with Quantro OS, and
 > schema changes to that database now ship from the **Quantro OS** repo
