@@ -1,6 +1,9 @@
 # Quantro-flow API — https://fly.io
 app = "quantro-flow-api"
-primary_region = "iad"
+# The only machine lives in ord. Fly applies min_machines_running to the
+# primary region only, so with "iad" here the machine auto-stopped when idle
+# and the in-process autosync loop stopped with it.
+primary_region = "ord"
 
 [build]
   dockerfile = "backend/Dockerfile"
