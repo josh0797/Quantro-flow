@@ -22,7 +22,11 @@ Guarantees
   Rows that exist only in Supabase are REPORTED (``supabase_only``) for the
   access-granting datasets (workspace members / invites, provider
   connections); while those collections are still Mongo-primary such a row
-  is a stale shadow and ``--verify`` fails until it is reviewed.
+  is a stale shadow and ``--verify`` fails until it is reviewed. Likewise
+  every calendar row no sync could keep once the mirrors are off (the
+  Supabase copy of an older Mongo duplicate, a provider's event id under
+  provider ``internal``, a synced row without an external id) is a
+  ``REVIEW`` line that fails ``--verify``.
 * **Prints counts and ids only** — never document bodies, emails, tokens or
   secrets. Ids are Mongo ``_id`` hex / app ids (inbox_id, event_id, …).
 * **Schema preflight.** Every target table/column is checked first; ``--apply``
@@ -281,6 +285,8 @@ class Stats:
     error_ids: List[str] = field(default_factory=list)
     insert_ids: List[str] = field(default_factory=list)
     supabase_only_ids: List[str] = field(default_factory=list)
+    alt_key_ids: List[str] = field(default_factory=list)
+    review_ids: List[str] = field(default_factory=list)
 
     def bump(self, note: str, n: int = 1) -> None:
         self.notes[note] = self.notes.get(note, 0) + n
@@ -302,6 +308,18 @@ class Stats:
         if len(self.insert_ids) < MAX_IDS_PRINTED:
             self.insert_ids.append(ident)
 
+    def matched_by_alt_key(self, ident: str) -> None:
+        """Supabase holds the row under the alt key only (natural key differs)."""
+        self.bump("matched_by_alt_key")
+        if len(self.alt_key_ids) < MAX_IDS_PRINTED:
+            self.alt_key_ids.append(ident)
+
+    def needs_review(self, reason: str, ident: str, detail: str = "") -> None:
+        """A Supabase row the backfill cannot decide (a ``REVIEW_NOTES`` reason; fails --verify)."""
+        self.bump(reason)
+        if len(self.review_ids) < MAX_IDS_PRINTED:
+            self.review_ids.append(f"{ident} ({reason}{' ' + detail if detail else ''})")
+
     def only_in_supabase(self, idents: Iterable[str]) -> None:
         for ident in sorted(idents):
             self.supabase_only += 1
@@ -316,6 +334,7 @@ class Stats:
             "supabase_only": self.supabase_only,
             "notes": self.notes, "skipped_ids": self.skipped_ids, "error_ids": self.error_ids,
             "insert_ids": self.insert_ids, "supabase_only_ids": self.supabase_only_ids,
+            "alt_key_ids": self.alt_key_ids, "review_ids": self.review_ids,
         }
 
 
@@ -527,11 +546,15 @@ class TypedSpec:
     domain: str
     to_row: Callable[[Dict[str, Any]], Dict[str, Any]]
     key: Callable[[Dict[str, Any]], Optional[Tuple]]           # natural key of a row
-    key_cols: Tuple[str, ...]                                  # every column key/alt_keys read
+    key_cols: Tuple[str, ...]                                  # every column key/alt_keys/sb_review read
     alt_keys: Tuple[Callable[[Dict[str, Any]], Optional[Tuple]], ...] = ()
-    # Columns added by 20261026090500 → their column DEFAULT. Under ``fill``
-    # such a column is taken from Mongo only while Supabase still holds the
-    # default (i.e. the app has not written it yet).
+    # Supabase-side variant of ``alt_keys[i]`` when the two sides are read
+    # differently (None or missing = the same function).
+    sb_alt_keys: Tuple[Optional[Callable[[Dict[str, Any]], Optional[Tuple]]], ...] = ()
+    # Columns added by 20261026090500 → their column DEFAULT (or a value a
+    # schema migration inferred, see calendar ``external_provider``). Under
+    # ``fill`` such a column is taken from Mongo only while Supabase still
+    # holds that value (i.e. the app has not written it yet).
     new_cols: Dict[str, Any] = field(default_factory=dict)
     ident: Callable[[Dict[str, Any]], str] = lambda row: "?"  # printable id
     prepare: Optional[Callable[[Dict[str, Any], Optional[Stats]], Optional[Dict[str, Any]]]] = None
@@ -541,6 +564,25 @@ class TypedSpec:
     # Awaited once per run: returns raw Mongo doc → workspace that overrides
     # the doc's own (None = keep it), applied BEFORE the legacy defaults.
     workspace_of: Optional[Callable[["Supabase", Any], Awaitable[Callable[[Dict[str, Any]], Optional[str]]]]] = None
+    # Mongo row → True when an alt-key match that the policy leaves ``same``
+    # is still a problem (note ``alt_key_unresolved``, fails --verify).
+    alt_same_is_unresolved: Optional[Callable[[Dict[str, Any]], bool]] = None
+    # A Supabase row reachable through an alt key of a Mongo row, or of that
+    # row's OLDER Mongo duplicates (same natural key), is a copy of the same
+    # record. With this set, a winner without a row of its own takes such a
+    # row instead of inserting a second one, and any other such row that no
+    # Mongo row resolves to is a ``duplicate_shadow`` (fails --verify).
+    review_shadows: bool = False
+    # Supabase row (index columns, or the row as the policy leaves it) →
+    # a ``REVIEW_NOTES`` reason when it needs a human, else None. Checked on
+    # every Supabase row after this run's writes, and on inserted rows.
+    sb_review: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None
+
+
+def _sb_alt_key(spec: TypedSpec, i: int) -> Callable[[Dict[str, Any]], Optional[Tuple]]:
+    if i < len(spec.sb_alt_keys) and spec.sb_alt_keys[i] is not None:
+        return spec.sb_alt_keys[i]  # type: ignore[return-value]
+    return spec.alt_keys[i]
 
 
 def _k(*cols: str) -> Callable[[Dict[str, Any]], Optional[Tuple]]:
@@ -611,22 +653,37 @@ def _map(spec: TypedSpec, raw: Dict[str, Any], st: Optional[Stats],
 async def backfill_typed(sb: Supabase, source: Any, spec: TypedSpec, policy: str) -> Stats:
     st = Stats(spec.dataset, spec.table, policy)
     workspace_of = await spec.workspace_of(sb, source) if spec.workspace_of else None
+    reviewing = spec.review_shadows or spec.sb_review is not None
 
-    # Supabase side: key columns of every row (id + natural/alt keys only).
+    # Supabase side: key columns of every row (id + key_cols only).
     by_key: Dict[Tuple, Any] = {}
     by_alt: List[Dict[Tuple, Any]] = [dict() for _ in spec.alt_keys]
+    sb_ident: Dict[Any, str] = {}          # pk → printable id (reviewing specs)
+    to_review: Dict[Any, str] = {}         # pk → reason, unless a Mongo row resolves the row
     for r in await sb.index(spec.table, ("id",) + spec.key_cols):
         k = spec.key(r)
         if k:
             by_key[k] = r["id"]
-        for i, ak in enumerate(spec.alt_keys):
-            a = ak(r)
+        for i in range(len(spec.alt_keys)):
+            a = _sb_alt_key(spec, i)(r)
             if a:
                 by_alt[i][a] = r["id"]
+        if reviewing:
+            sb_ident[r["id"]] = spec.ident(r)
+            reason = spec.sb_review(r) if spec.sb_review else None
+            if reason:
+                to_review[r["id"]] = reason
+
+    def alt_values(row: Dict[str, Any]) -> Tuple:
+        return tuple(ak(row) for ak in spec.alt_keys)
 
     # Pass 1 — decide the winner (_id) of every natural key; nothing kept but
-    # (key → time, _id). Mongo duplicates of one key: the latest wins.
+    # (key → time, _id) — plus, for ``review_shadows``, each doc's printable
+    # id and alt-key values, so pass 2 can find the Supabase rows of the
+    # LOSING duplicates. Mongo duplicates of one key: the latest wins.
     winners: Dict[Tuple, Tuple[float, str]] = {}
+    alts_of: Dict[str, Tuple[str, Tuple]] = {}              # _id → (ident, alt values)
+    losers: Dict[Tuple, List[Tuple[float, str]]] = {}       # key → [(time, _id)] of older duplicates
     async for batch in _batches(source, spec.mongo):
         for raw in batch:
             st.mongo += 1
@@ -644,49 +701,84 @@ async def backfill_typed(sb: Supabase, source: Any, spec: TypedSpec, policy: str
             if key is None:
                 st.skipped(_mongo_id(raw), "missing_key")
                 continue
-            t = _doc_time(raw)
+            t, mid = _doc_time(raw), _mongo_id(raw)
+            if spec.review_shadows:
+                alts_of[mid] = (spec.ident(row), alt_values(row))
             prev = winners.get(key)
             if prev is not None:
                 st.bump("mongo_duplicates")
-                loser = _mongo_id(raw) if t < prev[0] else prev[1]
+                loser = (t, mid) if t < prev[0] else prev
                 if len(st.skipped_ids) < MAX_IDS_PRINTED:
-                    st.skipped_ids.append(f"{loser} (older_duplicate_of_key)")
+                    st.skipped_ids.append(f"{loser[1]} (older_duplicate_of_key)")
+                if spec.review_shadows:
+                    losers.setdefault(key, []).append(loser)
                 if t < prev[0]:
                     continue
-            winners[key] = (t, _mongo_id(raw))
+            winners[key] = (t, mid)
     winner_ids = {mid for _t, mid in winners.values()}
-    del winners
+    # winner _id → (ident, alt values) of its older duplicates, newest first.
+    older_of: Dict[str, List[Tuple[str, Tuple]]] = {
+        winners[key][1]: [alts_of[m] for _t, m in sorted(found, reverse=True)] for key, found in losers.items()
+    }
+    del winners, alts_of, losers
+
+    resolved: Set[Any] = set()              # Supabase rows a Mongo winner resolved to
+    shadows: Dict[Any, str] = {}            # pk → printable id of the row it duplicates (the one kept)
 
     # Pass 2 — stream again, write the winners batch by batch.
     async for batch in _batches(source, spec.mongo):
-        items: List[Tuple[Dict[str, Any], Optional[Any]]] = []   # (row, existing pk)
+        items: List[Tuple[Dict[str, Any], Optional[Any], bool]] = []   # (row, existing pk, via alt key)
         for raw in batch:
-            if _mongo_id(raw) not in winner_ids:
+            mid = _mongo_id(raw)
+            if mid not in winner_ids:
                 continue
             row, _problem = _map(spec, raw, None, workspace_of)
             key = spec.key(row) if row is not None else None
             if row is None or key is None:
                 st.bump("changed_during_run")   # re-run picks it up
                 continue
+            ident = spec.ident(row)
+            copies = [(ident, alt_values(row))] + older_of.get(mid, [])
             pk = by_key.get(key)
+            via_alt = False
             if pk is None:
-                for i, ak in enumerate(spec.alt_keys):
-                    a = ak(row)
-                    if a and a in by_alt[i]:
-                        pk = by_alt[i][a]
-                        st.bump("matched_by_alt_key")
+                # Its own alt keys first; then (review_shadows) the Supabase
+                # row of an older Mongo duplicate — the same event, so it is
+                # this row's copy, not a reason for a second one. Such a row
+                # may carry another event_id: fill keeps it (the id lists
+                # have returned since Supabase became primary); mongo_wins
+                # takes Mongo's (the id clients hold while Mongo is primary).
+                for n, (_ident, alts) in enumerate(copies):
+                    pk = next((by_alt[i][a] for i, a in enumerate(alts) if a and a in by_alt[i]), None)
+                    if pk is not None:
+                        via_alt = True
+                        st.matched_by_alt_key(ident)
+                        if n:
+                            st.bump("matched_by_older_duplicate")
                         break
-            items.append((row, pk))
-        existing_rows = {r["id"]: r for r in await sb.rows_in(spec.table, "id", [pk for _, pk in items if pk is not None])}
-        for row, pk in items:
+            if spec.review_shadows:
+                kept = sb_ident.get(pk, ident) if pk is not None else ident   # an insert keeps Mongo's id
+                for _ident, alts in copies:
+                    for i, a in enumerate(alts):
+                        other = by_alt[i].get(a) if a else None
+                        if other is not None and other != pk:
+                            shadows.setdefault(other, kept)
+            if pk is not None and reviewing:
+                resolved.add(pk)
+            items.append((row, pk, via_alt))
+        existing_rows = {r["id"]: r for r in await sb.rows_in(spec.table, "id", [pk for _, pk, _a in items if pk is not None])}
+        for row, pk, via_alt in items:
             ident = spec.ident(row)
             existing = existing_rows.get(pk) if pk is not None else None
             if existing is None:
                 err = await sb.insert(spec.table, row)
                 if err:
                     st.failed(ident, err)
-                else:
-                    st.inserted(ident)
+                    continue
+                st.inserted(ident)
+                reason = spec.sb_review(row) if spec.sb_review else None
+                if reason:
+                    st.needs_review(reason, ident)
                 continue
             if spec.reconcile:
                 row = spec.reconcile(row, existing)
@@ -696,14 +788,26 @@ async def backfill_typed(sb: Supabase, source: Any, spec: TypedSpec, policy: str
             # a different workspace on purpose — see activity_events).
             diff.pop("id", None)
             diff.pop("workspace_id", None)
-            if not diff:
-                st.same += 1
-                continue
-            err = await sb.patch(spec.table, existing["id"], diff)
+            err = await sb.patch(spec.table, existing["id"], diff) if diff else None
             if err:
                 st.failed(ident, err)
-            else:
+                continue
+            # The row as this run leaves it.
+            reason = spec.sb_review({**existing, **diff}) if spec.sb_review else None
+            if reason:
+                st.needs_review(reason, spec.ident(existing))
+            if diff:
                 st.update += 1
+                continue
+            if via_alt and spec.alt_same_is_unresolved and spec.alt_same_is_unresolved(row):
+                st.bump("alt_key_unresolved")
+            st.same += 1
+
+    # Supabase rows no Mongo row resolved to: nothing above wrote them.
+    for pk in sorted(set(shadows) - resolved, key=str):
+        st.needs_review("duplicate_shadow", sb_ident.get(pk, str(pk)), f"of {shadows[pk]}")
+    for pk in sorted(set(to_review) - resolved - set(shadows), key=str):
+        st.needs_review(to_review[pk], sb_ident.get(pk, str(pk)))
     return st
 
 
@@ -716,6 +820,40 @@ def _calendar_prepare(doc: Dict[str, Any], st: Optional[Stats]) -> Optional[Dict
         if st is not None:
             st.bump("event_id_from_mongo_id")
     return d
+
+
+# Sources only the Google / Outlook syncs write (server.py); a live row of
+# theirs is reachable only through its external id.
+CALENDAR_SYNCED_SOURCES = frozenset({"google_calendar", "outlook_calendar"})
+
+
+def _calendar_legacy_external_key(row: Dict[str, Any]) -> Optional[Tuple]:
+    """Supabase side of the (ws, external id) alt key: only a legacy-provider
+    row (``internal``/NULL next to a provider's id, bug 13) — the row the
+    sync repairs in place, and the backfill must fill instead of inserting
+    a second row beside it."""
+    if not pds._is_legacy_provider(row.get("external_provider")):
+        return None
+    return _k("workspace_id", "external_event_id")(row)
+
+
+def _calendar_review(row: Dict[str, Any]) -> Optional[str]:
+    """Why no sync can keep this Supabase calendar row right after 6b, or None.
+
+    * ``legacy_provider`` — a provider's event id under provider
+      ``internal``/NULL: next to a row holding the real identity, the sync
+      updates that one and this copy stays listed, frozen; alone, it is
+      repaired only if the event is still in the sync window.
+    * ``no_external_id`` — a live row of a synced source without an external
+      id: no sync can ever find it (it keeps its old title/time next to the
+      synced copy), and a disconnect deletes by ``is_real``, which such rows
+      often lack.
+    """
+    if row.get("external_event_id"):
+        return "legacy_provider" if pds._is_legacy_provider(row.get("external_provider")) else None
+    if row.get("source") in CALENDAR_SYNCED_SOURCES and not row.get("is_simulation"):
+        return "no_external_id"
+    return None
 
 
 def _inbox_prepare(doc: Dict[str, Any], st: Optional[Stats]) -> Optional[Dict[str, Any]]:
@@ -804,11 +942,32 @@ def typed_specs() -> List[TypedSpec]:
             _product_row(pds.CALENDAR_CFG),
             key=lambda r: (_k("workspace_id", "external_provider", "external_event_id")(r)
                            if r.get("external_event_id") else _k("workspace_id", "event_id")(r)),
-            key_cols=("workspace_id", "external_provider", "external_event_id", "event_id"),
-            alt_keys=(_k("workspace_id", "event_id"),),
-            new_cols={"is_real": None, "extra": {}},
+            key_cols=("workspace_id", "external_provider", "external_event_id", "event_id",
+                      "source", "is_simulation"),
+            # (ws, event_id); then (ws, external id) against a legacy-provider
+            # row only — without it a Mongo row whose event_id differs from
+            # that row's was inserted beside it (two rows, one never synced).
+            alt_keys=(_k("workspace_id", "event_id"), _k("workspace_id", "external_event_id")),
+            sb_alt_keys=(None, _calendar_legacy_external_key),
+            # external_provider: konta 20260919010000 inferred 'internal' for
+            # every row without one, including the shadows of synced events
+            # (their provider id had been dropped). The app never turns a
+            # synced row into 'internal', so Mongo's google/microsoft wins;
+            # otherwise the row keeps (internal, <provider id>), the sync's
+            # (provider, id) lookup misses it and inserts a duplicate once the
+            # mirror is off. Genuine internal rows are 'internal' in Mongo too.
+            new_cols={"is_real": None, "extra": {}, "external_provider": "internal"},
             ident=lambda r: str(r.get("event_id")),
             prepare=_calendar_prepare,
+            # A synced event Supabase holds under the same event_id but another
+            # (provider, external id): the sync cannot find it and, once the
+            # mirror is off, inserts the event a second time.
+            alt_same_is_unresolved=lambda r: bool(r.get("external_event_id")),
+            # A Mongo duplicate's Supabase copy (legacy gcal_id doc beside its
+            # canonical doc) and every row no sync can keep after 6b fail
+            # --verify: nothing would ever update or remove them.
+            review_shadows=True,
+            sb_review=_calendar_review,
         ),
         TypedSpec(
             "integrations_config", "integrations_config", "integrations_config", "integrations",
@@ -1119,6 +1278,39 @@ def _stale_shadows(report: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
 
 
+# Notes naming Supabase rows the backfill cannot decide; each fails --verify
+# (runbook: gate before 6b). Text follows "REVIEW: <dataset> has N ".
+REVIEW_NOTES: Dict[str, str] = {
+    # TypedSpec.alt_same_is_unresolved
+    "alt_key_unresolved": (
+        "row(s) Supabase holds under the same event_id but another (provider, external id) than Mongo "
+        "(among the matched_by_alt_key ids). A sync after 6b would insert those events again"
+    ),
+    # TypedSpec.review_shadows
+    "duplicate_shadow": (
+        "row(s) that duplicate an event another row holds (the Supabase copy of an older Mongo duplicate, "
+        "or a legacy-provider row beside the synced one). After 6b nothing updates or removes them: the "
+        "event is listed twice"
+    ),
+    # TypedSpec.sb_review (calendar: _calendar_review)
+    "legacy_provider": (
+        "row(s) with a provider's event id under provider internal/NULL that no Mongo row fixes"
+    ),
+    "no_external_id": (
+        "live row(s) of a synced source (google_calendar/outlook_calendar) without an external id: no "
+        "sync can find them and a disconnect may not remove them"
+    ),
+}
+
+
+def _reviews(report: Dict[str, Any]) -> List[Tuple[str, str, int]]:
+    """(dataset, note, count) of every ``REVIEW_NOTES`` note in the report."""
+    return [
+        (d["dataset"], note, d["notes"][note])
+        for d in report["datasets"] for note in REVIEW_NOTES if d["notes"].get(note)
+    ]
+
+
 def exit_code(report: Dict[str, Any], *, verify: bool = False) -> int:
     if report.get("aborted"):
         return 2
@@ -1127,9 +1319,10 @@ def exit_code(report: Dict[str, Any], *, verify: bool = False) -> int:
         return 1
     if verify:
         # After --apply, a dry run must find nothing left to write, and no
-        # stale access-granting shadow row may be left to review.
+        # stale access-granting shadow row or undecidable row (REVIEW_NOTES)
+        # may be left to review.
         pending = sum(d["insert"] + d["update"] for d in report["datasets"])
-        if pending or report.get("preflight") or _stale_shadows(report):
+        if pending or report.get("preflight") or _stale_shadows(report) or _reviews(report):
             return 1
     return 0
 
@@ -1178,6 +1371,10 @@ def render(report: Dict[str, Any], *, verify: bool = False) -> str:
             extra.append("errors: " + "; ".join(d["error_ids"]))
         if d.get("supabase_only_ids"):
             extra.append("supabase_only: " + "; ".join(d["supabase_only_ids"]))
+        if d.get("alt_key_ids"):
+            extra.append("matched_by_alt_key: " + "; ".join(d["alt_key_ids"]))
+        if d.get("review_ids"):
+            extra.append("review: " + "; ".join(d["review_ids"]))
         if extra:
             lines.append(f"· {d['dataset']}: " + " | ".join(extra))
     for d in _stale_shadows(report):
@@ -1185,6 +1382,11 @@ def render(report: Dict[str, Any], *, verify: bool = False) -> str:
             f"REVIEW: {d['dataset']} has {d['supabase_only']} Supabase row(s) Mongo no longer has "
             "(stale shadow — e.g. a removed member). Delete them by hand before the flip; "
             "--verify fails until then."
+        )
+    for dataset, note, count in _reviews(report):
+        lines.append(
+            f"REVIEW: {dataset} has {count} {REVIEW_NOTES[note]} ({note}). --verify fails until then; do not "
+            "turn the mirrors off (runbook: gate before 6b)."
         )
     if report.get("not_migrated"):
         lines.append("Not migrated (by design): " + ", ".join(f"{k} ({v})" for k, v in report["not_migrated"].items()))

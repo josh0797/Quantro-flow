@@ -340,6 +340,47 @@ def _calendar_mongo_ok(calendar_col: Any) -> bool:
     return is_mongo_write(cfg)
 
 
+def _is_legacy_provider(value: Any) -> bool:
+    """Provider a schema migration inferred, never one a sync wrote.
+
+    Konta 20260919010000 set ``external_provider = 'internal'`` on every row
+    that had none — including the Supabase shadows of synced Google/MS
+    events (their provider id had been dropped). The backfill later filled
+    ``external_event_id`` on them but kept the non-NULL ``internal``. The app
+    never writes an ``internal`` row with an external id, so such a row is
+    that legacy shape.
+    """
+    return (value or "internal") == "internal"
+
+
+async def _sb_find_calendar_external(
+    calendar_col: "DualWriteCollection", workspace_id: str, provider: str, external_event_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Supabase row for a provider event: exact identity first, else the
+    legacy-provider row carrying the same external id. Keeps ``_pk``.
+
+    Both at once is two rows for one event: the legacy one cannot take the
+    identity (unique index) and stays listed with its old data, so it is
+    logged as STORE_DRIFT (event ids only) for a human to remove."""
+    rows = await calendar_col._sb_rows({"workspace_id": workspace_id, "external_event_id": external_event_id})
+    exact = next((r for r in rows if (r.get("external_provider") or "") == provider), None)
+    legacy = [r for r in rows if _is_legacy_provider(r.get("external_provider"))]
+    if exact is not None:
+        if legacy:
+            logger.warning("%s calendar: legacy-provider row(s) duplicate a synced event (event_id=%s, "
+                           "duplicate event_id=%s) — review by hand", storage_flags.STORE_DRIFT,
+                           exact.get("event_id", "?"), ",".join(str(r.get("event_id", "?")) for r in legacy))
+        return exact
+    return legacy[0] if legacy else None
+
+
+def _needs_identity_repair(existing: Dict[str, Any], provider: str, external_event_id: str) -> bool:
+    """A Supabase row found for this provider event that does not carry its identity."""
+    return "_pk" in existing and (
+        existing.get("external_provider") != provider or existing.get("external_event_id") != external_event_id
+    )
+
+
 async def find_calendar_event_for_external_sync(
     calendar_col: Any,
     *,
@@ -350,7 +391,13 @@ async def find_calendar_event_for_external_sync(
     """Resolve an existing calendar row for Google/MS sync.
 
     Lookup order (transition-safe):
+      0. Supabase primary: Supabase by ``workspace_id + external_event_id`` —
+         the exact provider, else a legacy-provider row (``internal``/NULL,
+         see ``_is_legacy_provider``) that the upsert then repairs in place.
+         Without this a sync after the Mongo mirror is off inserted a
+         second row for every such event.
       1. Canonical ``workspace_id + external_provider + external_event_id``
+         (and, while mirrored, the Mongo mirror)
       2. Legacy Google ``workspace_id + gcal_id`` / MS ``workspace_id + ms_id``
          — Mongo only, and only while Mongo is still primary or mirrored
          (the backfill normalizes legacy rows onto external_* in Supabase).
@@ -358,6 +405,16 @@ async def find_calendar_event_for_external_sync(
     if not external_event_id:
         return None
     provider = (provider or "").lower().strip()
+    if isinstance(calendar_col, DualWriteCollection) and is_supabase_primary(calendar_col.cfg):
+        try:
+            doc = await _sb_find_calendar_external(calendar_col, workspace_id, provider, external_event_id)
+        except SupabaseStoreError:
+            if not _mongo_fallback_ok(calendar_col.cfg):
+                raise
+            doc = None  # find_one below logs the failure and reads the mirror
+        else:
+            if doc is not None or not _mongo_fallback_ok(calendar_col.cfg):
+                return doc
     doc = await calendar_col.find_one(
         {
             "workspace_id": workspace_id,
@@ -452,10 +509,21 @@ async def upsert_calendar_external_event(
 
     if existing is not None:
         event_id = existing.get("event_id") or existing.get("id") or str(uuid.uuid4())
-        if _calendar_compare_unchanged(existing, canonical):
+        repair = sb_primary and _needs_identity_repair(existing, provider, external_event_id)
+        if not repair and _calendar_compare_unchanged(existing, canonical):
             return {"event_id": event_id, "outcome": "unchanged"}
         set_fields_with_id = {**set_fields, "event_id": event_id}
-        if sb_primary:
+        if repair:
+            # Legacy-provider row: patch it by primary key (keeps event_id,
+            # takes the provider identity). An upsert on the external identity
+            # would try to INSERT and hit (workspace_id, event_id) → 409.
+            ok = await _sb_patch_calendar_row(calendar_col, existing, set_fields_with_id)
+            if not ok and not _mongo_fallback_ok(cfg):
+                raise SupabaseStoreError("calendar_events identity repair failed", table=cfg.table)
+            if _calendar_mongo_ok(calendar_col):
+                await _mirror_calendar_legacy(calendar_col, existing, workspace_id, provider,
+                                              external_event_id, set_fields, set_fields_with_id)
+        elif sb_primary:
             # Supabase is the SoT: one upsert on the external identity keeps
             # the stored event_id (see _sb_upsert_doc).
             ok = await calendar_col._sb_upsert_doc(set_fields_with_id)
@@ -500,6 +568,17 @@ async def upsert_calendar_external_event(
     )
     outcome = "cancelled" if is_cancelled else "inserted"
     return {"event_id": event_id, "outcome": outcome}
+
+
+async def _sb_patch_calendar_row(calendar_col: "DualWriteCollection", existing: Dict[str, Any],
+                                 fields: Dict[str, Any]) -> bool:
+    """PATCH one Supabase calendar row (``existing`` from ``_sb_rows``) by primary key."""
+    update = {"$set": fields}
+    patch = calendar_col._column_patch(update)
+    if patch is None:
+        base = {k: v for k, v in existing.items() if k != "_pk"}
+        patch = calendar_col._full_row(mc.apply_update(base, update))
+    return await calendar_col._patch({"id": f"eq.{existing['_pk']}"}, patch) is not None
 
 
 async def _mirror_calendar_legacy(calendar_col, existing, workspace_id, provider, external_event_id,
@@ -804,9 +883,15 @@ class DualWriteCollection:
         except TypeError:
             doc = await self._mongo.find_one(query)
         if doc is not None and is_supabase_primary(self.cfg):
-            logger.warning("%s %s: row only in Mongo (%s=%s) — re-run the backfill",
+            # Name the lookup key: the id printed is the MONGO row's, and
+            # Supabase may hold that same id under another key value (e.g. a
+            # calendar row under another external identity) — not missing.
+            keys = ",".join(sorted(k for k in query if not str(k).startswith("$"))) or "-"
+            logger.warning("%s %s: Supabase has no row for this lookup, the Mongo mirror has one "
+                           "(%s=%s, lookup on %s) — re-run the backfill; if it reports the row "
+                           "'same', Supabase holds it under another key value: review it",
                            storage_flags.MONGO_ONLY, self.cfg.name, self.cfg.app_id_field,
-                           doc.get(self.cfg.app_id_field, "?"))
+                           doc.get(self.cfg.app_id_field, "?"), keys)
         return doc
 
     async def count_documents(self, query: Dict[str, Any], **_: Any) -> int:
