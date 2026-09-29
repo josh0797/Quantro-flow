@@ -92,3 +92,22 @@ async def test_one_failing_repair_does_not_skip_the_rest(pinned_server, monkeypa
     await server.backfill_workspace_scoping()
     assert (await mdb["business_profile"].find_one({"profile_id": "default"}))["workspace_id"] == "default"
     assert await mdb["workspaces"].find_one({"workspace_id": "default"})
+
+
+@pytest.mark.asyncio
+async def test_startup_health_events_land_in_the_default_workspace_after_the_flip(pinned_server, monkeypatch):
+    """After step 6a (docs Supabase-primary) the Mongo-only startup repair no
+    longer fills workspace_id, so a health event written without one was
+    stored with NULL: /api/system/health (reads [workspace, "default"]) never
+    saw it and the backfill's --verify reported each boot as an update."""
+    fake, mdb, server = pinned_server
+    monkeypatch.setenv("QUANTRO_DOCS_PRIMARY", "supabase")
+    await mdb["business_profile"].insert_one({"profile_id": "default", "industry": "other"})
+
+    outcome = await server.run_startup_jobs()
+    assert all(v == "ok" for v in outcome.values()), outcome
+
+    health = [r for r in fake.rows["flow_documents"] if r["collection"] == "system_health_events"]
+    assert health, "the startup check writes a health event"
+    assert {r["workspace_id"] for r in health} == {"default"}
+    assert all(r["doc"].get("workspace_id") == "default" for r in health)

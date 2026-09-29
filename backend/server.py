@@ -1341,8 +1341,13 @@ async def ensure_integrations_seeded():
                 })
 
     # Always log a check event (healthy = repairs is empty)
+    # Global startup checks live under the default workspace: /api/system/health
+    # reads [workspace, "default"]. Without it Supabase stores NULL (the Mongo
+    # startup repair used to fill "default"), the health card goes stale and the
+    # backfill's --verify reports every boot as a pending update.
     await system_health_col.insert_one({
         "event_id": str(uuid.uuid4()),
+        "workspace_id": DEFAULT_WORKSPACE_ID,
         "scope": "integrations",
         "status": "repaired" if repairs else "healthy",
         "repairs": repairs,
@@ -1413,6 +1418,7 @@ async def backfill_simulation_flag():
         try:
             await system_health_col.insert_one({
                 "event_id": str(uuid.uuid4()),
+                "workspace_id": DEFAULT_WORKSPACE_ID,
                 "scope": "data_isolation",
                 "status": "repaired",
                 "repairs": [
