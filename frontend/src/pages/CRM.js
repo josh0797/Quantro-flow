@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import LearnLink from '../components/LearnLink';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
@@ -99,7 +100,10 @@ export default function CRM() {
     <div className="page-container relative z-[1]">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="font-display text-2xl font-semibold tracking-tight">{contactsLabel}</h1>
+          <h1 className="font-display text-2xl font-semibold tracking-tight flex items-center gap-3">
+            {contactsLabel}
+            <LearnLink route="crm" />
+          </h1>
           <p className="text-sm text-muted-foreground mt-1">{t('crm.subtitle')}</p>
         </div>
         <div className="flex items-center gap-2">

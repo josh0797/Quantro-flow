@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import LearnLink from '../components/LearnLink';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
@@ -200,7 +201,10 @@ export default function ContentEngine() {
     <div className="page-container relative z-[1]">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="font-display text-2xl font-semibold tracking-tight">{t('content_engine.title')}</h1>
+          <h1 className="font-display text-2xl font-semibold tracking-tight flex items-center gap-3">
+            {t('content_engine.title')}
+            <LearnLink route="content" />
+          </h1>
           <p className="text-sm text-muted-foreground mt-1">AI-powered content generation and template management</p>
         </div>
         <Badge variant="secondary" className="text-xs">{content.length} items | {templates.length} templates</Badge>

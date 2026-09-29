@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import LearnLink from '../components/LearnLink';
 import { toast } from 'sonner';
 import {
   Bot, Plus, Edit3, Trash2, AlertTriangle, Sparkles, ShieldAlert,
@@ -232,6 +233,7 @@ export default function AutomationPolicies() {
           <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
             <Bot size={22} className="text-[hsl(var(--primary))]" />
             {t('automation_policies.page_title')}
+            <LearnLink route="automation" className="ml-1" />
           </h1>
           <p className="text-sm text-muted-foreground max-w-xl">
             {t('automation_policies.page_subtitle')}
