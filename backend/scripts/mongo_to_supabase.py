@@ -637,8 +637,11 @@ async def backfill_typed(sb: Supabase, source: Any, spec: TypedSpec, policy: str
             if spec.reconcile:
                 row = spec.reconcile(row, existing)
             diff = _fill_diff(existing, row, spec.new_cols) if policy == "fill" else _wins_diff(existing, row)
-            # Never rewrite a row's identity columns through a PATCH.
+            # Never rewrite a row's identity columns through a PATCH, and never
+            # move a row to another workspace (an alt-key match may sit under
+            # a different workspace on purpose — see activity_events).
             diff.pop("id", None)
+            diff.pop("workspace_id", None)
             if not diff:
                 st.same += 1
                 continue
@@ -774,6 +777,12 @@ def typed_specs() -> List[TypedSpec]:
         TypedSpec(
             "activity_events", "activity_events", "activity_events", "activity", _product_row(pds.ACTIVITY_CFG),
             key=_k("workspace_id", "event_id"), key_cols=("workspace_id", "event_id"),
+            # event_id (a uuid4) alone as well: scripts/fix_activity_workspace.py
+            # moves rows that leaked into "default" to their real workspace (or
+            # to the quarantine workspace). If a Mongo mirror copy was left
+            # behind under "default" (mirror write failed), matching on the
+            # full key alone would insert it again there — re-leaking it.
+            alt_keys=(_k("event_id"),),
             new_cols=dict(_PROD_NEW), ident=lambda r: str(r.get("event_id")),
         ),
         TypedSpec(
