@@ -357,15 +357,21 @@ async def _sb_find_calendar_external(
     calendar_col: "DualWriteCollection", workspace_id: str, provider: str, external_event_id: str,
 ) -> Optional[Dict[str, Any]]:
     """Supabase row for a provider event: exact identity first, else the
-    legacy-provider row carrying the same external id. Keeps ``_pk``."""
+    legacy-provider row carrying the same external id. Keeps ``_pk``.
+
+    Both at once is two rows for one event: the legacy one cannot take the
+    identity (unique index) and stays listed with its old data, so it is
+    logged as STORE_DRIFT (event ids only) for a human to remove."""
     rows = await calendar_col._sb_rows({"workspace_id": workspace_id, "external_event_id": external_event_id})
-    for row in rows:
-        if (row.get("external_provider") or "") == provider:
-            return row
-    for row in rows:
-        if _is_legacy_provider(row.get("external_provider")):
-            return row
-    return None
+    exact = next((r for r in rows if (r.get("external_provider") or "") == provider), None)
+    legacy = [r for r in rows if _is_legacy_provider(r.get("external_provider"))]
+    if exact is not None:
+        if legacy:
+            logger.warning("%s calendar: legacy-provider row(s) duplicate a synced event (event_id=%s, "
+                           "duplicate event_id=%s) — review by hand", storage_flags.STORE_DRIFT,
+                           exact.get("event_id", "?"), ",".join(str(r.get("event_id", "?")) for r in legacy))
+        return exact
+    return legacy[0] if legacy else None
 
 
 def _needs_identity_repair(existing: Dict[str, Any], provider: str, external_event_id: str) -> bool:

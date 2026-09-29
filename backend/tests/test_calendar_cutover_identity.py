@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import pytest
@@ -325,3 +325,191 @@ async def test_6b_google_sync_route_then_list_and_delete_by_the_listed_id(app_6b
         for e in listed:
             assert (await client.delete(f"/api/calendar/{e['event_id']}", headers=headers)).status_code == 200
     assert fake.rows["calendar_events"] == []
+
+
+# ── gate before 6b: Supabase rows no sync could keep ─────────────────────
+# Before these fixes the gate (--verify + the runbook's SQL check) passed on
+# every shape below, and 6b then listed the event twice with one copy frozen.
+
+LIVE = {"workspace_id": WS, "is_simulation": {"$ne": True}, "hidden_by_real": {"$ne": True}}   # live-mode list
+GOOGLE_DISCONNECT = {"workspace_id": WS, "is_real": True, "source": "google_calendar"}         # server.py
+
+
+def sql_legacy_provider(fake) -> int:
+    """Runbook gate, read-only query 1 (expected 0)."""
+    return sum(1 for r in fake.rows["calendar_events"]
+               if r.get("external_event_id") is not None
+               and (r.get("external_provider") or "internal") == "internal")
+
+
+def sql_no_external_id(fake) -> int:
+    """Runbook gate, read-only query 2 (expected 0)."""
+    return sum(1 for r in fake.rows["calendar_events"]
+               if r.get("source") in ("google_calendar", "outlook_calendar")
+               and r.get("is_simulation") is False and r.get("external_event_id") is None)
+
+
+def legacy_gcal_doc(event_id: str, title: str) -> Dict[str, Any]:
+    """A pre-canonical Mongo doc of a synced Google event (``id`` + ``gcal_id``)."""
+    return {"_id": "65f100000000000000000011", "workspace_id": WS, "id": event_id, "gcal_id": X,
+            "source": "google_calendar", "title": title, "start": T1, "end": T2, "attendees": [],
+            "status": "confirmed", "is_real": True, "is_simulation": False,
+            "synced_at": "2026-09-18T00:00:00+00:00"}
+
+
+def mirrors_off(monkeypatch, fake) -> Tuple[Any, Any]:
+    """Runbook 6b over the same Supabase rows: every mirror off, Mongo a
+    tripwire. Returns (the 6b fake, the calendar collection)."""
+    fake6b = supabase_only(monkeypatch)
+    fake6b.rows["calendar_events"] = [dict(r) for r in fake.rows["calendar_events"]]
+    return fake6b, pds.wrap_calendar_col(TripwireMongo("calendar_events"))
+
+
+async def gate(source: Source, fake) -> Dict[str, Any]:
+    """Runbook step 4 (--apply) then step 5 (--verify): the verify report."""
+    applied = await bf.run(source, fake.request, apply=True, only={"calendar_events"})
+    assert bf.exit_code(applied) == 0, bf.render(applied)
+    return await bf.run(source, fake.request, apply=False, only={"calendar_events"})
+
+
+E_LEG, E_CAN = "e-legacy-doc", "e-canonical-doc"
+
+
+@pytest.mark.asyncio
+async def test_backfill_fills_the_supabase_copy_of_an_older_mongo_duplicate(monkeypatch):
+    """Mongo holds one Google event twice — the legacy gcal_id doc (E_LEG)
+    and the canonical doc beside it (E_CAN, newer) — and Supabase only
+    E_LEG's copy, still without the Google id. Pass 1 keeps E_CAN; the
+    backfill used to INSERT it next to E_LEG's copy, which nothing reported
+    (external id NULL: no alt match, no SQL hit), so 6b listed the event
+    twice and a Google disconnect left the stale copy (its is_real NULL)."""
+    fake = supabase_only(monkeypatch, mirror=True)
+    fake.rows["calendar_events"].append(
+        {**sb_row(E_LEG, "internal", None, title="Standup (old title)"), "is_real": None})
+    source = Source([legacy_gcal_doc(E_LEG, "Standup (old title)"),
+                     {**mongo_doc(E_CAN), "_id": "65f100000000000000000012", "updated_at": T1}])
+
+    dry = await bf.run(source, fake.request, apply=False, only={"calendar_events"})
+    d = calendar_report(dry)
+    assert (d["insert"], d["update"], d["error"]) == (0, 1, 0)
+    assert d["notes"]["mongo_duplicates"] == 1 and d["notes"]["matched_by_older_duplicate"] == 1
+    assert d["alt_key_ids"] == [E_CAN] and not d["review_ids"]
+
+    verify = await gate(source, fake)
+    assert bf.exit_code(verify, verify=True) == 0, bf.render(verify, verify=True)
+    assert rows(fake) == [(E_LEG, "google", X, "Standup (old title)")]   # one row; Supabase's id kept
+    assert (sql_legacy_provider(fake), sql_no_external_id(fake)) == (0, 0)
+
+    fake6b, cal = mirrors_off(monkeypatch, fake)
+    assert await sync(cal, "Standup (moved)") == {"event_id": E_LEG, "outcome": "updated"}
+    listed = await cal.find(dict(LIVE)).to_list(100)
+    assert [(e["event_id"], e["title"]) for e in listed] == [(E_LEG, "Standup (moved)")]
+    await cal.delete_many(dict(GOOGLE_DISCONNECT))
+    assert fake6b.rows["calendar_events"] == []
+
+
+@pytest.mark.asyncio
+async def test_verify_fails_on_an_older_mongo_duplicates_copy_beside_the_synced_row(monkeypatch):
+    """Same Mongo pair, but Supabase also holds E_CAN (a 6a sync inserted it:
+    it could not find E_LEG's copy, which has no Google id). The backfill
+    never deletes, so the gate must fail and name the copy."""
+    fake = supabase_only(monkeypatch, mirror=True)
+    fake.rows["calendar_events"] += [
+        {**sb_row(E_LEG, "internal", None, title="Standup (old title)"), "is_real": None},
+        sb_row(E_CAN, "google", X),
+    ]
+    source = Source([legacy_gcal_doc(E_LEG, "Standup (old title)"),
+                     {**mongo_doc(E_CAN), "_id": "65f100000000000000000012", "updated_at": T1}])
+
+    verify = await gate(source, fake)
+    d = calendar_report(verify)
+    assert (d["insert"], d["update"]) == (0, 0)
+    assert d["notes"]["duplicate_shadow"] == 1 and "no_external_id" not in d["notes"]   # reported once
+    assert d["review_ids"] == [f"{E_LEG} (duplicate_shadow of {E_CAN})"]
+    assert bf.exit_code(verify, verify=True) == 1
+    text = bf.render(verify, verify=True)
+    assert "REVIEW: calendar_events has 1 row(s) that duplicate an event" in text and "(duplicate_shadow)" in text
+    assert sql_no_external_id(fake) == 1                       # the runbook's SQL query sees it too
+
+    # The runbook's remedy (delete the copy by hand) clears the gate.
+    fake.rows["calendar_events"] = [r for r in fake.rows["calendar_events"] if r["event_id"] != E_LEG]
+    again = await bf.run(source, fake.request, apply=False, only={"calendar_events"})
+    assert bf.exit_code(again, verify=True) == 0, bf.render(again, verify=True)
+
+
+@pytest.mark.asyncio
+async def test_backfill_fills_a_legacy_provider_row_whose_event_id_differs_from_mongo(monkeypatch):
+    """Supabase (internal, X, e-old), Mongo (google, X, e-new): the key and
+    the event_id alt key both miss. The backfill used to insert e-new beside
+    e-old (an ordinary ``insert``, --verify exit 0) and the sync, which takes
+    the exact identity first, never repaired e-old: listed twice, one frozen."""
+    fake = supabase_only(monkeypatch, mirror=True)
+    fake.rows["calendar_events"].append(sb_row("e-old", "internal", X))
+    source = Source([mongo_doc("e-new")])
+
+    dry = await bf.run(source, fake.request, apply=False, only={"calendar_events"})
+    d = calendar_report(dry)
+    assert (d["insert"], d["update"]) == (0, 1) and d["alt_key_ids"] == ["e-new"]
+
+    verify = await gate(source, fake)
+    assert bf.exit_code(verify, verify=True) == 0, bf.render(verify, verify=True)
+    assert rows(fake) == [("e-old", "google", X, "Standup")]
+    assert sql_legacy_provider(fake) == 0
+
+    fake6b, cal = mirrors_off(monkeypatch, fake)
+    for title in ("Standup (moved)", "Standup (moved again)"):
+        assert (await sync(cal, title))["event_id"] == "e-old"
+    assert rows(fake6b) == [("e-old", "google", X, "Standup (moved again)")]
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_provider_row_beside_the_synced_row_fails_verify_and_logs_store_drift(monkeypatch, caplog):
+    """Both rows already in Supabase: the sync updates the exact one, the
+    legacy one can never take the identity (unique index). The runbook used
+    to say such a leftover 'does not block 6b: the sync repairs it'."""
+    fake = supabase_only(monkeypatch, mirror=True)
+    fake.rows["calendar_events"] += [sb_row("e-old", "internal", X), sb_row("e-new", "google", X)]
+    source = Source([mongo_doc("e-new")])
+
+    verify = await gate(source, fake)
+    d = calendar_report(verify)
+    assert d["review_ids"] == ["e-old (duplicate_shadow of e-new)"]
+    assert bf.exit_code(verify, verify=True) == 1 and sql_legacy_provider(fake) == 1
+
+    fake6b, cal = mirrors_off(monkeypatch, fake)
+    caplog.set_level(logging.WARNING, logger="quantro.product_domain.store")
+    assert await sync(cal, "Renamed") == {"event_id": "e-new", "outcome": "updated"}
+    assert rows(fake6b) == [("e-new", "google", X, "Renamed"), ("e-old", "internal", X, "Standup")]
+    (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("STORE_DRIFT calendar")]
+    assert "event_id=e-new" in line and "duplicate event_id=e-old" in line and "Renamed" not in line
+
+
+@pytest.mark.asyncio
+async def test_verify_fails_on_calendar_rows_no_sync_can_keep(monkeypatch):
+    """Rows the sync can never reach, with or without a Mongo copy (e.g. a
+    shadow a Mongo-primary Google disconnect did not delete: is_real NULL).
+    --verify and the runbook's two SQL queries agree; demo and internal rows
+    are fine."""
+    fake = supabase_only(monkeypatch, mirror=True)
+    fake.rows["calendar_events"] += [
+        sb_row("e-legacy", "internal", "gcal-gone"),                                  # no Mongo copy
+        {**sb_row("e-orphan", "internal", None), "is_real": None},                   # no Mongo copy
+        {**sb_row("e-demo", "internal", None), "is_simulation": True},              # demo seed
+        sb_row("e-manual", "internal", None, title="Manual", source="manual"),       # internal event
+        sb_row("e-ok", "google", "gcal-ok"),
+    ]
+    # A Mongo doc of a synced source without any provider id: inserted, and just as unreachable.
+    source = Source([{**mongo_doc("e-mongo-orphan"), "external_provider": None, "external_event_id": None}])
+
+    applied = await bf.run(source, fake.request, apply=True, only={"calendar_events"})
+    assert calendar_report(applied)["insert"] == 1 and bf.exit_code(applied) == 0
+    verify = await bf.run(source, fake.request, apply=False, only={"calendar_events"})
+    d = calendar_report(verify)
+    assert (d["insert"], d["update"]) == (0, 0)
+    assert (d["notes"]["legacy_provider"], d["notes"]["no_external_id"]) == (1, 2)
+    assert sorted(d["review_ids"]) == ["e-legacy (legacy_provider)", "e-mongo-orphan (no_external_id)",
+                                       "e-orphan (no_external_id)"]
+    assert bf.exit_code(verify, verify=True) == 1
+    text = bf.render(verify, verify=True)
+    assert "(legacy_provider)." in text and "(no_external_id)." in text
+    assert (sql_legacy_provider(fake), sql_no_external_id(fake)) == (1, 2)
