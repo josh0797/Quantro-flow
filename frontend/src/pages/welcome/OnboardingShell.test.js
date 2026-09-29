@@ -12,10 +12,10 @@ jest.mock('../../lib/api', () => ({
 jest.mock('sonner', () => ({
   toast: { success: jest.fn(), warning: jest.fn(), error: jest.fn(), info: jest.fn() },
 }));
-jest.mock('../../contexts/AuthContext', () => {
-  const auth = { user: { user_id: 'owner-1', name: 'Owner Test' }, signOut: jest.fn(), refresh: jest.fn() };
-  return { useAuth: () => auth };
-});
+// A brand-new signup going through the flow (tests switch users below).
+const NEW_SIGNUP = { user_id: 'owner-1', name: 'Owner Test', needs_onboarding: true };
+const mockAuth = { user: NEW_SIGNUP, signOut: jest.fn(), refresh: jest.fn() };
+jest.mock('../../contexts/AuthContext', () => ({ useAuth: () => mockAuth }));
 // Stable `t`, like the real memoized one (components key effects on it).
 jest.mock('../../context/LanguageContext', () => {
   const lang = { t: (k) => k, lang: 'es' };
@@ -31,7 +31,8 @@ import StepInbox from './StepInbox';
 import StepCalendar from './StepCalendar';
 import { supabase } from '../../lib/supabaseClient';
 import { syncGoogleData, startGoogleOAuth, getMicrosoftIntegrationStatus } from '../../lib/api';
-import { wasOnboardingCleared, __resetOnboardingGateForTests } from '../../lib/onboardingGate';
+import { wasOnboardingCleared, clearNeedsOnboardingFlag, __resetOnboardingGateForTests } from '../../lib/onboardingGate';
+import { progressKey, LEGACY_PROGRESS_KEY } from '../../lib/welcomeSession';
 import { render, flush, click, byTestId, createNavSpy, deferred } from '../../test/render';
 /* eslint-enable import/first */
 
@@ -54,6 +55,7 @@ async function mount(path, { strict = false } = {}) {
           <Route path="crm" element={<div data-testid="crm-step" />} />
         </Route>
         <Route path="/dashboard" element={<div data-testid="dashboard-screen" />} />
+        <Route path="/settings/*" element={<div data-testid="settings-screen" />} />
       </Routes>
     </MemoryRouter>
   );
@@ -61,10 +63,14 @@ async function mount(path, { strict = false } = {}) {
   await flush();
 }
 
+const savedProgress = (userId = NEW_SIGNUP.user_id) => JSON.parse(window.localStorage.getItem(progressKey(userId)));
+
 beforeEach(() => {
   jest.clearAllMocks();
   __resetOnboardingGateForTests();
   window.localStorage.clear();
+  mockAuth.user = NEW_SIGNUP;
+  mockAuth.refresh = jest.fn().mockResolvedValue(undefined);
   supabase.auth.updateUser.mockResolvedValue({ data: {}, error: null });
   getMicrosoftIntegrationStatus.mockResolvedValue({ configured: false });
   startGoogleOAuth.mockResolvedValue({ auth_url: null });
@@ -139,7 +145,7 @@ describe('provider OAuth return', () => {
       'welcome.preview.real_connected_no_sync_title_v2',
       { description: 'quota' },
     );
-    const saved = JSON.parse(window.localStorage.getItem('quantro:onboarding:state:v1'));
+    const saved = savedProgress();
     expect(saved.inbox_connection_mode).toBe('real');
     expect(saved.calendar_connection_mode).toBe('real');
     expect(byTestId('onboarding-sync-status')).toBeNull();
@@ -156,6 +162,89 @@ describe('provider OAuth return', () => {
       { description: 'access_denied' },
     );
     expect(byTestId('step-inbox-connect-btn').disabled).toBe(false);
+  });
+});
+
+describe('provider OAuth return for a user who is NOT onboarding', () => {
+  const RETURN = '?google_connected=success&account=owner%40example.com&return_to=/welcome/inbox';
+
+  it.each([
+    ['whose flag is off', () => { mockAuth.user = { ...NEW_SIGNUP, needs_onboarding: false }; }],
+    ['who left the flow in this session', async () => { await clearNeedsOnboardingFlag(NEW_SIGNUP.user_id, () => Promise.resolve()); }],
+  ])('sends an existing user %s to Settings → Integrations, never on to /welcome/crm', async (_label, arrange) => {
+    await arrange();
+    const sync = deferred();
+    syncGoogleData.mockReturnValue(sync.promise);
+
+    await mount(`/welcome/inbox${RETURN}`);
+
+    expect(nav.location.pathname).toBe('/settings/integrations');
+    expect(nav.location.search).toBe(RETURN);
+    expect(byTestId('settings-screen')).not.toBeNull();
+    // Nothing of the onboarding follow-up ran.
+    expect(syncGoogleData).not.toHaveBeenCalled();
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(savedProgress()?.inbox_connection_mode).not.toBe('real');
+    expect(savedProgress()?.calendar_connection_mode).not.toBe('real');
+  });
+
+  it('forwards errors too, so the result is shown where the user manages connections', async () => {
+    mockAuth.user = { ...NEW_SIGNUP, needs_onboarding: false };
+    await mount('/welcome/inbox?google_connected=error&reason=access_denied');
+
+    expect(nav.location.pathname).toBe('/settings/integrations');
+    expect(nav.location.search).toBe('?google_connected=error&reason=access_denied');
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+});
+
+describe('Welcome progress is per user', () => {
+  it('a user who skips never inherits another user\'s "real" connection on the same browser', async () => {
+    // User A connects Google in the flow, then leaves with "Ir al panel".
+    const sync = deferred();
+    syncGoogleData.mockReturnValue(sync.promise);
+    await mount(SUCCESS_RETURN);
+    expect(savedProgress().inbox_connection_mode).toBe('real');
+    await click(byTestId('onboarding-exit-dashboard'));
+    await flush();
+    await view.unmount();
+    view = null;
+    // Leaving the flow forgets A's progress.
+    expect(window.localStorage.getItem(progressKey(NEW_SIGNUP.user_id))).toBeNull();
+
+    // User B, a brand-new signup on the same browser, skips the inbox step.
+    const userB = { user_id: 'user-B', name: 'User B', needs_onboarding: true };
+    mockAuth.user = userB;
+    await mount('/welcome/inbox');
+    await click(byTestId('step-inbox-skip-btn'));
+    await flush();
+
+    const b = savedProgress('user-B');
+    expect(b.inbox_connection_mode).toBe('demo');
+    expect(b.inbox_connected).toBe(false);
+  });
+
+  it('ignores (and removes) the old progress key that every user of the browser shared', async () => {
+    window.localStorage.setItem(LEGACY_PROGRESS_KEY, JSON.stringify({ inbox_connection_mode: 'real', inbox_connected: true }));
+    await mount('/welcome/inbox');
+    await click(byTestId('step-inbox-skip-btn'));
+    await flush();
+
+    expect(window.localStorage.getItem(LEGACY_PROGRESS_KEY)).toBeNull();
+    expect(savedProgress().inbox_connection_mode).toBe('demo');
+  });
+
+  it('skipping after a real connection made by the same user in this flow keeps it real', async () => {
+    const sync = deferred();
+    syncGoogleData.mockReturnValue(sync.promise);
+    await mount(SUCCESS_RETURN);
+    await nav.go('/welcome/inbox');
+    await flush();
+    await click(byTestId('step-inbox-skip-btn'));
+    await flush();
+
+    expect(savedProgress().inbox_connection_mode).toBe('real');
+    expect(nav.location.pathname).toBe('/welcome/calendar');
   });
 });
 
@@ -185,5 +274,25 @@ describe('"Ir al panel" exit', () => {
     expect(nav.location.pathname).toBe('/dashboard');
     expect(wasOnboardingCleared('owner-1')).toBe(true);
     console.warn.mockRestore();
+  });
+
+  it('reaches the dashboard at once even when the metadata write or the auth refresh never settles', async () => {
+    const hanging = deferred();
+    supabase.auth.updateUser.mockReturnValue(hanging.promise);
+    mockAuth.refresh = jest.fn(() => new Promise(() => {}));
+    await mount('/welcome/inbox');
+
+    await click(byTestId('onboarding-exit-dashboard'));
+    await flush();
+
+    expect(nav.location.pathname).toBe('/dashboard');
+    expect(byTestId('dashboard-screen')).not.toBeNull();
+    expect(wasOnboardingCleared('owner-1')).toBe(true);
+    // The write was still sent; the refresh follows once it lands.
+    expect(supabase.auth.updateUser).toHaveBeenCalledWith({ data: { needs_onboarding: false } });
+    expect(mockAuth.refresh).not.toHaveBeenCalled();
+    hanging.resolve({ data: {}, error: null });
+    await flush();
+    expect(mockAuth.refresh).toHaveBeenCalledTimes(1);
   });
 });

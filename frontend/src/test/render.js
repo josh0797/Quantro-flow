@@ -30,6 +30,17 @@ export async function flush(times = 3) {
   }
 }
 
+// Like flush(), but also lets zero-delay timers fire (retry backoff set
+// to 0 in tests, setTimeout-based helpers).
+export async function settle(times = 4) {
+  for (let i = 0; i < times; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    await act(async () => {
+      await new Promise((resolve) => { setTimeout(resolve, 0); });
+    });
+  }
+}
+
 export async function click(el) {
   await act(async () => {
     el.dispatchEvent(new MouseEvent('click', { bubbles: true }));

@@ -5,7 +5,8 @@ import { useAuth } from '../../contexts/AuthContext';
 import { useLanguage } from '../../context/LanguageContext';
 import { OnboardingProvider, useOnboarding } from './OnboardingContext';
 import { syncGoogleData, syncMicrosoftData, startGoogleOAuth, startMicrosoftOAuth } from '../../lib/api';
-import { clearNeedsOnboardingFlag } from '../../lib/onboardingGate';
+import { clearNeedsOnboardingFlag, needsWelcomeFlow } from '../../lib/onboardingGate';
+import { CONNECT_NEW_HOME } from '../../routes/legacyRedirects';
 import {
   readProviderCallback,
   stripProviderCallbackParams,
@@ -63,7 +64,7 @@ export default function OnboardingShell() {
   };
 
   return (
-    <OnboardingProvider>
+    <OnboardingProvider key={user?.user_id || 'anonymous'}>
       <ProviderCallbackHandler />
       <div
         className="min-h-screen w-full bg-background text-foreground relative overflow-hidden"
@@ -147,9 +148,11 @@ export default function OnboardingShell() {
 /**
  * ExitToDashboardButton — always-visible way out of the Welcome flow.
  * Clears Supabase `needs_onboarding` (via the onboarding gate helper, so
- * ProtectedRoute can never bounce the user back here) and opens the
- * dashboard. Never traps the user: if the metadata write fails we still
- * navigate — the gate remembers the dismissal for this session.
+ * ProtectedRoute can never bounce the user back here), forgets this
+ * user's Welcome progress and opens the dashboard. Never traps the user:
+ * the dismissal is recorded synchronously, so we navigate at once and the
+ * metadata write + auth refresh finish (or fail, logged) in the
+ * background — a slow or hanging network can't keep the user here.
  */
 export function ExitToDashboardButton() {
   const { user, refresh } = useAuth();
@@ -157,16 +160,15 @@ export function ExitToDashboardButton() {
   const navigate = useNavigate();
   const [exiting, setExiting] = useState(false);
 
-  const handleExit = async () => {
+  const handleExit = () => {
     if (exiting) return;
     setExiting(true);
-    try {
-      await clearNeedsOnboardingFlag(user?.user_id);
-      await refresh?.();
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn('[welcome] could not clear needs_onboarding:', err?.message || err);
-    }
+    clearNeedsOnboardingFlag(user?.user_id)
+      .then(() => refresh?.())
+      .catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn('[welcome] could not clear needs_onboarding:', err?.message || err);
+      });
     navigate('/dashboard', { replace: true });
   };
 
@@ -213,6 +215,13 @@ function SyncStatusBanner() {
  * for the ?google_connected=… / ?microsoft_connected=… query string a
  * provider OAuth callback appends.
  *
+ * Only a user who is still onboarding (needs_onboarding set and not
+ * cleared this session) is moved through the Welcome steps. Anyone else
+ * — e.g. an existing owner whose OAuth was started from an old tab — is
+ * sent to Settings → Integrations with the same result, where it is
+ * confirmed; never forward into CRM / automations / ready (the last one
+ * re-seeds the workspace).
+ *
  * success:
  *   1. Marks the inbox AND calendar steps as connection_mode='real' (the
  *      provider consent covers mail + calendar) so the Activación screen
@@ -241,6 +250,7 @@ export function ProviderCallbackHandler() {
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useLanguage();
+  const { user } = useAuth();
   const { markStepConnected, runProviderSync } = useOnboarding();
   const handledRef = useRef(null);
 
@@ -257,6 +267,11 @@ export function ProviderCallbackHandler() {
     // Guard against React StrictMode's double effect in development.
     if (handledRef.current === signature) return;
     handledRef.current = signature;
+
+    if (!needsWelcomeFlow(user)) {
+      navigate({ pathname: CONNECT_NEW_HOME, search: location.search }, { replace: true });
+      return;
+    }
 
     const { provider, status, account, reason, missingScopes } = callback;
     const label = providerLabel(provider);

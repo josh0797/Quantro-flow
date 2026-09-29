@@ -44,15 +44,6 @@ export default function StepReady() {
           crm_connected: !!state.crm_connected,
           automations_connected: !!state.automations_connected,
         });
-        // Mark Supabase user_metadata so ProtectedRoute stops sending the
-        // user back to /welcome on reload. We do this in parallel with
-        // the backend call — worst case the metadata flip lands a tick
-        // later and the user sees one extra fade-in, never a redirect.
-        try {
-          await clearNeedsOnboardingFlag(user?.user_id);
-        } catch {
-          /* non-blocking; we still allow navigation below */
-        }
         if (!cancelled) setCounters(res?.counters || {});
       } catch {
         // Even if the activation call fails we don't want to trap the
@@ -60,6 +51,16 @@ export default function StepReady() {
         // the inbox — they can re-trigger Simulation Mode from Settings.
         if (!cancelled) setCounters({ conversations: 0, opportunities: 0, contacts: 0, events: 0 });
       } finally {
+        // Reaching this screen completes the flow, whether or not the
+        // activation call succeeded: mark Supabase user_metadata so
+        // ProtectedRoute stops sending the user back to /welcome. The
+        // dismissal is remembered at once for this session; the write
+        // itself is not awaited (a hanging network must not keep the
+        // loader up) and a failure only means the next login re-checks.
+        clearNeedsOnboardingFlag(user?.user_id).catch((err) => {
+          // eslint-disable-next-line no-console
+          console.warn('[welcome] could not clear needs_onboarding:', err?.message || err);
+        });
         if (!cancelled) setLoading(false);
       }
     })();

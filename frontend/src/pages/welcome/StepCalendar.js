@@ -56,7 +56,9 @@ export default function StepCalendar() {
   };
 
   const handleSkip = () => {
-    // Never downgrade a real connection made earlier in this flow.
+    // Never downgrade a real connection made earlier in this flow. The
+    // progress is per user and dropped when the flow ends (welcomeSession),
+    // so 'real' here is always this user's own, current OAuth.
     if (state.calendar_connection_mode !== 'real') {
       markStepSkipped('calendar');
       markStepConnected('calendar', 'demo');

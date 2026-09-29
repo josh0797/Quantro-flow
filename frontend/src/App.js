@@ -88,12 +88,13 @@ function AppRoutes() {
       />
       {/* Welcome flow (Phase 7d) — multi-step activation experience for
           new signups. Lives OUTSIDE the AppShell so each step gets a
-          full-screen Apple-style canvas. bypassOnboarding prevents the
-          ProtectedRoute from looping back here once the flow is done. */}
+          full-screen Apple-style canvas. welcomeFlow runs the onboarding
+          gate once on entry: existing workspaces (bookmark, old tab, OAuth
+          return) are sent to the app instead of redoing the flow. */}
       <Route
         path="/welcome"
         element={
-          <ProtectedRoute bypassOnboarding>
+          <ProtectedRoute welcomeFlow>
             <OnboardingShell />
           </ProtectedRoute>
         }

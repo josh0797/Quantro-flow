@@ -11,6 +11,7 @@ import {
   syncGoogleData,
   syncMicrosoftData,
 } from '../lib/api';
+import { CONNECT_NEW_HOME } from '../routes/legacyRedirects';
 
 /**
  * DataModeBanner — persistent honesty strip rendered above /smart-inbox
@@ -18,7 +19,11 @@ import {
  *
  *   • DEMO  — neither Google nor Microsoft is connected. We tell the
  *             user the data they're seeing is sample data and offer a
- *             one-tap path to /welcome/inbox so they can connect.
+ *             one-tap path to Settings → Integrations (Quantro Connect)
+ *             so they can connect or reconnect. Never the Welcome flow:
+ *             this banner lives inside the app, and restarting
+ *             onboarding would walk an existing workspace through the
+ *             activation steps again (the last one re-seeds it).
  *   • REAL  — at least one provider is connected. We show the account
  *             email, the last_sync_at relative time, and a manual
  *             "Sincronizar ahora" trigger so power users don't have to
@@ -71,7 +76,7 @@ export default function DataModeBanner({ module = 'inbox' }) {
     null;
 
   const handleConnect = () => {
-    navigate(module === 'schedule' ? '/welcome/calendar' : '/welcome/inbox');
+    navigate(CONNECT_NEW_HOME);
   };
 
   const handleSync = async () => {
