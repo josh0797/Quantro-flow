@@ -633,7 +633,6 @@ export const translations = {
       onboarding: 'Onboarding de Equipo',
       content_engine: 'Motor de Contenido',
       automation: 'Automatización',
-      connect: 'Connect',
       quantro_actions: 'Actions',
       members: 'Miembros',
       settings: 'Configuración',
@@ -768,7 +767,6 @@ export const translations = {
     integrations: {
       groups: {
         ai: 'IA e Inteligencia',
-        email: 'Correo y Calendario',
         crm: 'CRM',
         automation: 'Webhooks y Endpoints',
       },
@@ -824,11 +822,6 @@ export const translations = {
         coming_soon_badge: 'Próximamente',
         coming_soon_description: 'Los webhooks entrantes todavía no están disponibles. Estamos trabajando en esta función.',
       },
-      real_connect: {
-        title: 'Conectar Gmail / Calendar',
-        description: 'La conexión real de Gmail y Google Calendar se hace por OAuth, no con un formulario. Usa el flujo de bienvenida para autorizar tu cuenta de Google.',
-        cta: 'Conectar bandeja real',
-      },
       toasts: {
         connected: '{{provider}} conectado exitosamente',
         disconnected: '{{provider}} desconectado',
@@ -845,8 +838,6 @@ export const translations = {
       title: 'Quantro Connect',
       subtitle: 'Conecta las herramientas que Quantro puede entender y usar para actuar.',
       search_placeholder: 'Buscar proveedores…',
-      manage_here_note: 'Administra tus integraciones en Quantro Connect',
-      go_to_connect: 'Ir a Quantro Connect',
       categories: {
         all: 'Todas',
         productivity: 'Comunicación y Calendario',
@@ -890,6 +881,7 @@ export const translations = {
         actions_none: 'Este proveedor todavía no tiene acciones registradas.',
         activity_none: 'Sin actividad reciente.',
         permission_required: 'Permiso requerido',
+        reconnect: 'Reconectar',
       },
       facturapi_modal: {
         title: 'Conectar Facturapi',
@@ -908,6 +900,8 @@ export const translations = {
         sync_fail: 'La sincronización falló',
         load_failed: 'No se pudieron cargar los proveedores',
         action_failed: 'La operación falló',
+        connect_failed: 'No se pudo conectar {{provider}}',
+        permission_missing: '{{provider}} quedó conectado con permisos incompletos. Revisa la pestaña Permisos.',
       },
     },
 
@@ -1966,7 +1960,6 @@ export const translations = {
       onboarding: 'Team Onboarding',
       content_engine: 'Content Engine',
       automation: 'Automation',
-      connect: 'Connect',
       quantro_actions: 'Actions',
       members: 'Members',
       settings: 'Settings',
@@ -2101,7 +2094,6 @@ export const translations = {
     integrations: {
       groups: {
         ai: 'AI & Intelligence',
-        email: 'Email & Calendar',
         crm: 'CRM',
         automation: 'Webhooks & Endpoints',
       },
@@ -2155,11 +2147,6 @@ export const translations = {
         coming_soon_badge: 'Coming Soon',
         coming_soon_description: 'Inbound webhooks are not available yet. We are working on this feature.',
       },
-      real_connect: {
-        title: 'Connect Gmail / Calendar',
-        description: 'Real Gmail and Google Calendar connection happens via OAuth, not a form. Use the welcome flow to authorize your Google account.',
-        cta: 'Connect real inbox',
-      },
       toasts: {
         connected: '{{provider}} connected successfully',
         disconnected: '{{provider}} disconnected',
@@ -2176,8 +2163,6 @@ export const translations = {
       title: 'Quantro Connect',
       subtitle: 'Connect the tools Quantro can understand and act through.',
       search_placeholder: 'Search providers…',
-      manage_here_note: 'Manage integrations in Quantro Connect',
-      go_to_connect: 'Go to Quantro Connect',
       categories: {
         all: 'All',
         productivity: 'Communication & Calendar',
@@ -2221,6 +2206,7 @@ export const translations = {
         actions_none: 'This provider has no registered actions yet.',
         activity_none: 'No recent activity.',
         permission_required: 'Permission required',
+        reconnect: 'Reconnect',
       },
       facturapi_modal: {
         title: 'Connect Facturapi',
@@ -2239,6 +2225,8 @@ export const translations = {
         sync_fail: 'Sync failed',
         load_failed: 'Could not load providers',
         action_failed: 'The operation failed',
+        connect_failed: 'Could not connect {{provider}}',
+        permission_missing: '{{provider}} is connected with missing permissions. Check the Permissions tab.',
       },
     },
 

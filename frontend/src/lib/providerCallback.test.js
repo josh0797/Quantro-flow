@@ -49,6 +49,10 @@ describe('new UI strings are bilingual', () => {
     'welcome.sync.in_progress',
     'welcome.sync.in_progress_hint',
     'welcome.preview.sync_in_progress',
+    'connect.drawer.reconnect',
+    'connect.toasts.connect_failed',
+    'connect.toasts.permission_missing',
+    'settings.tabs.integrations',
   ])('%s exists in es and en', (key) => {
     expect(typeof resolve(translations.es, key)).toBe('string');
     expect(typeof resolve(translations.en, key)).toBe('string');

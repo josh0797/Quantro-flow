@@ -5958,6 +5958,12 @@ def _frontend_base_url() -> str:
 # Keeps /start + the callback from ever building a redirect to an
 # arbitrary attacker-supplied path (open redirect via ?return_to=).
 # Absolute URLs, protocol-relative (//evil), hosts, and unknown paths → default.
+#
+# The web app's integrations UI (Quantro Connect) lives in Settings →
+# Integrations and starts OAuth with return_to="/settings" (Settings opens
+# on that tab). "/connect" is the pre-merge page: the SPA redirects it —
+# query string included — to /settings/integrations, so keep it allowed
+# for OAuth states and links created before the merge.
 ALLOWED_OAUTH_RETURN_PATHS = {
     "/connect",
     "/actions",

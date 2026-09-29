@@ -290,16 +290,37 @@ async def test_quantro_invoicing_missing_config():
 
 # ── Connect catalog: no removed providers / no Facturapi branding ─────
 
+# Quantro Connect UI was merged into Settings → Integrations
+# (frontend/src/components/ConnectPanel.js); /connect redirects there.
+CONNECT_PANEL = "frontend/src/components/ConnectPanel.js"
+
+
 def test_connect_js_has_no_removed_providers_or_facturapi_branding():
     from pathlib import Path
     root = Path(__file__).resolve().parents[2]
-    connect = (root / "frontend/src/pages/Connect.js").read_text()
+    connect = (root / CONNECT_PANEL).read_text()
     for banned in ("QuickBooks", "Xero", "Salesforce", "HubSpot", "Shopify", "COMING_SOON", "ComingSoonCard", "FacturapiConnectDialog", "Facturapi"):
-        assert banned not in connect, f"Connect.js still references {banned}"
+        assert banned not in connect, f"ConnectPanel.js still references {banned}"
     assert "quantro_invoicing" in connect or "Receipt" in connect
-    assert "return_to='/settings'" not in connect.replace('"', "'")
-    assert "startGoogleOAuth('/connect')" in connect
-    assert "startMicrosoftOAuth('/connect')" in connect
+    # OAuth started from Connect returns to Settings (allowlisted path that
+    # opens on the Integrations tab), never to the retired /connect page.
+    assert "CONNECT_OAUTH_RETURN_PATH = '/settings'" in connect
+    assert "startGoogleOAuth(CONNECT_OAUTH_RETURN_PATH)" in connect
+    assert "startMicrosoftOAuth(CONNECT_OAUTH_RETURN_PATH)" in connect
+    assert "startGoogleOAuth('/connect')" not in connect
+    assert "startMicrosoftOAuth('/connect')" not in connect
+
+
+def test_legacy_connect_page_redirects_to_settings_integrations():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    assert not (root / "frontend/src/pages/Connect.js").exists()
+    redirects = (root / "frontend/src/routes/legacyRedirects.js").read_text()
+    assert "CONNECT_NEW_HOME = '/settings/integrations'" in redirects
+    assert "{ path: '/connect'," in redirects
+    assert "{ path: '/connect/*'," in redirects
+    # Query string survives (OAuth callbacks that still target /connect).
+    assert "search: location.search" in redirects
 
 
 def test_connect_translations_no_facturapi_in_status_labels():
@@ -307,7 +328,7 @@ def test_connect_translations_no_facturapi_in_status_labels():
     root = Path(__file__).resolve().parents[2]
     # Visible Connect status / provider strings should not push Facturapi branding.
     # Historical migration docs may still mention it; this asserts UI source.
-    connect = (root / "frontend/src/pages/Connect.js").read_text()
+    connect = (root / CONNECT_PANEL).read_text()
     assert "Facturapi" not in connect
 
 
