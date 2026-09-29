@@ -10,7 +10,7 @@ copy of "how do we create a calendar event / contact / onboarding
 agent" in the codebase.
 
 Deps expected in ActionContext.deps:
-    calendar_col, contacts_col, agents_col, onboarding_col — Mongo collections
+    calendar_col, contacts_col, agents_col, onboarding_col, inbox_col — Mongo collections
     log_activity — async fn(event_type, title, description, related_id=None, related_type=None, *, workspace_id)
                    (workspace_id is required; every call passes ctx.workspace_id)
     is_simulation_mode — async fn(workspace_id) -> bool
@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from ..base import ActionContext, ActionResult
 
@@ -41,6 +41,19 @@ def _now_iso() -> str:
 def _effective_simulation(ctx: ActionContext, input: Dict[str, Any]) -> bool:
     """True when this write must be sandbox-tagged."""
     return bool(ctx.dry_run) or bool(input.get("is_simulation"))
+
+
+async def _own_inbox_id(ctx: ActionContext, related_id: Any) -> Optional[str]:
+    """``related_id`` when it names an inbox item of ctx.workspace_id, else None.
+
+    followup.send / review.flag / inbox.ignore can be run by any member with
+    arbitrary input (POST /api/actions/{id}/execute): an id of another
+    workspace's item must not be linked from this workspace's activity row.
+    The inbox auto-execute path always passes the item's own id."""
+    if not related_id:
+        return None
+    item = await ctx.dep("inbox_col").find_one({"workspace_id": ctx.workspace_id, "inbox_id": str(related_id)})
+    return str(related_id) if item else None
 
 
 async def calendar_event_create(ctx: ActionContext, input: dict) -> ActionResult:
@@ -151,7 +164,7 @@ async def followup_send(ctx: ActionContext, input: dict) -> ActionResult:
     await log_activity(
         "inbox", f"Follow-up auto-queued ({ctx.source})",
         f"Follow-up for {input.get('recipient_name', 'contact')} queued automatically",
-        input.get("related_id"), "inbox", workspace_id=ctx.workspace_id,
+        await _own_inbox_id(ctx, input.get("related_id")), "inbox", workspace_id=ctx.workspace_id,
     )
     status = "simulated" if ctx.dry_run else "succeeded"
     return ActionResult(status=status, result_metadata={"queued": True})
@@ -162,7 +175,7 @@ async def review_flag(ctx: ActionContext, input: dict) -> ActionResult:
     await log_activity(
         "inbox", f"Flagged for review ({ctx.source})",
         input.get("reason") or "Flagged for manual review",
-        input.get("related_id"), "inbox", workspace_id=ctx.workspace_id,
+        await _own_inbox_id(ctx, input.get("related_id")), "inbox", workspace_id=ctx.workspace_id,
     )
     status = "simulated" if ctx.dry_run else "succeeded"
     return ActionResult(status=status, result_metadata={"flagged": True})
@@ -173,7 +186,7 @@ async def inbox_ignore(ctx: ActionContext, input: dict) -> ActionResult:
     await log_activity(
         "inbox", f"Auto-ignored ({ctx.source})",
         f"Message from {input.get('from_name', 'unknown')} auto-ignored (spam/irrelevant)",
-        input.get("related_id"), "inbox", workspace_id=ctx.workspace_id,
+        await _own_inbox_id(ctx, input.get("related_id")), "inbox", workspace_id=ctx.workspace_id,
     )
     status = "simulated" if ctx.dry_run else "succeeded"
     return ActionResult(status=status, result_metadata={"ignored": True})

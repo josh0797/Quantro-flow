@@ -733,6 +733,10 @@ async def parse_ai_json(response_text):
 # event reached log_activity without a workspace and was NOT written.
 ACTIVITY_NO_WORKSPACE = "ACTIVITY_NO_WORKSPACE"
 _activity_logger = logging.getLogger("quantro.activity")
+# Set on every event written since the workspace fix (it lands in
+# activity_events.extra). scripts/fix_activity_workspace.py never moves such
+# a row: only events written before the fix can have leaked into "default".
+ACTIVITY_WORKSPACE_EXPLICIT = "workspace_explicit"
 
 
 async def log_activity(event_type, title, description, related_id=None, related_type=None, *, workspace_id: Optional[str]):
@@ -758,6 +762,7 @@ async def log_activity(event_type, title, description, related_id=None, related_
         "timestamp": now_iso(),
         "is_simulation": await is_simulation_mode(workspace_id),
         "workspace_id": workspace_id,
+        ACTIVITY_WORKSPACE_EXPLICIT: True,
     }
     await activity_col.insert_one(event)
     return event
@@ -1077,6 +1082,7 @@ async def seed_database():
     for _a in activity_events:
         _a.setdefault("workspace_id", DEFAULT_WORKSPACE_ID)
         _a.setdefault("is_simulation", True)
+        _a[ACTIVITY_WORKSPACE_EXPLICIT] = True
     await activity_col.insert_many(activity_events)
 
     # Automation Policies (per-intent rules)
@@ -7077,6 +7083,7 @@ action_executor = ActionExecutor(
         "calendar_col": calendar_col,
         "agents_col": agents_col,
         "onboarding_col": onboarding_col,
+        "inbox_col": inbox_col,
         "log_activity": log_activity,
         "google_integrations_col": google_integrations_col,
         "microsoft_integrations_col": microsoft_integrations_col,

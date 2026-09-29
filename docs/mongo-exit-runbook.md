@@ -1,8 +1,9 @@
 # Mongo exit runbook (Quantro Flow → Supabase only)
 
 Goal: nothing in Flow reads or writes MongoDB in production, nothing is lost,
-Mongo's own data is left untouched, `MONGO_URL` stays configured until the
-owner removes it.
+Mongo's own data is left untouched (beyond the app's normal mirror writes —
+step 4b moves the mirror copies of leaked rows the same way; nothing is ever
+deleted), `MONGO_URL` stays configured until the owner removes it.
 
 Pieces:
 
@@ -12,7 +13,7 @@ Pieces:
 | Schema: full unique indexes for the sync upserts (42P10 fix) | konta `supabase/migrations/20261026090600_flow_sync_unique_indexes.sql` (branch `feat/flow-sync-unique-indexes`, stacked on the one above; **apply only after step 2**) |
 | Code (Supabase-only request paths, fail-safe defaults) | this repo, branch `feat/flow-off-mongo` |
 | Backfill (runs on the Fly machine) | `backend/scripts/mongo_to_supabase.py` → `/app/scripts/mongo_to_supabase.py` in the image |
-| Activity-leak repair (runs on the Fly machine) | `backend/scripts/fix_activity_workspace.py` (branch `fix/activity-workspace-leak`, merged after `feat/flow-off-mongo`) — see [Activity workspace repair](#activity-workspace-repair) |
+| Leaked-row repair: activity events + template content (runs on the Fly machine) | `backend/scripts/fix_activity_workspace.py` (branch `fix/activity-workspace-leak`, merged after `feat/flow-off-mongo`) — see [Activity workspace repair](#activity-workspace-repair) |
 | Effective routing, live | `GET /api/ready` → `checks.storage` |
 
 ## What changes
@@ -71,13 +72,17 @@ Live bugs this also fixes (all were silent in production):
 9. `patch_connection` could create token-less `provider_connections` rows that
    later read as "not connected" (the backfill repairs any it finds).
 10. Items generated from a template had no `workspace_id` → never written to
-    Supabase.
+    Supabase (and the startup repair re-tagged the Mongo copy `"default"`:
+    other tenants' drafts in the default workspace). The backfill now gives
+    each such item its template's workspace; step 4b repairs copies already
+    under `"default"`.
 11. (`fix/activity-workspace-leak`) Cross-tenant leak: `log_activity` defaulted
     `workspace_id` to `"default"` and 30 call sites did not pass one, so other
     tenants' inbox senders/subjects/AI summaries, profile changes and
     simulation runs were shown in the `"default"` workspace's activity feed.
     Fixed in code (the event is dropped with an `ACTIVITY_NO_WORKSPACE`
-    WARNING if a workspace is ever missing); existing rows are repaired by
+    WARNING if a workspace is ever missing; every event written since carries
+    `workspace_explicit`); existing rows are repaired by
     `scripts/fix_activity_workspace.py` (step 4b).
 12. (`fix/activity-workspace-leak`) Accepting a Supabase invitation of an org
     that has no Flow workspace (e.g. a Quantro OS invitation) made the
@@ -221,13 +226,23 @@ Before applying, compare the `insert:` ids of `google_integrations`,
 matches a failed mirror delete is a row a user removed — do not let it back
 (delete it again right after the apply, or narrow the run with `--only`).
 
-### 4b. Repair leaked activity rows (**WRITE**, never deletes)
+### 4b. Repair leaked rows (**WRITE**, never deletes)
 
 Requires `fix/activity-workspace-leak` deployed (a normal `fly deploy`, no
-flag changes — it can go out with step 2 or any time after it). Safe at any
-point of the cutover: before or after the backfill, during the 6a soak and
-after 6b. The recommended slot is right here, between the backfill's
-`--apply` and its `--verify`:
+flag changes — it can go out with step 2 or any time after it; the script
+ships in that image). It needs no cutoff time: every event the fixed code
+writes carries `workspace_explicit` and is never looked at, so the default
+workspace's own events written after the deploy always stay where they are,
+and rows an old machine still wrote during the rolling deploy are repaired
+like any other. Safe at any point of the cutover: before or after the
+backfill, during the 6a soak and after 6b, and as often as needed. Run it:
+
+* **today**, right here, between the backfill's `--apply` and its
+  `--verify` (step 5) — the recommended slot;
+* **again at the gate before 6b** (mandatory, see step 6), after that
+  `--apply` of the backfill: it catches any leaked row the backfill just
+  copied from Mongo;
+* after 6b only if a quarantined row's entity shows up later (optional).
 
 ```bash
 fly ssh console -a $APP -C "sh -c 'cd /app && python -m scripts.fix_activity_workspace'"            # dry run
@@ -235,14 +250,18 @@ fly ssh console -a $APP -C "sh -c 'cd /app && python -m scripts.fix_activity_wor
 fly ssh console -a $APP -C "sh -c 'cd /app && python -m scripts.fix_activity_workspace --verify'"   # exit 0
 ```
 
-Read the dry run first: `workspace 'default' members: N` (count only),
-`decisions: keep= reattribute= quarantine=`, `re-attributed to:` (workspace
-ids) and up to 20 event ids per bucket. Rows it cannot attribute go to the
-workspace `__unattributed__`, which nobody can be a member of; a later run
-re-resolves them. Then step 5 (`--verify` of the backfill) must still exit 0
-— the remediation moves the Mongo mirror copy with each Supabase row, and the
-backfill matches activity rows by `event_id` too, so it never re-inserts a
-repaired row under `"default"` (details in
+Read the dry run first: `workspace 'default' members: N` (count only), then
+per dataset (`[content_items]`, `[activity_events]`) the `decisions: keep=
+reattribute= quarantine=`, `re-attributed to:` (workspace ids) and up to 20
+ids per bucket; `scanned rows: …_written_after_fix=` counts the post-fix
+events it skipped. Rows it cannot attribute go to the workspace
+`__unattributed__`, which nobody can be a member of; a later run re-resolves
+them. Every row it moves records `leak_remediation` (from/to/reason/at — no
+content) on the row itself, so the complete list survives (SQL below). Then
+step 5 (`--verify` of the backfill) must still exit 0 — the remediation moves
+the Mongo mirror copy with each Supabase row, the backfill matches activity
+rows by `event_id` too and gives template items their template's workspace,
+so it never re-inserts a repaired row under `"default"` (details in
 [Activity workspace repair](#activity-workspace-repair)).
 
 ### 5. Verify (read-only)
@@ -300,8 +319,9 @@ below. Each `STORE_DRIFT` line names a row to review by hand.
 **Gate before 6b (mandatory, mirrors still on):** immediately before 6b, run
 step 4 (`--apply`; it now uses `fill` for every domain), step 4b
 (`fix_activity_workspace --apply`, then `--verify`, both exit 0 — it catches
-any leaked row the apply just copied from Mongo) and step 5 (`--verify`,
-exit 0). Then check that no new `MONGO_ONLY` line appeared since the verify
+any leaked row the apply just copied from Mongo; the default workspace's own
+activity since the deploy is never touched, so members may keep working) and
+step 5 (`--verify`, exit 0). Then check that no new `MONGO_ONLY` line appeared since the verify
 started (`fly logs -a $APP --no-tail | grep MONGO_ONLY`); if one did, repeat the
 gate. Anything written only to Mongo after this point would be lost at 6b.
 
@@ -358,7 +378,11 @@ once), disconnect/reconnect on a test workspace; System health card.
    `sync_lock.acquire_sync_lock_lease`, and the startup repairs that only
    run on Mongo (`_legacy_repair_targets`).
 3. `fly secrets unset MONGO_URL` and decide what to do with the Atlas cluster
-   (this runbook never modifies Mongo data).
+   (this runbook never deletes Mongo data; apart from the app's own mirror
+   writes, only step 4b changed Mongo documents: the mirror copies of leaked
+   activity rows / template content items got their real `workspace_id`,
+   `is_simulation` for activity, and a `leak_remediation` field recording
+   where they came from).
 
 ## Backfill reference
 
@@ -370,7 +394,7 @@ once), disconnect/reconnect on a test workspace; System health card.
 | calendar_events | `calendar_events` | (ws, provider, external id) or (ws, event_id) | calendar |
 | integrations_config | `integrations_config` | (ws, provider); newest duplicate wins | integrations |
 | inbox_items | `inbox_items` | (ws, inbox_id), else (ws, gmail_id)/(ws, ms_id) | inbox |
-| contacts, content_items, content_templates | same names | (ws, app id) | contacts/content |
+| contacts, content_items, content_templates | same names | (ws, app id); a content item generated from a template whose own `workspace_id` is missing/`default`/`__unattributed__` takes its template's workspace (template gone: `__unattributed__` if it had none, else it stays) | contacts/content |
 | activity_events | same name | (ws, event_id), else event_id alone (a row `fix_activity_workspace` moved to another workspace is never inserted again under the Mongo copy's workspace) | activity |
 | action_executions / automation_policies / action_policies | same names | execution_id / policy_id / (ws, action_id) | actions |
 | google_integrations, microsoft_integrations, facturapi_connections | `provider_connections` | (ws, provider) | secrets (token-less rows repaired) |
@@ -386,7 +410,12 @@ stale Mongo refused, or missing env.
 
 Legacy defaults applied while copying (the startup repairs used to apply
 them in Mongo): missing `workspace_id` → `default`; missing `is_simulation`
-→ `true` on the operational collections. Legacy plaintext secrets in
+→ `true` on the operational collections. **Except** content items generated
+from a template (they carry `template_id`): until the workspace fixes those
+were written without `workspace_id` by any tenant, so "legacy → default"
+would copy other tenants' drafts into the default workspace; they take their
+template's workspace instead (templates are always workspace-scoped), notes
+`workspace_from_template` / `workspace_unattributed`. Legacy plaintext secrets in
 `integrations_config.config` are encrypted with the machine's key (or skipped
 and counted if no key is configured). The trigger-managed `updated_at` column
 is never compared or patched.
@@ -397,11 +426,25 @@ is never compared or patched.
 (branch `fix/activity-workspace-leak`; runbook step 4b and the gate before 6b).
 
 Until that branch, `log_activity` stored events without an explicit workspace
-under `"default"`. The script looks at every `activity_events` row under
-`"default"` (and under the quarantine workspace `__unattributed__`) and
-resolves its real workspace from `related_type` / `related_id`, reading the
-entity through the app's own store facades — so it is found wherever it lives
-at that moment of the cutover:
+under `"default"`; and (same bug class) content items generated from a
+template were stored without `workspace_id` and re-tagged `"default"`. The
+script reads every entity through the app's own store facades — so it is
+found wherever it lives at that moment of the cutover — and handles:
+
+**content_items** carrying `template_id` whose own workspace is `"default"`,
+`__unattributed__` or missing (Supabase rows, and Mongo copies while content
+is mirrored): the item belongs to its template's workspace (the generate
+endpoint loaded the template scoped to the caller). Template gone: an item
+without a workspace is quarantined, a `"default"` one stays. Same rule as the
+backfill (`template_content_workspace`), so the two always agree.
+`is_simulation` is left as it is (the mode the draft was generated in is
+unknown; the legacy default is the sandbox).
+
+**activity_events** under `"default"` (and under the quarantine workspace
+`__unattributed__`) **written before the fix** — rows carrying
+`workspace_explicit` (every event written since the deploy) are skipped and
+only counted. Each remaining row's real workspace comes from `related_type` /
+`related_id`:
 
 | related_type (who logs it) | entity looked up | where it lives |
 |---|---|---|
@@ -410,43 +453,64 @@ at that moment of the cutover:
 | `contact` (contact created) | contact by `contact_id` | `contacts` (Supabase-primary) |
 | `agent` (onboarding started, new agent, onboarding task) | agent by `agent_id` | `flow_documents` / `agents` (docs: Mongo-primary until 6a) |
 | `policy` (policy updated) | automation policy by `policy_id` | `automation_policies` (Supabase-primary) |
-| `content`, `template`, `escalation` (already workspace-scoped call sites) | by `content_id` / `template_id` / `rule_id` | `content_items`, `content_templates`, `flow_documents` / `escalation_rules` |
+| `content` ("Content from template", content generated) | content item by `content_id`, then its template as above | `content_items` / `content_templates` (Supabase-primary) |
+| `template`, `escalation` (already workspace-scoped call sites) | by `template_id` / `rule_id` | `content_templates`, `flow_documents` / `escalation_rules` |
 | `profile` (business profile updated) | `related_id` **is** the workspace id | `flow_documents` / `workspaces` |
 
-Decision per event (counts and ids are printed, never titles/descriptions):
+Decision per row (counts and ids are printed, never titles/descriptions/bodies):
 
 * **keep** — the entity belongs to `"default"`, or the row has no entity and
   no leaking call site could have written it (seed "System initialized",
-  the simulation generator, integration updates);
+  integration updates), or the owner reviewed it (`leak_review =
+  "kept_default"`, below);
 * **reattribute** — the entity belongs to another workspace: `workspace_id`
   and `is_simulation` are taken from the entity (or that workspace's current
   Simulation Mode when the entity has no flag, e.g. policies, profiles);
-* **quarantine** → `__unattributed__` — the entity no longer exists, or the
-  row comes from a leaking call site that logged no entity ("Batch triage
-  complete", "Batch approval complete", "Content generated", "Simulation data
-  generated / auto-generated / cleared"). Nobody can be a member of that
-  workspace, so nobody sees these rows; they are never deleted;
+* **quarantine** → `__unattributed__` — the entity no longer exists or has
+  no workspace itself, or the row comes from a leaking call site that logged
+  no entity ("Batch triage complete", "Batch approval complete", "Content
+  generated", "Simulation data generated / auto-generated / cleared").
+  Nobody can be a member of that workspace, so nobody sees these rows; they
+  are never deleted;
 * **restore** / reattribute from quarantine — a later run re-resolves
   quarantined rows (e.g. the entity was copied by the backfill since).
 
+Every moved row gets `leak_remediation = {"from", "to", "reason", "at"}`
+(Supabase `extra`; the Mongo copy gets the same field while mirrored).
+`from` stays the workspace the row originally sat in across later moves.
+That is the impact record of the leak — which events sat under `"default"`
+and where they belong:
+
+```sql
+select event_id, workspace_id, extra->'leak_remediation' as moved
+  from activity_events where extra ? 'leak_remediation';
+select content_id, workspace_id, extra->'leak_remediation' as moved
+  from content_items where extra ? 'leak_remediation';
+```
+
 Cutover safety (why `--apply` then `--verify` of the backfill still exits 0):
 
-1. The script writes through the same dual-write facade as the app
-   (`product_domain_store.wrap_activity_col`). While the activity mirror is on,
-   the Mongo copy moves with the Supabase row, and Mongo copies still under
-   `"default"` (including rows only Mongo has, `MONGO_ONLY`) are found and
-   moved too — the backfill, keyed on `(workspace_id, event_id)`, then sees the
-   same row on both sides. After 6b Mongo is not touched.
-2. If a mirror write fails anyway (`STORE_DRIFT`), the Mongo copy stays under
-   `"default"`. Supabase's only unique key is `(workspace_id, event_id)`
-   (konta `20260918210000`), so the backfill would insert it again there.
-   It therefore also matches activity rows by `event_id` alone (a uuid) and
-   never patches `workspace_id`: the stale copy is reported as `same` (note
-   `matched_by_alt_key`). The remediation's `--apply` exits 1 in that case
-   (`remaining moves after apply` > 0: the Mongo copies); re-run it once Mongo
-   is reachable.
-3. A Supabase duplicate (the same event already under its real workspace) is
-   moved to the quarantine workspace instead of hitting the unique key.
+1. The script writes through the same dual-write facades as the app
+   (`product_domain_store.wrap_activity_col` / `wrap_content_items_col`).
+   While a mirror is on, the Mongo copy moves with the Supabase row, and
+   Mongo copies still under `"default"` or untagged (including rows only
+   Mongo has, `MONGO_ONLY`) are found and moved too — the backfill then sees
+   the same row on both sides. After 6b Mongo is not touched.
+2. If a mirror write fails anyway (`STORE_DRIFT`), the Mongo copy stays
+   behind. Supabase's only unique key is `(workspace_id, event_id)` /
+   `(workspace_id, content_id)` (konta `20260918210000`), so a naive backfill
+   would insert it again under `"default"`. It does not: activity rows are
+   also matched by `event_id` alone (a uuid) and `workspace_id` is never
+   patched (the stale copy is reported as `same`, note `matched_by_alt_key`);
+   template items are keyed on their template's workspace. The remediation's
+   `--apply` exits 1 in that case (`remaining moves after apply` > 0: the
+   Mongo copies); re-run it once Mongo is reachable.
+3. A Supabase duplicate (the same row already under its real workspace, e.g.
+   the backfill inserted a template item under its template's workspace
+   while an older copy sat under `"default"`) is moved to the quarantine
+   workspace instead of hitting the unique key.
+4. Events the default workspace's members write during the soak carry
+   `workspace_explicit` and are never moved, so the gate does not flap.
 
 Exit codes: 0 ok · 1 errors, anything left to move after `--apply` or under
 `--verify` · 2 `missing env` (`SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY`,
@@ -457,15 +521,23 @@ Check in the Supabase SQL editor (read-only):
 ```sql
 select workspace_id, count(*) from activity_events
  where workspace_id in ('default', '__unattributed__') group by 1;
-select event_id from activity_events group by 1 having count(*) > 1;   -- expect no rows
+select event_id from activity_events group by 1 having count(*) > 1;   -- only rows kept in quarantine as duplicates
 ```
 
-Reverting a quarantine by hand is never needed for correctness (a re-run
-re-resolves it). If the owner wants specific quarantined rows back in
-`"default"` anyway, do it after 6b (before that, the script is the only writer
-that also moves the Mongo copy):
+**Keeping a quarantined row in `"default"` after review.** Reverting a
+quarantine is never needed for correctness. If the owner decides specific
+quarantined rows are the default workspace's own, set the review tag in the
+same statement — without it the next run cannot tell the decision from a
+leaked row: `--verify` exits 1 and `--apply` quarantines the row again.
 
 ```sql
-update activity_events set workspace_id = 'default'
+update activity_events
+   set workspace_id = 'default',
+       extra = coalesce(extra, '{}'::jsonb) || '{"leak_review": "kept_default"}'::jsonb
  where workspace_id = '__unattributed__' and event_id in ('<ids from the report>');
 ```
+
+Every later run keeps a tagged row in `"default"`. Safe at any time: while
+the activity mirror is still on, the next `--apply` also moves the row's
+Mongo copy to `"default"` (until then the backfill matches it by
+`event_id`, so it inserts nothing).

@@ -344,6 +344,53 @@ async def test_stale_refusal_is_per_domain_and_overridable(env, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_template_content_items_take_their_templates_workspace_never_default(env):
+    """Until the workspace fixes, POST /api/templates/{id}/generate stored the
+    item without workspace_id (the startup repair re-tagged it "default"),
+    although the template was loaded scoped to the caller. The legacy rule
+    would copy other tenants' drafts into the default workspace; the item
+    takes its template's workspace instead, or the quarantine workspace when
+    the template is gone — never "default"."""
+    fake = env
+    fake.rows["content_templates"].append({
+        "id": "tpl-sb-pk", "workspace_id": "ws_c", "template_id": "tpl-sb", "name": "SB", "is_default": False,
+        "is_simulation": False, "hidden_by_real": False, "extra": {},
+        "created_at": "2026-09-01T00:00:00+00:00", "updated_at": "2026-09-01T00:00:00+00:00",
+    })
+
+    def item(n: int, cid: str, tpl: str, **kw: Any) -> Dict[str, Any]:
+        return {"_id": oid(n), "content_id": cid, "type": "email_draft", "title": "ACME offer - Jane Victim",
+                "content": {"body": SECRET_BODY}, "created_by": "ai_template", "template_id": tpl, **kw}
+
+    data = {
+        "content_templates": [
+            {"_id": oid(90), "workspace_id": "ws_a", "template_id": "tpl1", "name": "Welcome"},
+            {"_id": oid(91), "workspace_id": "default", "template_id": "tpl-d", "name": "Own"},
+        ],
+        "content_items": [
+            item(92, "untagged", "tpl1"),
+            item(93, "retagged", "tpl1", workspace_id="default", is_simulation=True),
+            item(94, "sb-template", "tpl-sb"),
+            item(95, "own", "tpl-d", workspace_id="default", is_simulation=True),
+            item(96, "orphan", "tpl-gone"),
+            item(97, "own-orphan", "tpl-gone", workspace_id="default", is_simulation=True),
+            item(98, "explicit", "tpl1", workspace_id="ws_b", is_simulation=False),
+        ],
+    }
+    source = FakeSource(data)
+    report = await bf.run(source, fake.request, apply=True)
+    assert bf.exit_code(report) == 0, bf.render(report)
+    rows = {r["content_id"]: r["workspace_id"] for r in fake.rows["content_items"]}
+    assert rows == {"untagged": "ws_a", "retagged": "ws_a", "sb-template": "ws_c", "own": "default",
+                    "orphan": bf.QUARANTINE_WORKSPACE_ID, "own-orphan": "default", "explicit": "ws_b"}
+    notes = by(report, "content_items")["notes"]
+    assert notes["workspace_from_template"] == 3 and notes["workspace_unattributed"] == 1
+    assert SECRET_BODY not in bf.render(report)
+    verify = await bf.run(source, fake.request, apply=False)
+    assert bf.exit_code(verify, verify=True) == 0, bf.render(verify, verify=True)
+
+
+@pytest.mark.asyncio
 async def test_fill_takes_new_columns_only_while_they_hold_the_default(env):
     """Finding 1 (second half): under ``fill`` a column the migration added
     comes from Mongo only while Supabase still holds its default; a value
