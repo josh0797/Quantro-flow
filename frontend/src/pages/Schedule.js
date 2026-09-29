@@ -162,7 +162,7 @@ export default function Schedule() {
   return (
     <div className="page-container relative z-[1]">
       {/* Persistent honesty banner — surfaces "Modo demo / Datos
-          reales" with a one-tap connect for /welcome/calendar. */}
+          reales" with a one-tap connect to Settings → Integrations. */}
       <DataModeBanner module="schedule" />
 
       <div className="flex items-center justify-between mb-6">

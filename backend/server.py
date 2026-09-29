@@ -5958,6 +5958,12 @@ def _frontend_base_url() -> str:
 # Keeps /start + the callback from ever building a redirect to an
 # arbitrary attacker-supplied path (open redirect via ?return_to=).
 # Absolute URLs, protocol-relative (//evil), hosts, and unknown paths → default.
+#
+# The web app's integrations UI (Quantro Connect) lives in Settings →
+# Integrations and starts OAuth with return_to="/settings" (Settings opens
+# on that tab). "/connect" is the pre-merge page: the SPA redirects it —
+# query string included — to /settings/integrations, so keep it allowed
+# for OAuth states and links created before the merge.
 ALLOWED_OAUTH_RETURN_PATHS = {
     "/connect",
     "/actions",
@@ -6003,6 +6009,29 @@ def _safe_oauth_error_code(raw: Optional[str]) -> str:
     return code if code in _KNOWN_OAUTH_ERROR_CODES else "oauth_error"
 
 
+async def _consume_callback_state(provider: str, mongo_col, state: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Consume the OAuth ``state`` row for a provider callback, if any.
+
+    Called BEFORE the callback looks at ``?error=``: when the user presses
+    Cancel on the consent screen the provider still sends ``state`` back,
+    and the row tells us which page started the flow (Settings →
+    Integrations sends ``/settings``). Every exit — error, expired state,
+    success — must bounce there, not to the Welcome onboarding default.
+    Consuming it also makes a cancelled state unusable. A store failure
+    is logged and treated as "no state" (the callback then bounces with
+    ``invalid_state`` instead of a raw 500 on the API domain).
+    """
+    if not state:
+        return None
+    try:
+        return await secrets_store.consume_oauth_state(
+            provider=provider, mongo_col=mongo_col, state=state,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{provider}_oauth_callback] could not read OAuth state: {type(exc).__name__}")
+        return None
+
+
 @app.get("/api/integrations/google/callback")
 async def google_oauth_callback(
     request: Request,
@@ -6030,20 +6059,22 @@ async def google_oauth_callback(
             status_code=500,
         )
     base_redirect = fe
-    return_path = DEFAULT_OAUTH_RETURN_PATH  # updated once we trust state_doc below
+    return_path = DEFAULT_OAUTH_RETURN_PATH  # only when there is no usable state
 
     def _bounce(qs: str) -> RedirectResponse:
         target = base_redirect + return_path + ("?" + qs if qs else "")
         return RedirectResponse(url=target, status_code=303)
 
+    # Read the state first (even on ?error=) so every outcome returns to
+    # the page that started the flow; return_to is allowlist-sanitized.
+    state_doc = await _consume_callback_state("google", google_oauth_state_col, state)
+    if state_doc:
+        return_path = _sanitize_return_to(state_doc.get("return_to"))
+
     if error:
         return _bounce(f"google_connected=error&reason={_safe_oauth_error_code(error)}")
     if not code or not state:
         return _bounce("google_connected=error&reason=missing_code_or_state")
-
-    state_doc = await secrets_store.consume_oauth_state(
-        provider="google", mongo_col=google_oauth_state_col, state=state,
-    )
     if not state_doc:
         return _bounce("google_connected=error&reason=invalid_state")
 
@@ -6054,8 +6085,7 @@ async def google_oauth_callback(
     redirect_uri = state_doc.get("redirect_uri") or goog.resolve_redirect_uri(str(request.base_url))
     workspace_id = state_doc.get("workspace_id")
     user_id = state_doc.get("user_id")
-    return_to = _sanitize_return_to(state_doc.get("return_to"))
-    return_path = return_to  # now safe to use the real destination
+    return_to = return_path
 
     try:
         creds, profile = goog.exchange_code_for_tokens(
@@ -6489,20 +6519,22 @@ async def microsoft_oauth_callback(
             status_code=500,
         )
     base_redirect = fe
-    return_path = DEFAULT_OAUTH_RETURN_PATH
+    return_path = DEFAULT_OAUTH_RETURN_PATH  # only when there is no usable state
 
     def _bounce(qs: str) -> RedirectResponse:
         target = base_redirect + return_path + ("?" + qs if qs else "")
         return RedirectResponse(url=target, status_code=303)
 
+    # Same as Google: read the state before ?error= so a cancel from
+    # Settings → Integrations returns to /settings, not /welcome/inbox.
+    state_doc = await _consume_callback_state("microsoft", microsoft_oauth_state_col, state)
+    if state_doc:
+        return_path = _sanitize_return_to(state_doc.get("return_to"))
+
     if error:
         return _bounce(f"microsoft_connected=error&reason={_safe_oauth_error_code(error)}")
     if not code or not state:
         return _bounce("microsoft_connected=error&reason=missing_code_or_state")
-
-    state_doc = await secrets_store.consume_oauth_state(
-        provider="microsoft", mongo_col=microsoft_oauth_state_col, state=state,
-    )
     if not state_doc:
         return _bounce("microsoft_connected=error&reason=invalid_state")
     expires = state_doc.get("expires_at")
@@ -6512,8 +6544,7 @@ async def microsoft_oauth_callback(
     redirect_uri = state_doc.get("redirect_uri") or msoa.resolve_redirect_uri(str(request.base_url))
     workspace_id = state_doc.get("workspace_id")
     user_id = state_doc.get("user_id")
-    return_to = _sanitize_return_to(state_doc.get("return_to"))
-    return_path = return_to
+    return_to = return_path
 
     try:
         requested_scopes = state_doc.get("requested_scopes") or None

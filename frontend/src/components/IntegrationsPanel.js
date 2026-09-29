@@ -9,8 +9,6 @@ import {
   Check,
   Eye,
   EyeOff,
-  Mail,
-  Calendar,
   Users,
   Sparkles,
   Webhook,
@@ -28,7 +26,6 @@ import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { toast } from 'sonner';
-import { useNavigate } from 'react-router-dom';
 import { useLanguage } from '../context/LanguageContext';
 import { authFetch } from '../lib/authFetch';
 
@@ -120,9 +117,12 @@ const INTEGRATION_MANIFEST = [
   },
 ];
 
+// Gmail / Outlook (mail + calendar) are no longer a group here: they are
+// Quantro Connect providers, rendered by <ConnectPanel /> (passed in as
+// `children` from Settings → Integrations) with connect / reconnect /
+// sync / disconnect / permissions in one place.
 const GROUPS = [
   { key: 'ai', i18nKey: 'integrations.groups.ai', icon: Sparkles },
-  { key: 'email', i18nKey: 'integrations.groups.email', icon: Mail },
   { key: 'crm', i18nKey: 'integrations.groups.crm', icon: Users },
   { key: 'automation', i18nKey: 'integrations.groups.automation', icon: Webhook },
 ];
@@ -353,36 +353,6 @@ function CopyableEndpoint({ url, testId }) {
         {copied ? <Check size={14} /> : <Copy size={14} />}
       </Button>
     </div>
-  );
-}
-
-function RealConnectCard({ t }) {
-  const navigate = useNavigate();
-  return (
-    <Card
-      data-testid="email-real-connect-card"
-      className="p-6 bg-[hsl(var(--card))] border-[hsl(var(--border))]"
-    >
-      <div className="flex items-start gap-4">
-        <div className="w-11 h-11 shrink-0 rounded-lg bg-gradient-to-br from-red-500 to-orange-500 flex items-center justify-center text-white shadow-sm">
-          <Mail size={20} />
-        </div>
-        <div className="flex-1 min-w-0 space-y-3">
-          <div>
-            <h3 className="text-base font-semibold text-foreground">{t('integrations.real_connect.title')}</h3>
-            <p className="text-xs text-muted-foreground mt-0.5">{t('integrations.real_connect.description')}</p>
-          </div>
-          <Button
-            size="sm"
-            onClick={() => navigate('/welcome/inbox')}
-            data-testid="email-real-connect-button"
-          >
-            <ExternalLink size={14} className="mr-2" />
-            {t('integrations.real_connect.cta')}
-          </Button>
-        </div>
-      </div>
-    </Card>
   );
 }
 
@@ -619,7 +589,12 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
   );
 }
 
-export default function IntegrationsPanel() {
+/**
+ * IntegrationsPanel — Settings → Integrations. Order: system status,
+ * then `children` (the Quantro Connect provider catalog), then the
+ * key-based integrations (AI provider, CRM, webhooks).
+ */
+export default function IntegrationsPanel({ children }) {
   const { t } = useLanguage();
   const [integrations, setIntegrations] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -734,24 +709,22 @@ export default function IntegrationsPanel() {
     }
   };
 
-  if (loading) {
-    return (
-      <div
-        className="flex items-center justify-center py-16"
-        data-testid="integrations-loading"
-      >
-        <Loader2 className="animate-spin text-muted-foreground" size={32} />
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-6" data-testid="integrations-panel">
       <SystemStatusBanner health={systemHealth} t={t} />
 
-      {GROUPS.map((group) => {
+      {children}
+
+      {loading ? (
+        <div
+          className="flex items-center justify-center py-16"
+          data-testid="integrations-loading"
+        >
+          <Loader2 className="animate-spin text-muted-foreground" size={32} />
+        </div>
+      ) : GROUPS.map((group) => {
         const items = INTEGRATION_MANIFEST.filter((m) => m.group === group.key);
-        if (items.length === 0 && group.key !== 'email') return null;
+        if (items.length === 0) return null;
         const GroupIcon = group.icon;
         return (
           <section
@@ -767,7 +740,6 @@ export default function IntegrationsPanel() {
               <Separator className="flex-1 bg-[hsl(var(--border))]" />
             </div>
             <div className="space-y-3">
-              {group.key === 'email' && <RealConnectCard t={t} />}
               {items.map((m) => (
                 <IntegrationCard
                   key={m.id}
