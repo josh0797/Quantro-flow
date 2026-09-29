@@ -2878,23 +2878,35 @@ async def revoke_invite(
     return {"success": True}
 
 
+async def _workspace_for_org(org_id: Optional[str]) -> Optional[str]:
+    """Reverse of workspace_to_org_id: the Flow workspace of a Supabase org.
+
+    ``None`` when Flow has no workspace for the org. Never the default
+    workspace unless the org IS the configured default org: the shared
+    ``invitations`` table also holds Quantro OS invitations, and mapping an
+    unknown org to "default" let any such invite token add its holder to
+    the default workspace.
+    """
+    if not org_id:
+        return None
+    ws = await workspaces_col.find_one({"org_id": org_id}, {"_id": 0, "workspace_id": 1})
+    if ws and ws.get("workspace_id"):
+        return ws["workspace_id"]
+    if org_id == supabase_admin.resolve_default_org_id():
+        return DEFAULT_WORKSPACE_ID
+    return None
+
+
 async def _resolve_invite_by_token(token: str, access_token: Optional[str] = None) -> Optional[dict]:
     """Resolve an invite from Supabase SoT (preferred) or Mongo mirror."""
     if supabase_admin.is_supabase_primary() or supabase_admin.is_dual_write_enabled():
         try:
             sb = await supabase_admin.get_invitation_by_token(token, access_token)
-            if sb:
-                org_id = sb.get("org_id")
-                workspace_id = DEFAULT_WORKSPACE_ID
-                # Best-effort reverse map org → workspace.
-                try:
-                    ws = await workspaces_col.find_one({"org_id": org_id}, {"_id": 0, "workspace_id": 1})
-                    if ws and ws.get("workspace_id"):
-                        workspace_id = ws["workspace_id"]
-                    elif org_id and org_id == supabase_admin.resolve_default_org_id():
-                        workspace_id = DEFAULT_WORKSPACE_ID
-                except Exception:  # noqa: BLE001
-                    pass
+            org_id = sb.get("org_id") if sb else None
+            # An invitation of an org Flow has no workspace for is not a
+            # Flow invite: fall through to Flow's own invite docs (→ 404).
+            workspace_id = await _workspace_for_org(org_id) if sb else None
+            if sb and workspace_id:
                 return {
                     "invite_id": sb.get("id"),
                     "supabase_invite_id": sb.get("id"),
