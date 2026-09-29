@@ -45,7 +45,13 @@ Guarantees
   ``before update`` trigger rewrites it, so a patch would never converge).
 * Applies the same legacy defaults the startup repairs used to apply in
   Mongo (missing ``workspace_id`` → ``"default"``, missing ``is_simulation``
-  → ``True`` on the operational collections).
+  → ``True`` on the operational collections) — except for content items
+  generated from a template: until the workspace fixes they were stored
+  without ``workspace_id`` (and re-tagged ``"default"`` by the startup
+  repair), so their workspace is taken from their template instead
+  (``template_content_workspace``); an untagged one whose template is gone
+  goes to the quarantine workspace ``__unattributed__``, never to
+  ``"default"``.
 * Plaintext secrets found in legacy ``integrations_config.config`` are
   encrypted with the machine's key before they are written (never stored in
   clear); if no key is configured they are skipped and counted.
@@ -80,6 +86,9 @@ import product_domain_store as pds  # noqa: E402
 from actions import store as actions_store  # noqa: E402
 
 DEFAULT_WORKSPACE_ID = "default"  # server.py DEFAULT_WORKSPACE_ID
+# Rows whose workspace cannot be established: nobody can be a member of it
+# (shared with scripts/fix_activity_workspace.py).
+QUARANTINE_WORKSPACE_ID = "__unattributed__"
 MAX_IDS_PRINTED = 20
 BATCH = 500          # Mongo documents held in memory at a time
 FETCH_CHUNK = 100    # ids per PostgREST ``in.(…)`` lookup (URL length)
@@ -219,6 +228,40 @@ def apply_legacy_defaults(collection: str, doc: Dict[str, Any], stats: Optional[
         if stats is not None:
             stats.bump("default_is_simulation")
     return out
+
+
+def template_workspaces(docs: Iterable[Dict[str, Any]]) -> Dict[str, Set[str]]:
+    """template_id → the workspace(s) holding it: where the backfill puts the
+    template row itself (a legacy untagged template → "default")."""
+    out: Dict[str, Set[str]] = {}
+    for d in docs:
+        tid = d.get("template_id")
+        if tid:
+            ws = apply_legacy_defaults("content_templates", d, None)["workspace_id"]
+            out.setdefault(str(tid), set()).add(ws)
+    return out
+
+
+def template_content_workspace(doc: Dict[str, Any], templates: Dict[str, Set[str]]) -> Optional[str]:
+    """The workspace a content item generated from a template belongs to when
+    its own ``workspace_id`` cannot be trusted; None when it stands.
+
+    Until the workspace fixes, POST /api/templates/{id}/generate stored the
+    item without ``workspace_id`` (the startup repair then re-tagged it
+    "default"), although the template was loaded scoped to the caller's
+    workspace — so the template's workspace is the item's. An item already
+    under another workspace was written with an explicit one and stands.
+    Template gone (or ambiguous): an untagged/quarantined item goes to the
+    quarantine workspace; a "default" one stays (it may be default's own).
+    Shared by the backfill and scripts/fix_activity_workspace.py."""
+    ws = doc.get("workspace_id") or None
+    tid = doc.get("template_id")
+    if not tid or ws not in (None, DEFAULT_WORKSPACE_ID, QUARANTINE_WORKSPACE_ID):
+        return None
+    owners = templates.get(str(tid)) or set()
+    if len(owners) == 1:
+        return next(iter(owners))
+    return None if ws == DEFAULT_WORKSPACE_ID else QUARANTINE_WORKSPACE_ID
 
 
 @dataclass
@@ -495,6 +538,9 @@ class TypedSpec:
     # (row, existing Supabase row) → row; lets a dataset keep equivalent
     # existing values (e.g. ciphertext of the same secret) so re-runs are no-ops.
     reconcile: Optional[Callable[[Dict[str, Any], Dict[str, Any]], Dict[str, Any]]] = None
+    # Awaited once per run: returns raw Mongo doc → workspace that overrides
+    # the doc's own (None = keep it), applied BEFORE the legacy defaults.
+    workspace_of: Optional[Callable[["Supabase", Any], Awaitable[Callable[[Dict[str, Any]], Optional[str]]]]] = None
 
 
 def _k(*cols: str) -> Callable[[Dict[str, Any]], Optional[Tuple]]:
@@ -542,8 +588,15 @@ def _wins_diff(existing: Dict[str, Any], row: Dict[str, Any]) -> Dict[str, Any]:
     return diff
 
 
-def _map(spec: TypedSpec, raw: Dict[str, Any], st: Optional[Stats]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+def _map(spec: TypedSpec, raw: Dict[str, Any], st: Optional[Stats],
+         workspace_of: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
+         ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """(row, None) or (None, reason) — ``st`` counts notes on the first pass only."""
+    ws = workspace_of(raw) if workspace_of else None
+    if ws is not None and ws != raw.get("workspace_id"):
+        raw = {**raw, "workspace_id": ws}
+        if st is not None:
+            st.bump("workspace_unattributed" if ws == QUARANTINE_WORKSPACE_ID else "workspace_from_template")
     doc = apply_legacy_defaults(spec.mongo, raw, st)
     if spec.prepare:
         doc = spec.prepare(doc, st)
@@ -557,6 +610,7 @@ def _map(spec: TypedSpec, raw: Dict[str, Any], st: Optional[Stats]) -> Tuple[Opt
 
 async def backfill_typed(sb: Supabase, source: Any, spec: TypedSpec, policy: str) -> Stats:
     st = Stats(spec.dataset, spec.table, policy)
+    workspace_of = await spec.workspace_of(sb, source) if spec.workspace_of else None
 
     # Supabase side: key columns of every row (id + natural/alt keys only).
     by_key: Dict[Tuple, Any] = {}
@@ -579,7 +633,7 @@ async def backfill_typed(sb: Supabase, source: Any, spec: TypedSpec, policy: str
             if raw.get("_id") is None:
                 st.skipped("?", "no_id")
                 continue
-            row, problem = _map(spec, raw, st)
+            row, problem = _map(spec, raw, st, workspace_of)
             if row is None:
                 if problem == "unmappable":
                     st.skipped(_mongo_id(raw), problem)
@@ -609,7 +663,7 @@ async def backfill_typed(sb: Supabase, source: Any, spec: TypedSpec, policy: str
         for raw in batch:
             if _mongo_id(raw) not in winner_ids:
                 continue
-            row, _problem = _map(spec, raw, None)
+            row, _problem = _map(spec, raw, None, workspace_of)
             key = spec.key(row) if row is not None else None
             if row is None or key is None:
                 st.bump("changed_during_run")   # re-run picks it up
@@ -637,8 +691,11 @@ async def backfill_typed(sb: Supabase, source: Any, spec: TypedSpec, policy: str
             if spec.reconcile:
                 row = spec.reconcile(row, existing)
             diff = _fill_diff(existing, row, spec.new_cols) if policy == "fill" else _wins_diff(existing, row)
-            # Never rewrite a row's identity columns through a PATCH.
+            # Never rewrite a row's identity columns through a PATCH, and never
+            # move a row to another workspace (an alt-key match may sit under
+            # a different workspace on purpose — see activity_events).
             diff.pop("id", None)
+            diff.pop("workspace_id", None)
             if not diff:
                 st.same += 1
                 continue
@@ -668,6 +725,16 @@ def _inbox_prepare(doc: Dict[str, Any], st: Optional[Stats]) -> Optional[Dict[st
         if st is not None:
             st.bump("inbox_id_from_mongo_id")
     return d
+
+
+async def _content_workspace_of(sb: Supabase, source: Any) -> Callable[[Dict[str, Any]], Optional[str]]:
+    """content_items: template-generated items take their template's
+    workspace (templates of both stores; a handful of rows)."""
+    docs = list(await sb.index("content_templates", ("id", "template_id", "workspace_id")))
+    async for batch in _batches(source, "content_templates"):
+        docs.extend({"template_id": d.get("template_id"), "workspace_id": d.get("workspace_id")} for d in batch)
+    templates = template_workspaces(docs)
+    return lambda raw: template_content_workspace(raw, templates)
 
 
 def _product_row(cfg: pds.DomainConfig) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
@@ -774,12 +841,19 @@ def typed_specs() -> List[TypedSpec]:
         TypedSpec(
             "activity_events", "activity_events", "activity_events", "activity", _product_row(pds.ACTIVITY_CFG),
             key=_k("workspace_id", "event_id"), key_cols=("workspace_id", "event_id"),
+            # event_id (a uuid4) alone as well: scripts/fix_activity_workspace.py
+            # moves rows that leaked into "default" to their real workspace (or
+            # to the quarantine workspace). If a Mongo mirror copy was left
+            # behind under "default" (mirror write failed), matching on the
+            # full key alone would insert it again there — re-leaking it.
+            alt_keys=(_k("event_id"),),
             new_cols=dict(_PROD_NEW), ident=lambda r: str(r.get("event_id")),
         ),
         TypedSpec(
             "content_items", "content_items", "content_items", "content", _product_row(pds.CONTENT_ITEMS_CFG),
             key=_k("workspace_id", "content_id"), key_cols=("workspace_id", "content_id"),
             new_cols=dict(_PROD_NEW), ident=lambda r: str(r.get("content_id")),
+            workspace_of=_content_workspace_of,
         ),
         TypedSpec(
             "content_templates", "content_templates", "content_templates", "content",

@@ -5,6 +5,7 @@ import time
 import asyncio
 import csv
 import io
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
@@ -564,14 +565,20 @@ def _map_audit_event_to_supabase(event_type: str) -> Optional[str]:
 # zero data leakage between modes. All write endpoints MUST tag new
 # records with `is_simulation = await is_simulation_mode(workspace_id)` so
 # they stay in the correct dataset.
-async def is_simulation_mode(workspace_id: str = DEFAULT_WORKSPACE_ID) -> bool:
+#
+# None of the tenant-scoped helpers below default ``workspace_id`` to
+# DEFAULT_WORKSPACE_ID: a caller that forgot it silently read/wrote the
+# "default" workspace's data (see log_activity).
+async def is_simulation_mode(workspace_id: str) -> bool:
     """Return True if the given workspace is currently in Simulation Mode."""
     profile = await business_profile_col.find_one(
         {"workspace_id": workspace_id},
         {"_id": 0, "simulation_mode": 1},
     )
-    if not profile:
-        # Legacy fallback for pre-migration instances
+    if not profile and workspace_id == DEFAULT_WORKSPACE_ID:
+        # Legacy fallback for pre-migration instances: the un-stamped
+        # {profile_id: "default"} doc is the default workspace's profile
+        # (backfill_workspace_scoping promotes it) — never another tenant's.
         profile = await business_profile_col.find_one(
             {"profile_id": "default"},
             {"_id": 0, "simulation_mode": 1},
@@ -579,7 +586,7 @@ async def is_simulation_mode(workspace_id: str = DEFAULT_WORKSPACE_ID) -> bool:
     return bool((profile or {}).get("simulation_mode", False))
 
 
-async def get_mode_filter(workspace_id: str = DEFAULT_WORKSPACE_ID) -> dict:
+async def get_mode_filter(workspace_id: str) -> dict:
     """Return the Mongo filter that isolates the current mode + workspace.
 
     Combines:
@@ -621,7 +628,7 @@ def _lang_directive(language_code):
     return f"Respond in {name}. All textual fields (summary, description, generated copy) must be written in {name}."
 
 
-async def _workspace_language(workspace_id: str = DEFAULT_WORKSPACE_ID) -> str:
+async def _workspace_language(workspace_id: str) -> str:
     """Return the active business-profile language ('es' | 'en') for a workspace."""
     try:
         profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
@@ -629,7 +636,7 @@ async def _workspace_language(workspace_id: str = DEFAULT_WORKSPACE_ID) -> str:
     except Exception:
         return "es"
 
-async def build_intent_prompt(business_profile=None, workspace_id: str = DEFAULT_WORKSPACE_ID):
+async def build_intent_prompt(business_profile=None, *, workspace_id: str):
     """Build intent detection prompt with business profile context."""
     if not business_profile:
         profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
@@ -673,7 +680,7 @@ Respond with ONLY valid JSON (no markdown fences):
   }}
 }}"""
 
-async def build_content_prompt(business_profile=None, workspace_id: str = DEFAULT_WORKSPACE_ID):
+async def build_content_prompt(business_profile=None, *, workspace_id: str):
     """Build content generation prompt with business profile context."""
     if not business_profile:
         profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
@@ -722,7 +729,29 @@ async def parse_ai_json(response_text):
     except json.JSONDecodeError:
         return None
 
-async def log_activity(event_type, title, description, related_id=None, related_type=None, workspace_id: Optional[str] = None):
+# Greppable WARNING tag (only WARNING+ reaches `fly logs`): an activity
+# event reached log_activity without a workspace and was NOT written.
+ACTIVITY_NO_WORKSPACE = "ACTIVITY_NO_WORKSPACE"
+_activity_logger = logging.getLogger("quantro.activity")
+# Set on every event written since the workspace fix (it lands in
+# activity_events.extra). scripts/fix_activity_workspace.py never moves such
+# a row: only events written before the fix can have leaked into "default".
+ACTIVITY_WORKSPACE_EXPLICIT = "workspace_explicit"
+
+
+async def log_activity(event_type, title, description, related_id=None, related_type=None, *, workspace_id: Optional[str]):
+    """Append an activity-feed event to ``workspace_id``'s feed.
+
+    ``workspace_id`` is required (keyword-only, no default): it used to
+    default to DEFAULT_WORKSPACE_ID, which put other tenants' inbox senders,
+    subjects and AI summaries in the "default" workspace's feed. An event
+    without a workspace is dropped (one WARNING line, event_type only —
+    titles/descriptions carry customer data). tests/test_activity_workspace
+    fails on any call that does not pass ``workspace_id=`` explicitly.
+    """
+    if not workspace_id:
+        _activity_logger.warning("%s activity event dropped (event_type=%s)", ACTIVITY_NO_WORKSPACE, event_type)
+        return None
     event = {
         "event_id": str(uuid.uuid4()),
         "event_type": event_type,
@@ -731,8 +760,9 @@ async def log_activity(event_type, title, description, related_id=None, related_
         "related_id": related_id,
         "related_type": related_type,
         "timestamp": now_iso(),
-        "is_simulation": await is_simulation_mode(workspace_id or DEFAULT_WORKSPACE_ID),
-        "workspace_id": workspace_id or DEFAULT_WORKSPACE_ID,
+        "is_simulation": await is_simulation_mode(workspace_id),
+        "workspace_id": workspace_id,
+        ACTIVITY_WORKSPACE_EXPLICIT: True,
     }
     await activity_col.insert_one(event)
     return event
@@ -768,7 +798,11 @@ async def execute_action_for_item(item, source="auto"):
     # Downstream artifacts inherit the mode of the triggering inbox item
     # so everything remains in the correct sandbox/workspace.
     sim_flag = bool(item.get("is_simulation", False))
-    ws_id = item.get("workspace_id", DEFAULT_WORKSPACE_ID)
+    # Callers load the item scoped to their workspace; never fall back to
+    # the default workspace (the executor would write there).
+    ws_id = item.get("workspace_id")
+    if not ws_id:
+        return {"executed": False, "reason": "Inbox item has no workspace"}
 
     async def run(action_id: str, input_payload: dict):
         return await action_executor.execute(
@@ -866,8 +900,12 @@ async def evaluate_advanced_escalation(item, intent, confidence, policy_action):
     """Evaluate advanced escalation conditions beyond simple intent/keyword matching."""
     escalation_info = None
     escalation_reasons = []
-    workspace_id = item.get("workspace_id", DEFAULT_WORKSPACE_ID)
-    
+    # The item's own workspace only: falling back to "default" evaluated
+    # (and quoted, in the reasons) another tenant's rules and calendar.
+    workspace_id = item.get("workspace_id")
+    if not workspace_id:
+        return None
+
     rules = await escalation_col.find({"workspace_id": workspace_id, "enabled": True}).to_list(100)
     entities = item.get("ai_intent", {}).get("entities", {})
     text = f"{item.get('subject', '')} {item.get('body', '')}".lower()
@@ -1044,6 +1082,7 @@ async def seed_database():
     for _a in activity_events:
         _a.setdefault("workspace_id", DEFAULT_WORKSPACE_ID)
         _a.setdefault("is_simulation", True)
+        _a[ACTIVITY_WORKSPACE_EXPLICIT] = True
     await activity_col.insert_many(activity_events)
 
     # Automation Policies (per-intent rules)
@@ -2845,23 +2884,35 @@ async def revoke_invite(
     return {"success": True}
 
 
+async def _workspace_for_org(org_id: Optional[str]) -> Optional[str]:
+    """Reverse of workspace_to_org_id: the Flow workspace of a Supabase org.
+
+    ``None`` when Flow has no workspace for the org. Never the default
+    workspace unless the org IS the configured default org: the shared
+    ``invitations`` table also holds Quantro OS invitations, and mapping an
+    unknown org to "default" let any such invite token add its holder to
+    the default workspace.
+    """
+    if not org_id:
+        return None
+    ws = await workspaces_col.find_one({"org_id": org_id}, {"_id": 0, "workspace_id": 1})
+    if ws and ws.get("workspace_id"):
+        return ws["workspace_id"]
+    if org_id == supabase_admin.resolve_default_org_id():
+        return DEFAULT_WORKSPACE_ID
+    return None
+
+
 async def _resolve_invite_by_token(token: str, access_token: Optional[str] = None) -> Optional[dict]:
     """Resolve an invite from Supabase SoT (preferred) or Mongo mirror."""
     if supabase_admin.is_supabase_primary() or supabase_admin.is_dual_write_enabled():
         try:
             sb = await supabase_admin.get_invitation_by_token(token, access_token)
-            if sb:
-                org_id = sb.get("org_id")
-                workspace_id = DEFAULT_WORKSPACE_ID
-                # Best-effort reverse map org → workspace.
-                try:
-                    ws = await workspaces_col.find_one({"org_id": org_id}, {"_id": 0, "workspace_id": 1})
-                    if ws and ws.get("workspace_id"):
-                        workspace_id = ws["workspace_id"]
-                    elif org_id and org_id == supabase_admin.resolve_default_org_id():
-                        workspace_id = DEFAULT_WORKSPACE_ID
-                except Exception:  # noqa: BLE001
-                    pass
+            org_id = sb.get("org_id") if sb else None
+            # An invitation of an org Flow has no workspace for is not a
+            # Flow invite: fall through to Flow's own invite docs (→ 404).
+            workspace_id = await _workspace_for_org(org_id) if sb else None
+            if sb and workspace_id:
                 return {
                     "invite_id": sb.get("id"),
                     "supabase_invite_id": sb.get("id"),
@@ -4120,6 +4171,7 @@ async def analyze_inbox_item(inbox_id: str, workspace_id: str = Depends(get_curr
     item = _inbox_view(await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id}))
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
+    ws_id = item.get("workspace_id") or workspace_id
     
     # Get business profile for context-aware prompts
     intent_prompt = await build_intent_prompt(workspace_id=workspace_id)
@@ -4150,7 +4202,7 @@ async def analyze_inbox_item(inbox_id: str, workspace_id: str = Depends(get_curr
         }}
     )
     
-    await log_activity("ai", "AI processed inbox", f"Intent: {ai_result['intent']} ({ai_result['confidence']:.0%}) - {ai_result['summary']}", inbox_id, "inbox")
+    await log_activity("ai", "AI processed inbox", f"Intent: {ai_result['intent']} ({ai_result['confidence']:.0%}) - {ai_result['summary']}", inbox_id, "inbox", workspace_id=ws_id)
     
     # Evaluate policy
     intent = ai_result["intent"]
@@ -4203,7 +4255,7 @@ async def approve_inbox_action(inbox_id: str, workspace_id: str = Depends(get_cu
     action_type = action["type"]
     results = []
     sim_flag = bool(item.get("is_simulation", False))
-    ws_id = item.get("workspace_id", DEFAULT_WORKSPACE_ID)
+    ws_id = item.get("workspace_id") or workspace_id
     
     # Execute action based on type
     if action_type == "schedule_meeting":
@@ -4224,7 +4276,7 @@ async def approve_inbox_action(inbox_id: str, workspace_id: str = Depends(get_cu
             "workspace_id": ws_id,
         }
         await calendar_col.insert_one(event)
-        await log_activity("calendar", "Meeting scheduled", f"Meeting with {item['from_name']} created from AI action", event["event_id"], "calendar")
+        await log_activity("calendar", "Meeting scheduled", f"Meeting with {item['from_name']} created from AI action", event["event_id"], "calendar", workspace_id=ws_id)
         results.append({"type": "event_created", "event_id": event["event_id"]})
     
     elif action_type == "create_contact":
@@ -4247,7 +4299,7 @@ async def approve_inbox_action(inbox_id: str, workspace_id: str = Depends(get_cu
         }
         await contacts_col.insert_one(contact)
         await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"contact_id": contact["contact_id"]}})
-        await log_activity("crm", "Contact created", f"New contact {contact['name']} from inbox action", contact["contact_id"], "contact")
+        await log_activity("crm", "Contact created", f"New contact {contact['name']} from inbox action", contact["contact_id"], "contact", workspace_id=ws_id)
         results.append({"type": "contact_created", "contact_id": contact["contact_id"]})
     
     elif action_type == "start_onboarding":
@@ -4289,19 +4341,19 @@ async def approve_inbox_action(inbox_id: str, workspace_id: str = Depends(get_cu
             }
             await onboarding_col.insert_one(task)
         
-        await log_activity("onboarding", "Onboarding started", f"New agent {agent['name']} - onboarding initiated", agent["agent_id"], "agent")
+        await log_activity("onboarding", "Onboarding started", f"New agent {agent['name']} - onboarding initiated", agent["agent_id"], "agent", workspace_id=ws_id)
         results.append({"type": "agent_created", "agent_id": agent["agent_id"]})
     
     elif action_type == "send_follow_up":
-        await log_activity("inbox", "Follow-up queued", f"Follow-up action queued for {item['from_name']}", inbox_id, "inbox")
+        await log_activity("inbox", "Follow-up queued", f"Follow-up action queued for {item['from_name']}", inbox_id, "inbox", workspace_id=ws_id)
         results.append({"type": "follow_up_queued"})
     
     elif action_type == "flag_review":
-        await log_activity("inbox", "Flagged for review", f"Message from {item['from_name']} flagged for manual review", inbox_id, "inbox")
+        await log_activity("inbox", "Flagged for review", f"Message from {item['from_name']} flagged for manual review", inbox_id, "inbox", workspace_id=ws_id)
         results.append({"type": "flagged"})
     
     else:
-        await log_activity("inbox", "Action approved", f"Action '{action_type}' approved for {item['from_name']}", inbox_id, "inbox")
+        await log_activity("inbox", "Action approved", f"Action '{action_type}' approved for {item['from_name']}", inbox_id, "inbox", workspace_id=ws_id)
         results.append({"type": action_type})
     
     await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"status": "actioned"}})
@@ -4314,7 +4366,7 @@ async def decline_inbox_action(inbox_id: str, workspace_id: str = Depends(get_cu
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
     await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"status": "declined"}})
-    await log_activity("inbox", "Action declined", f"AI suggestion for {item['from_name']} was declined", inbox_id, "inbox")
+    await log_activity("inbox", "Action declined", f"AI suggestion for {item['from_name']} was declined", inbox_id, "inbox", workspace_id=item.get("workspace_id") or workspace_id)
     return {"success": True}
 
 # ─── Batch AI Triage ───────────────────────────────────────────────────
@@ -4364,7 +4416,7 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
                 }}
             )
             
-            await log_activity("ai", "Batch triage classified", f"{item['from_name']}: {ai_result['intent']} ({ai_result['confidence']:.0%})", inbox_id, "inbox")
+            await log_activity("ai", "Batch triage classified", f"{item['from_name']}: {ai_result['intent']} ({ai_result['confidence']:.0%})", inbox_id, "inbox", workspace_id=item.get("workspace_id") or workspace_id)
             
             # Evaluate policy for this item
             intent = ai_result["intent"]
@@ -4436,7 +4488,7 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
             )
             results.append({"inbox_id": inbox_id, "status": "error", "error": str(e)})
     
-    await log_activity("ai", "Batch triage complete", f"Processed {len(req.inbox_ids)} message(s), {sum(1 for r in results if r['status'] == 'classified')} classified", None, "inbox")
+    await log_activity("ai", "Batch triage complete", f"Processed {len(req.inbox_ids)} message(s), {sum(1 for r in results if r['status'] == 'classified')} classified", None, "inbox", workspace_id=workspace_id)
     
     return {"success": True, "results": results, "total": len(req.inbox_ids), "classified": sum(1 for r in results if r["status"] == "classified")}
 
@@ -4460,7 +4512,7 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
             action = item["ai_suggested_action"]
             action_type = action["type"]
             sim_flag = bool(item.get("is_simulation", False))
-            ws_id = item.get("workspace_id", DEFAULT_WORKSPACE_ID)
+            ws_id = item.get("workspace_id") or workspace_id
             
             if action_type == "schedule_meeting":
                 entities = item.get("ai_intent", {}).get("entities", {})
@@ -4480,7 +4532,7 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
                     "workspace_id": ws_id,
                 }
                 await calendar_col.insert_one(event)
-                await log_activity("calendar", "Meeting scheduled (batch)", f"Meeting with {item['from_name']}", event["event_id"], "calendar")
+                await log_activity("calendar", "Meeting scheduled (batch)", f"Meeting with {item['from_name']}", event["event_id"], "calendar", workspace_id=ws_id)
             
             elif action_type == "create_contact":
                 entities = item.get("ai_intent", {}).get("entities", {})
@@ -4501,10 +4553,10 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
                     "workspace_id": ws_id,
                 }
                 await contacts_col.insert_one(contact)
-                await log_activity("crm", "Contact created (batch)", f"New contact {contact['name']}", contact["contact_id"], "contact")
+                await log_activity("crm", "Contact created (batch)", f"New contact {contact['name']}", contact["contact_id"], "contact", workspace_id=ws_id)
             
             elif action_type == "send_follow_up":
-                await log_activity("inbox", "Follow-up queued (batch)", f"For {item['from_name']}", inbox_id, "inbox")
+                await log_activity("inbox", "Follow-up queued (batch)", f"For {item['from_name']}", inbox_id, "inbox", workspace_id=ws_id)
             
             elif action_type == "start_onboarding":
                 entities = item.get("ai_intent", {}).get("entities", {})
@@ -4525,10 +4577,10 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
                 for idx, title in enumerate(["Complete compliance training", "Set up CRM profile", "Configure email signature", "Schedule orientation with team lead", "Access granted to listing portal"]):
                     await onboarding_col.insert_one({
                 "workspace_id": workspace_id,"task_id": str(uuid.uuid4()), "agent_id": agent["agent_id"], "title": title, "description": f"Auto-generated step {idx+1}", "status": "pending", "order": idx + 1, "completed_at": None, "auto_generated": True, "is_simulation": sim_flag})
-                await log_activity("onboarding", "Onboarding started (batch)", f"Agent {agent['name']} onboarding initiated", agent["agent_id"], "agent")
+                await log_activity("onboarding", "Onboarding started (batch)", f"Agent {agent['name']} onboarding initiated", agent["agent_id"], "agent", workspace_id=ws_id)
             
             else:
-                await log_activity("inbox", "Action approved (batch)", f"For {item['from_name']}", inbox_id, "inbox")
+                await log_activity("inbox", "Action approved (batch)", f"For {item['from_name']}", inbox_id, "inbox", workspace_id=ws_id)
             
             await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"status": "actioned"}})
             results.append({"inbox_id": inbox_id, "status": "actioned", "action_type": action_type})
@@ -4537,7 +4589,7 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
             results.append({"inbox_id": inbox_id, "status": "error", "error": str(e)})
     
     actioned_count = sum(1 for r in results if r["status"] == "actioned")
-    await log_activity("system", "Batch approval complete", f"{actioned_count}/{len(req.inbox_ids)} actions executed", None, "inbox")
+    await log_activity("system", "Batch approval complete", f"{actioned_count}/{len(req.inbox_ids)} actions executed", None, "inbox", workspace_id=workspace_id)
     
     return {"success": True, "results": results, "total": len(req.inbox_ids), "actioned": actioned_count}
 
@@ -4571,7 +4623,7 @@ async def update_inbox_details(inbox_id: str, req: UpdateInboxDetailsRequest, wo
     
     if update_fields:
         await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": update_fields})
-        await log_activity("inbox", "Details edited", f"Manual adjustments made to {item['from_name']}'s request", inbox_id, "inbox")
+        await log_activity("inbox", "Details edited", f"Manual adjustments made to {item['from_name']}'s request", inbox_id, "inbox", workspace_id=item.get("workspace_id") or workspace_id)
     
     updated = await inbox_col.find_one({"inbox_id": inbox_id})
     return serialize_doc(updated)
@@ -4590,7 +4642,7 @@ async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest
     entities = item.get("ai_intent", {}).get("entities", {})
     results = []
     sim_flag = bool(item.get("is_simulation", False))
-    ws_id = item.get("workspace_id", DEFAULT_WORKSPACE_ID)
+    ws_id = item.get("workspace_id") or workspace_id
     
     if action_type == "schedule_meeting":
         event = {
@@ -4609,7 +4661,7 @@ async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest
             "workspace_id": ws_id,
         }
         await calendar_col.insert_one(event)
-        await log_activity("calendar", "Meeting scheduled", f"Meeting with {item['from_name']} (with adjustments)", event["event_id"], "calendar")
+        await log_activity("calendar", "Meeting scheduled", f"Meeting with {item['from_name']} (with adjustments)", event["event_id"], "calendar", workspace_id=ws_id)
         results.append({"type": "event_created", "event_id": event["event_id"]})
     
     elif action_type == "create_contact":
@@ -4631,7 +4683,7 @@ async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest
         }
         await contacts_col.insert_one(contact)
         await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"contact_id": contact["contact_id"]}})
-        await log_activity("crm", "Contact created", f"New contact {contact['name']} (with adjustments)", contact["contact_id"], "contact")
+        await log_activity("crm", "Contact created", f"New contact {contact['name']} (with adjustments)", contact["contact_id"], "contact", workspace_id=ws_id)
         results.append({"type": "contact_created", "contact_id": contact["contact_id"]})
     
     elif action_type == "start_onboarding":
@@ -4651,15 +4703,15 @@ async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest
         await agents_col.insert_one(agent)
         for idx, title in enumerate(["Complete compliance training", "Set up CRM profile", "Configure email signature", "Schedule orientation with team lead", "Access granted to listing portal"]):
             await onboarding_col.insert_one({"workspace_id": ws_id, "task_id": str(uuid.uuid4()), "agent_id": agent["agent_id"], "title": title, "description": f"Auto-generated step {idx+1}", "status": "pending", "order": idx + 1, "completed_at": None, "auto_generated": True, "is_simulation": sim_flag})
-        await log_activity("onboarding", "Onboarding started", f"Agent {agent['name']} onboarding initiated (with adjustments)", agent["agent_id"], "agent")
+        await log_activity("onboarding", "Onboarding started", f"Agent {agent['name']} onboarding initiated (with adjustments)", agent["agent_id"], "agent", workspace_id=ws_id)
         results.append({"type": "agent_created", "agent_id": agent["agent_id"]})
     
     elif action_type == "send_follow_up":
-        await log_activity("inbox", "Follow-up queued", f"Follow-up for {item['from_name']}", inbox_id, "inbox")
+        await log_activity("inbox", "Follow-up queued", f"Follow-up for {item['from_name']}", inbox_id, "inbox", workspace_id=ws_id)
         results.append({"type": "follow_up_queued"})
     
     else:
-        await log_activity("inbox", "Action approved", f"For {item['from_name']}", inbox_id, "inbox")
+        await log_activity("inbox", "Action approved", f"For {item['from_name']}", inbox_id, "inbox", workspace_id=ws_id)
         results.append({"type": action_type})
     
     await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"status": "actioned"}})
@@ -4809,7 +4861,7 @@ async def create_agent(req: CreateAgentRequest, workspace_id: str = Depends(get_
         }
         await onboarding_col.insert_one(task)
     
-    await log_activity("onboarding", "New agent added", f"{req.name} added to the team. Onboarding initiated.", agent["agent_id"], "agent")
+    await log_activity("onboarding", "New agent added", f"{req.name} added to the team. Onboarding initiated.", agent["agent_id"], "agent", workspace_id=workspace_id)
     
     # Return with tasks
     tasks = await onboarding_col.find({"agent_id": agent["agent_id"]}).sort("order", 1).to_list(20)
@@ -4833,7 +4885,7 @@ async def update_onboarding_task(task_id: str, req: UpdateOnboardingTaskRequest,
     
     task = await onboarding_col.find_one({"task_id": task_id, "workspace_id": workspace_id})
     if task:
-        await log_activity("onboarding", f"Task {req.status}", f"Onboarding task '{task['title']}' marked as {req.status}", task["agent_id"], "agent")
+        await log_activity("onboarding", f"Task {req.status}", f"Onboarding task '{task['title']}' marked as {req.status}", task["agent_id"], "agent", workspace_id=workspace_id)
     
     return {"success": True}
 
@@ -4899,7 +4951,7 @@ async def generate_content(req: ContentGenerateRequest, workspace_id: str = Depe
         await content_col.insert_one(email_item)
         items_created.append(serialize_doc(email_item))
     
-    await log_activity("content", "Content generated", f"AI generated {len(items_created)} content item(s)", None, "content")
+    await log_activity("content", "Content generated", f"AI generated {len(items_created)} content item(s)", None, "content", workspace_id=workspace_id)
     
     return {"success": True, "items": items_created}
 
@@ -4970,7 +5022,7 @@ async def update_policy(policy_id: str, req: AutomationPolicyRequest, workspace_
     result = await policies_col.update_one({"workspace_id": workspace_id, "policy_id": policy_id}, {"$set": update})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Policy not found")
-    await log_activity("system", "Policy updated", f"Automation policy for '{req.intent}' updated", policy_id, "policy")
+    await log_activity("system", "Policy updated", f"Automation policy for '{req.intent}' updated", policy_id, "policy", workspace_id=workspace_id)
     updated = await policies_col.find_one({"workspace_id": workspace_id, "policy_id": policy_id})
     return serialize_doc(updated)
 
@@ -5133,7 +5185,7 @@ async def delete_template(template_id: str, workspace_id: str = Depends(get_curr
         raise HTTPException(status_code=404, detail="Template not found")
     return {"success": True}
 
-async def build_template_prompt(business_profile=None, workspace_id: str = DEFAULT_WORKSPACE_ID):
+async def build_template_prompt(business_profile=None, *, workspace_id: str):
     """Build template enhancement prompt with business profile context."""
     if not business_profile:
         profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
@@ -5306,7 +5358,7 @@ async def update_business_profile(req: BusinessProfileUpdate, workspace_id: str 
         upsert=True
     )
     
-    await log_activity("system", "Business Profile updated", f"Industry: {req.industry}, Simulation: {req.simulation_mode}", workspace_id, "profile")
+    await log_activity("system", "Business Profile updated", f"Industry: {req.industry}, Simulation: {req.simulation_mode}", workspace_id, "profile", workspace_id=workspace_id)
 
     # Auto-generate simulation dataset when entering Simulation Mode if:
     #   (a) turning simulation ON and no simulation data exists yet, OR
@@ -5328,7 +5380,7 @@ async def update_business_profile(req: BusinessProfileUpdate, workspace_id: str 
 
         if need_regenerate:
             await generate_simulation_data(req.industry, workspace_id)
-            await log_activity("system", "Simulation data auto-generated", f"Generated {req.industry} data", "simulation", "system")
+            await log_activity("system", "Simulation data auto-generated", f"Generated {req.industry} data", "simulation", "system", workspace_id=workspace_id)
 
     updated = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
     return serialize_doc(updated)
@@ -5694,7 +5746,7 @@ async def generate_simulation(workspace_id: str = Depends(get_current_workspace_
     industry = profile.get("industry", "other")
     result = await generate_simulation_data(industry, workspace_id)
     
-    await log_activity("system", "Simulation data generated", f"Generated {industry} operational data", "simulation", "system")
+    await log_activity("system", "Simulation data generated", f"Generated {industry} operational data", "simulation", "system", workspace_id=workspace_id)
     
     return result
 
@@ -5710,7 +5762,7 @@ async def clear_simulation(workspace_id: str = Depends(get_current_workspace_id)
         "activities": (await activity_col.delete_many({"is_simulation": True, "workspace_id": workspace_id})).deleted_count,
     }
     
-    await log_activity("system", "Simulation data cleared", "All simulation data removed", "simulation", "system")
+    await log_activity("system", "Simulation data cleared", "All simulation data removed", "simulation", "system", workspace_id=workspace_id)
     
     return {"success": True, "deleted": deleted_counts}
 
@@ -7031,6 +7083,7 @@ action_executor = ActionExecutor(
         "calendar_col": calendar_col,
         "agents_col": agents_col,
         "onboarding_col": onboarding_col,
+        "inbox_col": inbox_col,
         "log_activity": log_activity,
         "google_integrations_col": google_integrations_col,
         "microsoft_integrations_col": microsoft_integrations_col,
