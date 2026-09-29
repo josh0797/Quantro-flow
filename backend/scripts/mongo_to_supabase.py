@@ -281,6 +281,7 @@ class Stats:
     error_ids: List[str] = field(default_factory=list)
     insert_ids: List[str] = field(default_factory=list)
     supabase_only_ids: List[str] = field(default_factory=list)
+    alt_key_ids: List[str] = field(default_factory=list)
 
     def bump(self, note: str, n: int = 1) -> None:
         self.notes[note] = self.notes.get(note, 0) + n
@@ -302,6 +303,12 @@ class Stats:
         if len(self.insert_ids) < MAX_IDS_PRINTED:
             self.insert_ids.append(ident)
 
+    def matched_by_alt_key(self, ident: str) -> None:
+        """Supabase holds the row under the alt key only (natural key differs)."""
+        self.bump("matched_by_alt_key")
+        if len(self.alt_key_ids) < MAX_IDS_PRINTED:
+            self.alt_key_ids.append(ident)
+
     def only_in_supabase(self, idents: Iterable[str]) -> None:
         for ident in sorted(idents):
             self.supabase_only += 1
@@ -316,6 +323,7 @@ class Stats:
             "supabase_only": self.supabase_only,
             "notes": self.notes, "skipped_ids": self.skipped_ids, "error_ids": self.error_ids,
             "insert_ids": self.insert_ids, "supabase_only_ids": self.supabase_only_ids,
+            "alt_key_ids": self.alt_key_ids,
         }
 
 
@@ -529,9 +537,10 @@ class TypedSpec:
     key: Callable[[Dict[str, Any]], Optional[Tuple]]           # natural key of a row
     key_cols: Tuple[str, ...]                                  # every column key/alt_keys read
     alt_keys: Tuple[Callable[[Dict[str, Any]], Optional[Tuple]], ...] = ()
-    # Columns added by 20261026090500 → their column DEFAULT. Under ``fill``
-    # such a column is taken from Mongo only while Supabase still holds the
-    # default (i.e. the app has not written it yet).
+    # Columns added by 20261026090500 → their column DEFAULT (or a value a
+    # schema migration inferred, see calendar ``external_provider``). Under
+    # ``fill`` such a column is taken from Mongo only while Supabase still
+    # holds that value (i.e. the app has not written it yet).
     new_cols: Dict[str, Any] = field(default_factory=dict)
     ident: Callable[[Dict[str, Any]], str] = lambda row: "?"  # printable id
     prepare: Optional[Callable[[Dict[str, Any], Optional[Stats]], Optional[Dict[str, Any]]]] = None
@@ -541,6 +550,9 @@ class TypedSpec:
     # Awaited once per run: returns raw Mongo doc → workspace that overrides
     # the doc's own (None = keep it), applied BEFORE the legacy defaults.
     workspace_of: Optional[Callable[["Supabase", Any], Awaitable[Callable[[Dict[str, Any]], Optional[str]]]]] = None
+    # Mongo row → True when an alt-key match that the policy leaves ``same``
+    # is still a problem (note ``alt_key_unresolved``, fails --verify).
+    alt_same_is_unresolved: Optional[Callable[[Dict[str, Any]], bool]] = None
 
 
 def _k(*cols: str) -> Callable[[Dict[str, Any]], Optional[Tuple]]:
@@ -659,7 +671,7 @@ async def backfill_typed(sb: Supabase, source: Any, spec: TypedSpec, policy: str
 
     # Pass 2 — stream again, write the winners batch by batch.
     async for batch in _batches(source, spec.mongo):
-        items: List[Tuple[Dict[str, Any], Optional[Any]]] = []   # (row, existing pk)
+        items: List[Tuple[Dict[str, Any], Optional[Any], bool]] = []   # (row, existing pk, via alt key)
         for raw in batch:
             if _mongo_id(raw) not in winner_ids:
                 continue
@@ -669,16 +681,18 @@ async def backfill_typed(sb: Supabase, source: Any, spec: TypedSpec, policy: str
                 st.bump("changed_during_run")   # re-run picks it up
                 continue
             pk = by_key.get(key)
+            via_alt = False
             if pk is None:
                 for i, ak in enumerate(spec.alt_keys):
                     a = ak(row)
                     if a and a in by_alt[i]:
                         pk = by_alt[i][a]
-                        st.bump("matched_by_alt_key")
+                        via_alt = True
+                        st.matched_by_alt_key(spec.ident(row))
                         break
-            items.append((row, pk))
-        existing_rows = {r["id"]: r for r in await sb.rows_in(spec.table, "id", [pk for _, pk in items if pk is not None])}
-        for row, pk in items:
+            items.append((row, pk, via_alt))
+        existing_rows = {r["id"]: r for r in await sb.rows_in(spec.table, "id", [pk for _, pk, _a in items if pk is not None])}
+        for row, pk, via_alt in items:
             ident = spec.ident(row)
             existing = existing_rows.get(pk) if pk is not None else None
             if existing is None:
@@ -697,6 +711,8 @@ async def backfill_typed(sb: Supabase, source: Any, spec: TypedSpec, policy: str
             diff.pop("id", None)
             diff.pop("workspace_id", None)
             if not diff:
+                if via_alt and spec.alt_same_is_unresolved and spec.alt_same_is_unresolved(row):
+                    st.bump("alt_key_unresolved")
                 st.same += 1
                 continue
             err = await sb.patch(spec.table, existing["id"], diff)
@@ -806,9 +822,20 @@ def typed_specs() -> List[TypedSpec]:
                            if r.get("external_event_id") else _k("workspace_id", "event_id")(r)),
             key_cols=("workspace_id", "external_provider", "external_event_id", "event_id"),
             alt_keys=(_k("workspace_id", "event_id"),),
-            new_cols={"is_real": None, "extra": {}},
+            # external_provider: konta 20260919010000 inferred 'internal' for
+            # every row without one, including the shadows of synced events
+            # (their provider id had been dropped). The app never turns a
+            # synced row into 'internal', so Mongo's google/microsoft wins;
+            # otherwise the row keeps (internal, <provider id>), the sync's
+            # (provider, id) lookup misses it and inserts a duplicate once the
+            # mirror is off. Genuine internal rows are 'internal' in Mongo too.
+            new_cols={"is_real": None, "extra": {}, "external_provider": "internal"},
             ident=lambda r: str(r.get("event_id")),
             prepare=_calendar_prepare,
+            # A synced event Supabase holds under the same event_id but another
+            # (provider, external id): the sync cannot find it and, once the
+            # mirror is off, inserts the event a second time.
+            alt_same_is_unresolved=lambda r: bool(r.get("external_event_id")),
         ),
         TypedSpec(
             "integrations_config", "integrations_config", "integrations_config", "integrations",
@@ -1119,6 +1146,12 @@ def _stale_shadows(report: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
 
 
+def _alt_key_reviews(report: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Rows matched only by the alt key that the policy cannot reconcile
+    (see ``TypedSpec.alt_same_is_unresolved``)."""
+    return [d for d in report["datasets"] if d["notes"].get("alt_key_unresolved")]
+
+
 def exit_code(report: Dict[str, Any], *, verify: bool = False) -> int:
     if report.get("aborted"):
         return 2
@@ -1127,9 +1160,10 @@ def exit_code(report: Dict[str, Any], *, verify: bool = False) -> int:
         return 1
     if verify:
         # After --apply, a dry run must find nothing left to write, and no
-        # stale access-granting shadow row may be left to review.
+        # stale access-granting shadow row or calendar identity mismatch may
+        # be left to review.
         pending = sum(d["insert"] + d["update"] for d in report["datasets"])
-        if pending or report.get("preflight") or _stale_shadows(report):
+        if pending or report.get("preflight") or _stale_shadows(report) or _alt_key_reviews(report):
             return 1
     return 0
 
@@ -1178,6 +1212,8 @@ def render(report: Dict[str, Any], *, verify: bool = False) -> str:
             extra.append("errors: " + "; ".join(d["error_ids"]))
         if d.get("supabase_only_ids"):
             extra.append("supabase_only: " + "; ".join(d["supabase_only_ids"]))
+        if d.get("alt_key_ids"):
+            extra.append("matched_by_alt_key: " + "; ".join(d["alt_key_ids"]))
         if extra:
             lines.append(f"· {d['dataset']}: " + " | ".join(extra))
     for d in _stale_shadows(report):
@@ -1185,6 +1221,13 @@ def render(report: Dict[str, Any], *, verify: bool = False) -> str:
             f"REVIEW: {d['dataset']} has {d['supabase_only']} Supabase row(s) Mongo no longer has "
             "(stale shadow — e.g. a removed member). Delete them by hand before the flip; "
             "--verify fails until then."
+        )
+    for d in _alt_key_reviews(report):
+        lines.append(
+            f"REVIEW: {d['dataset']} has {d['notes']['alt_key_unresolved']} row(s) Supabase holds under the "
+            "same event_id but another (provider, external id) than Mongo (among the matched_by_alt_key ids). "
+            "A sync after 6b would insert those events again. --verify fails until then; do not turn the "
+            "mirrors off."
         )
     if report.get("not_migrated"):
         lines.append("Not migrated (by design): " + ", ".join(f"{k} ({v})" for k, v in report["not_migrated"].items()))
