@@ -1,11 +1,18 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Outlet, useLocation, useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { useAuth } from '../../contexts/AuthContext';
 import { useLanguage } from '../../context/LanguageContext';
 import { OnboardingProvider, useOnboarding } from './OnboardingContext';
 import { syncGoogleData, syncMicrosoftData, startGoogleOAuth, startMicrosoftOAuth } from '../../lib/api';
-import { Zap, LogOut } from 'lucide-react';
+import { clearNeedsOnboardingFlag } from '../../lib/onboardingGate';
+import {
+  readProviderCallback,
+  stripProviderCallbackParams,
+  nextStepAfterProviderConnect,
+  providerLabel,
+} from '../../lib/providerCallback';
+import { Zap, LogOut, LayoutDashboard, Loader2 } from 'lucide-react';
 
 /**
  * OnboardingShell — chrome around every /welcome screen.
@@ -18,7 +25,8 @@ import { Zap, LogOut } from 'lucide-react';
  *     turning on, not a form pagination
  *
  * The heavy lifting (per-step copy, CTAs, animations) lives in the
- * child route — the shell only renders identity, progress and exit.
+ * child route — the shell only renders identity, progress and exits
+ * ("Ir al panel" + sign out), plus the background-sync status.
  */
 const STEPS = [
   { key: 'start',       path: '/welcome' },
@@ -102,16 +110,21 @@ export default function OnboardingShell() {
             ))}
           </div>
 
-          <button
-            type="button"
-            onClick={handleSignOut}
-            className="text-xs text-muted-foreground hover:text-foreground transition-colors duration-200 inline-flex items-center gap-1.5"
-            data-testid="onboarding-signout"
-          >
-            <LogOut size={12} />
-            {t('welcome.sign_out')}
-          </button>
+          <div className="flex items-center gap-4">
+            <ExitToDashboardButton />
+            <button
+              type="button"
+              onClick={handleSignOut}
+              className="text-xs text-muted-foreground hover:text-foreground transition-colors duration-200 inline-flex items-center gap-1.5"
+              data-testid="onboarding-signout"
+            >
+              <LogOut size={12} />
+              {t('welcome.sign_out')}
+            </button>
+          </div>
         </header>
+
+        <SyncStatusBanner />
 
         {/* Step content with subtle fade-in. Children are responsible
             for their own layout (centered hero, side-by-side, etc.) */}
@@ -132,22 +145,88 @@ export default function OnboardingShell() {
 }
 
 /**
+ * ExitToDashboardButton — always-visible way out of the Welcome flow.
+ * Clears Supabase `needs_onboarding` (via the onboarding gate helper, so
+ * ProtectedRoute can never bounce the user back here) and opens the
+ * dashboard. Never traps the user: if the metadata write fails we still
+ * navigate — the gate remembers the dismissal for this session.
+ */
+export function ExitToDashboardButton() {
+  const { user, refresh } = useAuth();
+  const { t } = useLanguage();
+  const navigate = useNavigate();
+  const [exiting, setExiting] = useState(false);
+
+  const handleExit = async () => {
+    if (exiting) return;
+    setExiting(true);
+    try {
+      await clearNeedsOnboardingFlag(user?.user_id);
+      await refresh?.();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn('[welcome] could not clear needs_onboarding:', err?.message || err);
+    }
+    navigate('/dashboard', { replace: true });
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={handleExit}
+      disabled={exiting}
+      className="text-xs font-medium text-foreground/80 hover:text-foreground border border-[hsl(var(--border))] hover:border-[hsl(var(--primary)/0.45)] rounded-full px-3 py-1.5 transition-colors duration-200 inline-flex items-center gap-1.5 disabled:opacity-60 disabled:cursor-wait"
+      data-testid="onboarding-exit-dashboard"
+    >
+      {exiting ? <Loader2 size={12} className="animate-spin" /> : <LayoutDashboard size={12} />}
+      {t('welcome.go_to_dashboard')}
+    </button>
+  );
+}
+
+/**
+ * SyncStatusBanner — visible feedback while the post-OAuth mailbox /
+ * calendar sync runs in the background (it can take ~25 s in prod).
+ */
+function SyncStatusBanner() {
+  const { t } = useLanguage();
+  const { syncInProgress } = useOnboarding();
+  if (!syncInProgress) return null;
+  return (
+    <div className="flex justify-center px-6 pt-6">
+      <div
+        role="status"
+        aria-live="polite"
+        className="inline-flex items-center gap-2.5 rounded-full border border-[hsl(var(--primary)/0.30)] bg-[hsl(var(--primary)/0.06)] px-4 py-2 text-sm"
+        data-testid="onboarding-sync-status"
+      >
+        <Loader2 size={14} className="animate-spin text-[hsl(var(--primary))]" />
+        <span className="font-medium text-foreground">{t('welcome.sync.in_progress')}</span>
+        <span className="hidden sm:inline text-xs text-muted-foreground">{t('welcome.sync.in_progress_hint')}</span>
+      </div>
+    </div>
+  );
+}
+
+/**
  * ProviderCallbackHandler — invisible companion that watches the URL
- * for the ?google_connected=success or ?microsoft_connected=success
- * query string a provider OAuth callback appends. When it fires, it:
+ * for the ?google_connected=… / ?microsoft_connected=… query string a
+ * provider OAuth callback appends.
  *
- *   1. Triggers /api/integrations/<provider>/sync to pull the user's
- *      real mailbox + calendar (last 50 / next 30 days).
- *   2. Marks both the inbox and calendar steps with
- *      connection_mode='real' so the Activación screen renders the
- *      "Datos reales" badge instead of "Modo demo".
- *   3. Cleans the query string so a refresh doesn't re-run the sync.
- *   4. Navigates the user to the next pending step (CRM if they came
- *      from inbox/calendar, else /welcome/ready) so the flow keeps
- *      its forward momentum.
+ * success:
+ *   1. Marks the inbox AND calendar steps as connection_mode='real' (the
+ *      provider consent covers mail + calendar) so the Activación screen
+ *      renders "Datos reales".
+ *   2. Moves to the next pending step IMMEDIATELY (CRM when coming from
+ *      start / inbox / calendar) — the OAuth already succeeded, so the
+ *      user must never sit on a screen that offers "Conectar" again.
+ *   3. Runs /api/integrations/<provider>/sync in the background through
+ *      OnboardingContext.runProviderSync. While it runs the shell shows
+ *      "Sincronizando tus correos…" and every connect button in the flow
+ *      is disabled, so OAuth cannot be restarted by a second click.
  *
- * Errors (?<provider>_connected=error&reason=...) only show a toast
- * and leave the user where they were — we never trap them.
+ * error (?<provider>_connected=error&reason=...) only shows a toast and
+ * leaves the user where they were — we never trap them.
  *
  * permission_missing (?google_connected=permission_missing&missing_scopes=...)
  * means the user authorized SOME but not all required scopes (e.g.
@@ -157,57 +236,53 @@ export default function OnboardingShell() {
  * missing and offer a "Reauthorize" action that restarts the OAuth
  * flow with prompt=consent so the user can grant the rest.
  */
-function ProviderCallbackHandler() {
+export function ProviderCallbackHandler() {
   const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useLanguage();
-  const { markStepConnected } = useOnboarding();
+  const { markStepConnected, runProviderSync } = useOnboarding();
+  const handledRef = useRef(null);
 
-  // Detect which provider (if any) just bounced the user back. Order
-  // matters: if both are present (shouldn't happen, but defensive),
-  // we honour Google first.
-  const googleStatus = params.get('google_connected');
-  const microsoftStatus = params.get('microsoft_connected');
-  const provider = googleStatus ? 'google' : microsoftStatus ? 'microsoft' : null;
-  const status = provider === 'google' ? googleStatus : microsoftStatus;
+  const callback = readProviderCallback(params);
+  const signature = callback ? params.toString() : null;
 
   useEffect(() => {
-    if (!provider || !status) return;
+    if (!callback) {
+      // URL is clean again — a later OAuth return (even with the same
+      // account) must be handled.
+      handledRef.current = null;
+      return;
+    }
+    // Guard against React StrictMode's double effect in development.
+    if (handledRef.current === signature) return;
+    handledRef.current = signature;
 
-    // Strip the query params immediately so any re-render or refresh
-    // doesn't re-fire the side effects.
-    const missingScopesRaw = params.get('missing_scopes') || '';
-    const nextParams = new URLSearchParams(params);
-    nextParams.delete('google_connected');
-    nextParams.delete('microsoft_connected');
-    nextParams.delete('account');
-    nextParams.delete('return_to');
-    nextParams.delete('reason');
-    nextParams.delete('detail');
-    nextParams.delete('missing_scopes');
-    setParams(nextParams, { replace: true });
+    const { provider, status, account, reason, missingScopes } = callback;
+    const label = providerLabel(provider);
+    const next = status === 'success' ? nextStepAfterProviderConnect(location.pathname) : null;
+
+    // Strip the callback params in the same navigation that moves the
+    // user forward, so a refresh never re-fires these side effects.
+    if (next) {
+      navigate(next, { replace: true });
+    } else {
+      setParams(stripProviderCallbackParams(params), { replace: true });
+    }
 
     if (status === 'error') {
-      const reason = params.get('reason') || 'unknown';
-      toast.error(
-        t(`welcome.connect_modal.${provider}_failed_title`),
-        { description: reason }
-      );
+      toast.error(t(`welcome.connect_modal.${provider}_failed_title`), { description: reason || 'unknown' });
       return;
     }
 
     if (status === 'permission_missing') {
       // Connection exists but is unusable — never claim it's real.
-      const providerLabel = provider === 'google' ? 'Google' : 'Microsoft';
-      const scopesLabel = missingScopesRaw
-        .split(',')
-        .filter(Boolean)
+      const scopesLabel = missingScopes
         .map((s) => s.split('/').pop().replace(/\./g, ' '))
         .join(', ') || t('welcome.connect_modal.microsoft_subtitle');
       toast.warning(t('welcome.connect_modal.permission_missing_title'), {
         description: t('welcome.connect_modal.permission_missing_desc', {
-          provider: providerLabel,
+          provider: label,
           scopes: scopesLabel,
         }),
         action: {
@@ -224,45 +299,28 @@ function ProviderCallbackHandler() {
     }
 
     if (status === 'success') {
-      const account = params.get('account') || '';
-      const providerLabel = provider === 'google' ? 'Google' : 'Microsoft';
+      markStepConnected('inbox', 'real');
+      markStepConnected('calendar', 'real');
       const syncFn = provider === 'google' ? syncGoogleData : syncMicrosoftData;
-
-      // Sync runs in the background — we don't block the user. If it
-      // fails we degrade to "real connection but no synced rows yet"
-      // and show a toast.
-      (async () => {
-        try {
-          const res = await syncFn();
-          markStepConnected('inbox', 'real');
-          markStepConnected('calendar', 'real');
-          toast.success(t('welcome.preview.real_connected_title_v2', { provider: providerLabel }), {
+      // Fire-and-forget: navigation above already happened.
+      runProviderSync(provider, syncFn).then(({ ok, result, error }) => {
+        if (ok) {
+          toast.success(t('welcome.preview.real_connected_title_v2', { provider: label }), {
             description: t('welcome.preview.real_synced_desc', {
               account,
-              emails: res?.counts?.emails ?? 0,
-              events: res?.counts?.events ?? 0,
+              emails: result?.counts?.emails ?? 0,
+              events: result?.counts?.events ?? 0,
             }),
           });
-        } catch (err) {
-          markStepConnected('inbox', 'real');
-          markStepConnected('calendar', 'real');
-          toast.warning(t('welcome.preview.real_connected_no_sync_title_v2', { provider: providerLabel }), {
-            description: err?.response?.data?.detail || t('welcome.preview.real_connected_no_sync_desc'),
+        } else {
+          toast.warning(t('welcome.preview.real_connected_no_sync_title_v2', { provider: label }), {
+            description: error?.response?.data?.detail || t('welcome.preview.real_connected_no_sync_desc'),
           });
-        } finally {
-          // Forward to the natural next step.
-          const here = location.pathname;
-          if (here.endsWith('/inbox') || here === '/welcome' || here.endsWith('/welcome/inbox')) {
-            navigate('/welcome/calendar', { replace: true });
-          } else if (here.endsWith('/calendar')) {
-            navigate('/welcome/crm', { replace: true });
-          }
-          // Otherwise leave the user where they are.
         }
-      })();
+      });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [provider, status]);
+  }, [signature]);
 
   return null;
 }

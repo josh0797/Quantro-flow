@@ -11,7 +11,7 @@ import { getGoogleIntegrationStatus, getMicrosoftIntegrationStatus } from '../..
 
 export default function StepCalendar() {
   const { t } = useLanguage();
-  const { markStepConnected, markStepSkipped } = useOnboarding();
+  const { state, markStepConnected, markStepSkipped, syncInProgress } = useOnboarding();
   const navigate = useNavigate();
   const [pickerOpen, setPickerOpen] = useState(false);
 
@@ -56,8 +56,11 @@ export default function StepCalendar() {
   };
 
   const handleSkip = () => {
-    markStepSkipped('calendar');
-    markStepConnected('calendar', 'demo');
+    // Never downgrade a real connection made earlier in this flow.
+    if (state.calendar_connection_mode !== 'real') {
+      markStepSkipped('calendar');
+      markStepConnected('calendar', 'demo');
+    }
     navigate('/welcome/crm');
   };
 
@@ -87,6 +90,7 @@ export default function StepCalendar() {
         previewDurationMs={7000}
         onConnect={handleConnect}
         onSkip={handleSkip}
+        connectBlocked={syncInProgress}
       >
         <CalendarMockup />
       </DemoPreview>

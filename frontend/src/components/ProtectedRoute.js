@@ -2,13 +2,16 @@ import React from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
+import { useOnboardingGate } from '../lib/onboardingGate';
 
 /**
  * ProtectedRoute — wraps every authenticated screen.
  * - If still hydrating session → shows a slim loader.
  * - If unauthenticated → redirects to /login (preserves the intended URL).
- * - If authenticated but onboarding is still pending and we're NOT
- *   already on /onboarding-lite → redirect there first.
+ * - If authenticated but `needs_onboarding` is still set and we're NOT
+ *   already inside /welcome → ask the onboarding gate (lib/onboardingGate)
+ *   whether this is a brand-new workspace (→ /welcome) or an existing one
+ *   that simply never finished the Welcome flow (→ flag cleared, app).
  * - Otherwise → renders children.
  */
 export default function ProtectedRoute({ children, bypassOnboarding = false }) {
@@ -16,7 +19,15 @@ export default function ProtectedRoute({ children, bypassOnboarding = false }) {
   const { t } = useLanguage();
   const location = useLocation();
 
-  if (loading) {
+  const gateEnabled =
+    !loading
+    && !!user
+    && !bypassOnboarding
+    && user.needs_onboarding === true
+    && !location.pathname.startsWith('/welcome');
+  const gate = useOnboardingGate(user, gateEnabled);
+
+  if (loading || (gateEnabled && gate === 'checking')) {
     return (
       <div
         data-testid="auth-loading"
@@ -34,11 +45,11 @@ export default function ProtectedRoute({ children, bypassOnboarding = false }) {
     return <Navigate to="/login" replace state={{ from: location }} />;
   }
 
-  // Onboarding gate: freshly-signed-up users must finish the Welcome
-  // activation flow before reaching the main platform. Existing users
-  // (who never had `needs_onboarding=true` set on their Supabase
-  // metadata) are NOT forced through it.
-  if (!bypassOnboarding && user.needs_onboarding && !location.pathname.startsWith('/welcome')) {
+  // Onboarding gate: brand-new signups finish the Welcome activation flow
+  // before reaching the main platform. Users who never had
+  // `needs_onboarding=true`, or whose workspace already has real data,
+  // are NOT forced through it.
+  if (gateEnabled && gate === 'onboarding') {
     return <Navigate to="/welcome" replace />;
   }
 

@@ -353,8 +353,14 @@ export const translations = {
     },
     welcome: {
       sign_out: 'Salir',
+      go_to_dashboard: 'Ir al panel',
       progress_aria: 'Progreso de activación',
+      sync: {
+        in_progress: 'Sincronizando tus correos…',
+        in_progress_hint: 'Puedes continuar; te avisamos cuando termine.',
+      },
       preview: {
+        sync_in_progress: 'Sincronizando…',
         badge_preview: 'Vista previa',
         badge_demo: 'Modo demo',
         badge_real: 'Datos reales',
@@ -1680,8 +1686,14 @@ export const translations = {
     },
     welcome: {
       sign_out: 'Sign out',
+      go_to_dashboard: 'Go to dashboard',
       progress_aria: 'Activation progress',
+      sync: {
+        in_progress: 'Syncing your emails…',
+        in_progress_hint: 'You can keep going \u2014 we\u2019ll let you know when it\u2019s done.',
+      },
       preview: {
+        sync_in_progress: 'Syncing…',
         badge_preview: 'Preview',
         badge_demo: 'Demo mode',
         badge_real: 'Real data',

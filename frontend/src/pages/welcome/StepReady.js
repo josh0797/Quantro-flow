@@ -4,8 +4,8 @@ import { useLanguage } from '../../context/LanguageContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { useOnboarding } from './OnboardingContext';
 import { ArrowRight, Loader2 } from 'lucide-react';
-import { supabase } from '../../lib/supabaseClient';
 import { completeWelcomeOnboarding } from '../../lib/api';
+import { clearNeedsOnboardingFlag } from '../../lib/onboardingGate';
 
 /**
  * Step Final — Activación. The narrative climax.
@@ -49,7 +49,7 @@ export default function StepReady() {
         // the backend call — worst case the metadata flip lands a tick
         // later and the user sees one extra fade-in, never a redirect.
         try {
-          await supabase.auth.updateUser({ data: { needs_onboarding: false } });
+          await clearNeedsOnboardingFlag(user?.user_id);
         } catch {
           /* non-blocking; we still allow navigation below */
         }

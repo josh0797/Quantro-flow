@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
 
 /**
  * OnboardingContext — drives the multi-step Welcome flow.
@@ -8,6 +8,10 @@ import React, { createContext, useContext, useState, useCallback, useEffect } fr
  * marked complete. The FINAL completion bit (Supabase user_metadata
  * `needs_onboarding=false`) is what gates the rest of the app — this
  * client-side state is purely cosmetic / progress-tracking.
+ *
+ * `providerSync` is deliberately NOT persisted: it tracks the mailbox /
+ * calendar sync that runs in the background after a provider OAuth
+ * return, so a reload can never leave the UI stuck in "syncing".
  */
 const STORAGE_KEY = 'quantro:onboarding:state:v1';
 
@@ -25,6 +29,8 @@ const defaultState = {
   industry: 'other',
 };
 
+const idleSync = { status: 'idle', provider: null }; // status: idle | syncing | done | error
+
 const OnboardingContext = createContext({
   state: defaultState,
   setStartChoice: () => {},
@@ -32,6 +38,9 @@ const OnboardingContext = createContext({
   markStepSkipped: () => {},
   setIndustry: () => {},
   reset: () => {},
+  providerSync: idleSync,
+  syncInProgress: false,
+  runProviderSync: () => Promise.resolve({ ok: false }),
 });
 
 export function OnboardingProvider({ children }) {
@@ -90,8 +99,46 @@ export function OnboardingProvider({ children }) {
     }
   }, []);
 
+  const [providerSync, setProviderSync] = useState(idleSync);
+  const syncRunRef = useRef(null);
+
+  /**
+   * Run a provider sync in the background. Returns a promise that always
+   * resolves to `{ ok, result?, error? }`. A second call while one is in
+   * flight returns the same promise, so a double click (or React
+   * StrictMode's double effect) can never start two syncs.
+   */
+  const runProviderSync = useCallback((provider, syncFn) => {
+    if (syncRunRef.current) return syncRunRef.current;
+    setProviderSync({ status: 'syncing', provider });
+    const run = Promise.resolve()
+      .then(syncFn)
+      .then(
+        (result) => {
+          setProviderSync({ status: 'done', provider });
+          return { ok: true, result };
+        },
+        (error) => {
+          setProviderSync({ status: 'error', provider });
+          return { ok: false, error };
+        },
+      )
+      .finally(() => {
+        syncRunRef.current = null;
+      });
+    syncRunRef.current = run;
+    return run;
+  }, []);
+
+  const syncInProgress = providerSync.status === 'syncing';
+
   return (
-    <OnboardingContext.Provider value={{ state, setStartChoice, markStepConnected, markStepSkipped, setIndustry, reset }}>
+    <OnboardingContext.Provider
+      value={{
+        state, setStartChoice, markStepConnected, markStepSkipped, setIndustry, reset,
+        providerSync, syncInProgress, runProviderSync,
+      }}
+    >
       {children}
     </OnboardingContext.Provider>
   );

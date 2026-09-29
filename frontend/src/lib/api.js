@@ -156,6 +156,9 @@ export const exportAuditLog = (workspace_id, params = {}) =>
       return { blob: r.data, filename };
     });
 
+// Business profile (industry, labels, language) for the current workspace.
+export const getBusinessProfile = () => api.get('/business-profile').then(r => r.data);
+
 // Dashboard
 export const getDashboardMetrics = () => api.get('/dashboard/metrics').then(r => r.data);
 export const getAISuggestions = () => api.get('/dashboard/suggestions').then(r => r.data);
