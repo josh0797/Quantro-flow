@@ -1,15 +1,19 @@
 """Phase 6.2–6.3 — dual-write facades for activity / content / CRM / calendar.
 
 Mirrors ``inbox_store.InboxDualWriteCollection`` with per-domain config.
-Primary flags default to mongo; dual-write when SUPABASE_* configured.
+Dual-write when SUPABASE_* configured while Mongo is primary.
 
-Env
----
+Env (read per call)
+-------------------
 QUANTRO_ACTIVITY_PRIMARY / QUANTRO_CONTENT_PRIMARY /
 QUANTRO_CONTACTS_PRIMARY / QUANTRO_CALENDAR_PRIMARY
-  ``mongo`` (default) | ``supabase``
+  ``supabase`` (default since the Mongo exit) | ``mongo``
 
-QUANTRO_*_MONGO_MIRROR or QUANTRO_MONGO_MIRROR (default on when primary=supabase)
+QUANTRO_*_MONGO_MIRROR, else QUANTRO_MONGO_MIRROR (default off). With
+Supabase primary and the mirror off Mongo is never touched: filters
+PostgREST cannot express are evaluated in Python, fields without a column
+go to the ``extra`` jsonb, and Supabase failures raise
+``sb_rest.SupabaseStoreError`` instead of silently falling back.
 """
 from __future__ import annotations
 
@@ -22,6 +26,11 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 
+import mongo_compat as mc
+import sb_rest
+import storage_flags
+from sb_rest import SupabaseStoreError
+
 logger = logging.getLogger("quantro.product_domain.store")
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
@@ -33,15 +42,11 @@ def _is_sb_configured() -> bool:
 
 
 def _env_primary(name: str) -> str:
-    raw = (os.environ.get(name) or "mongo").lower().strip()
-    return raw if raw in {"mongo", "supabase"} else "mongo"
+    return storage_flags.parse_primary(name)
 
 
 def _env_mirror(dedicated: str) -> bool:
-    val = os.environ.get(dedicated)
-    if val is None or val == "":
-        val = os.environ.get("QUANTRO_MONGO_MIRROR") or "1"
-    return str(val).lower().strip() not in {"0", "false", "no", "off"}
+    return storage_flags.parse_mirror(dedicated)
 
 
 @dataclass(frozen=True)
@@ -55,6 +60,10 @@ class DomainConfig:
     dt_keys: frozenset
     json_keys: frozenset
     conflict: str              # on_conflict columns
+    # NOT NULL columns: $unset writes the column default instead of NULL.
+    not_null_defaults: tuple = ()
+    # Legacy Mongo aliases normalized into canonical columns (not spilled).
+    drop_keys: frozenset = frozenset()
 
 
 ACTIVITY_CFG = DomainConfig(
@@ -66,11 +75,13 @@ ACTIVITY_CFG = DomainConfig(
     known_cols=frozenset({
         "event_id", "workspace_id", "event_type", "title", "description",
         "related_id", "related_type", "timestamp", "is_simulation",
+        "hidden_by_real", "extra",
         "created_at", "updated_at",
     }),
     dt_keys=frozenset({"timestamp", "created_at", "updated_at"}),
-    json_keys=frozenset(),
+    json_keys=frozenset({"extra"}),
     conflict="workspace_id,event_id",
+    not_null_defaults=(("is_simulation", False), ("hidden_by_real", False)),
 )
 
 CONTENT_ITEMS_CFG = DomainConfig(
@@ -81,11 +92,13 @@ CONTENT_ITEMS_CFG = DomainConfig(
     mirror_env="QUANTRO_CONTENT_MONGO_MIRROR",
     known_cols=frozenset({
         "content_id", "workspace_id", "type", "title", "content", "status",
-        "created_by", "is_simulation", "created_at", "updated_at",
+        "created_by", "is_simulation", "hidden_by_real", "extra",
+        "created_at", "updated_at",
     }),
     dt_keys=frozenset({"created_at", "updated_at"}),
-    json_keys=frozenset({"content"}),
+    json_keys=frozenset({"content", "extra"}),
     conflict="workspace_id,content_id",
+    not_null_defaults=(("is_simulation", False), ("hidden_by_real", False)),
 )
 
 CONTENT_TEMPLATES_CFG = DomainConfig(
@@ -96,11 +109,16 @@ CONTENT_TEMPLATES_CFG = DomainConfig(
     mirror_env="QUANTRO_CONTENT_MONGO_MIRROR",
     known_cols=frozenset({
         "template_id", "workspace_id", "name", "category", "body", "channel",
-        "is_default", "is_simulation", "created_at", "updated_at",
+        "is_default", "is_simulation", "hidden_by_real",
+        # Template editor fields (were Mongo-only before the Mongo exit).
+        "template_type", "subject_template", "body_template", "variables", "tags",
+        "status", "created_by", "extra",
+        "created_at", "updated_at",
     }),
     dt_keys=frozenset({"created_at", "updated_at"}),
-    json_keys=frozenset({"body"}),
+    json_keys=frozenset({"body", "variables", "tags", "extra"}),
     conflict="workspace_id,template_id",
+    not_null_defaults=(("is_default", False), ("is_simulation", False), ("hidden_by_real", False)),
 )
 
 CONTACTS_CFG = DomainConfig(
@@ -113,11 +131,13 @@ CONTACTS_CFG = DomainConfig(
         "contact_id", "workspace_id", "name", "email", "phone", "type",
         "lifecycle_stage", "source", "notes", "tags",
         "ghl_sync_status", "ghl_last_sync", "ghl_id",
-        "is_simulation", "created_at", "updated_at",
+        "is_simulation", "hidden_by_real", "extra",
+        "created_at", "updated_at",
     }),
     dt_keys=frozenset({"ghl_last_sync", "created_at", "updated_at"}),
-    json_keys=frozenset({"tags"}),
+    json_keys=frozenset({"tags", "extra"}),
     conflict="workspace_id,contact_id",
+    not_null_defaults=(("is_simulation", False), ("hidden_by_real", False)),
 )
 
 CALENDAR_CFG = DomainConfig(
@@ -135,21 +155,24 @@ CALENDAR_CFG = DomainConfig(
         "source", "contact_id",
         # legacy column kept readable during transition
         "google_event_id",
-        "is_simulation", "hidden_by_real",
+        "is_simulation", "hidden_by_real", "is_real", "extra",
         "created_at", "updated_at", "synced_at",
     }),
     dt_keys=frozenset({
         "start_time", "end_time", "created_at", "updated_at", "synced_at", "external_updated_at",
     }),
-    json_keys=frozenset({"attendees"}),
+    json_keys=frozenset({"attendees", "extra"}),
     conflict="workspace_id,event_id",
+    not_null_defaults=(("is_simulation", False), ("hidden_by_real", False)),
+    # normalize_calendar_doc maps these onto external_* / start_time / …
+    drop_keys=frozenset({"gcal_id", "ms_id", "start", "end", "html_link"}),
 )
 
 # Valid external_provider values for canonical calendar rows.
 CALENDAR_EXTERNAL_PROVIDERS = frozenset({"google", "microsoft", "internal"})
 
 
-def normalize_calendar_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_calendar_doc(doc: Dict[str, Any], *, infer_provider: bool = True) -> Dict[str, Any]:
     """Map legacy Mongo Google/MS shapes onto the canonical calendar model.
 
     Legacy inputs accepted on read/backfill:
@@ -158,6 +181,11 @@ def normalize_calendar_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
       html_link → external_url
 
     New writes should already be canonical; this is idempotent.
+
+    ``infer_provider=False`` for PARTIAL docs (``$set`` / ``$setOnInsert``
+    patches): inferring ``external_provider="internal"`` there rewrote the
+    provider of the rows being patched and, for sync upserts, made Mongo
+    reject the update ($set and $setOnInsert both writing external_provider).
     """
     if not doc:
         return {}
@@ -188,7 +216,7 @@ def normalize_calendar_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
 
     # Infer provider from source when still unset
     provider = (out.get("external_provider") or "").lower().strip()
-    if provider not in CALENDAR_EXTERNAL_PROVIDERS:
+    if provider not in CALENDAR_EXTERNAL_PROVIDERS and infer_provider:
         src = (out.get("source") or "").lower()
         if "google" in src:
             provider = "google"
@@ -303,6 +331,15 @@ def calendar_on_conflict(doc: Dict[str, Any]) -> str:
     return "workspace_id,event_id"
 
 
+def _calendar_mongo_ok(calendar_col: Any) -> bool:
+    """Legacy Mongo-only lookups/writes are allowed for calendar right now."""
+    mongo = getattr(calendar_col, "_mongo", None)
+    if mongo is None:
+        return False
+    cfg = getattr(calendar_col, "cfg", CALENDAR_CFG)
+    return is_mongo_write(cfg)
+
+
 async def find_calendar_event_for_external_sync(
     calendar_col: Any,
     *,
@@ -315,6 +352,8 @@ async def find_calendar_event_for_external_sync(
     Lookup order (transition-safe):
       1. Canonical ``workspace_id + external_provider + external_event_id``
       2. Legacy Google ``workspace_id + gcal_id`` / MS ``workspace_id + ms_id``
+         — Mongo only, and only while Mongo is still primary or mirrored
+         (the backfill normalizes legacy rows onto external_* in Supabase).
     """
     if not external_event_id:
         return None
@@ -330,11 +369,27 @@ async def find_calendar_event_for_external_sync(
         return doc
     # Legacy keys live only on Mongo; DualWriteCollection remaps gcal_id/ms_id
     # to external_event_id, so query the underlying collection directly.
-    mongo = getattr(calendar_col, "_mongo", calendar_col)
+    if isinstance(calendar_col, DualWriteCollection):
+        if not _calendar_mongo_ok(calendar_col):
+            return None
+        mongo = calendar_col._mongo
+    else:
+        mongo = calendar_col
     legacy_key = "gcal_id" if provider == "google" else ("ms_id" if provider == "microsoft" else None)
     if not legacy_key or not hasattr(mongo, "find_one"):
         return None
     return await mongo.find_one({"workspace_id": workspace_id, legacy_key: external_event_id})
+
+
+def _loose(value: Any) -> Any:
+    if isinstance(value, str):
+        parsed = _parse_dt(value)
+        if isinstance(parsed, datetime):
+            value = parsed
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    return str(value or "")
 
 
 def _calendar_compare_unchanged(existing: Dict[str, Any], canonical: Dict[str, Any]) -> bool:
@@ -348,12 +403,7 @@ def _calendar_compare_unchanged(existing: Dict[str, Any], canonical: Dict[str, A
         right = canonical.get(k)
         if left is None and right in (None, "", []):
             continue
-        # Normalize datetimes / strings for loose equality
-        if hasattr(left, "isoformat"):
-            left = left.isoformat()
-        if hasattr(right, "isoformat"):
-            right = right.isoformat()
-        if str(left or "") != str(right or ""):
+        if _loose(left) != _loose(right):
             return False
     return True
 
@@ -396,28 +446,42 @@ async def upsert_calendar_external_event(
     status_val = (canonical.get("status") or "").lower()
     is_cancelled = status_val == "cancelled" or bool(canonical.get("cancelled"))
 
+    is_facade = isinstance(calendar_col, DualWriteCollection)
+    cfg = getattr(calendar_col, "cfg", CALENDAR_CFG)
+    sb_primary = is_facade and is_supabase_primary(cfg)
+
     if existing is not None:
         event_id = existing.get("event_id") or existing.get("id") or str(uuid.uuid4())
         if _calendar_compare_unchanged(existing, canonical):
             return {"event_id": event_id, "outcome": "unchanged"}
         set_fields_with_id = {**set_fields, "event_id": event_id}
-        mongo = getattr(calendar_col, "_mongo", calendar_col)
-        if existing.get("_id") is not None and hasattr(mongo, "update_one"):
-            await mongo.update_one({"_id": existing["_id"]}, {"$set": set_fields_with_id})
-        elif existing.get("event_id"):
-            await calendar_col.update_one(
-                {"workspace_id": workspace_id, "event_id": event_id},
-                {"$set": set_fields},
-            )
+        if sb_primary:
+            # Supabase is the SoT: one upsert on the external identity keeps
+            # the stored event_id (see _sb_upsert_doc).
+            ok = await calendar_col._sb_upsert_doc(set_fields_with_id)
+            if not ok and not _mongo_fallback_ok(cfg):
+                raise SupabaseStoreError("calendar_events upsert failed", table=cfg.table)
+            if _calendar_mongo_ok(calendar_col):
+                await _mirror_calendar_legacy(calendar_col, existing, workspace_id, provider,
+                                              external_event_id, set_fields, set_fields_with_id)
         else:
-            legacy_key = "gcal_id" if provider == "google" else "ms_id"
-            await mongo.update_one(
-                {"workspace_id": workspace_id, legacy_key: external_event_id},
-                {"$set": set_fields_with_id},
-            )
-        # Dual-write / SB path: preserve stable event_id via external conflict.
-        if hasattr(calendar_col, "_sb_upsert_doc") and is_dual_write(CALENDAR_CFG):
-            await calendar_col._sb_upsert_doc({**set_fields, "event_id": event_id})
+            mongo = getattr(calendar_col, "_mongo", calendar_col)
+            if existing.get("_id") is not None and hasattr(mongo, "update_one"):
+                await mongo.update_one({"_id": existing["_id"]}, {"$set": set_fields_with_id})
+            elif existing.get("event_id"):
+                await calendar_col.update_one(
+                    {"workspace_id": workspace_id, "event_id": event_id},
+                    {"$set": set_fields},
+                )
+            else:
+                legacy_key = "gcal_id" if provider == "google" else "ms_id"
+                await mongo.update_one(
+                    {"workspace_id": workspace_id, legacy_key: external_event_id},
+                    {"$set": set_fields_with_id},
+                )
+            # Dual-write / SB path: preserve stable event_id via external conflict.
+            if hasattr(calendar_col, "_sb_upsert_doc") and is_dual_write(cfg):
+                await calendar_col._sb_upsert_doc({**set_fields, "event_id": event_id})
         outcome = "cancelled" if is_cancelled else "updated"
         return {"event_id": event_id, "outcome": outcome}
 
@@ -438,6 +502,24 @@ async def upsert_calendar_external_event(
     return {"event_id": event_id, "outcome": outcome}
 
 
+async def _mirror_calendar_legacy(calendar_col, existing, workspace_id, provider, external_event_id,
+                                  set_fields, set_fields_with_id) -> None:
+    """Best-effort Mongo mirror of a sync update (Supabase primary + mirror on)."""
+    mongo = calendar_col._mongo
+    try:
+        if existing.get("_id") is not None:
+            await mongo.update_one({"_id": existing["_id"]}, {"$set": set_fields_with_id})
+        else:
+            await mongo.update_one(
+                {"workspace_id": workspace_id, "external_provider": provider,
+                 "external_event_id": external_event_id},
+                {"$set": set_fields_with_id},
+                upsert=True,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s calendar mongo mirror failed: %s", storage_flags.STORE_DRIFT, exc)
+
+
 
 def _primary(cfg: DomainConfig) -> str:
     return _env_primary(cfg.primary_env)
@@ -456,6 +538,11 @@ def is_mongo_write(cfg: DomainConfig) -> bool:
         return True
     if _primary(cfg) != "supabase":
         return True
+    return _env_mirror(cfg.mirror_env)
+
+
+def _mongo_fallback_ok(cfg: DomainConfig) -> bool:
+    """Supabase primary consults Mongo only while it is kept as a mirror."""
     return _env_mirror(cfg.mirror_env)
 
 
@@ -509,6 +596,11 @@ async def _sb_request(
         return None
 
 
+async def _req(method: str, path: str, **kwargs: Any):
+    """Late-bound so tests can monkeypatch ``product_domain_store._sb_request``."""
+    return await _sb_request(method, path, **kwargs)
+
+
 def _iso(value: Any) -> Optional[str]:
     if value is None:
         return None
@@ -528,60 +620,75 @@ def _parse_dt(value: Any) -> Any:
         return value
 
 
-def mongo_to_sb(cfg: DomainConfig, doc: Dict[str, Any]) -> Dict[str, Any]:
+def mongo_to_sb(cfg: DomainConfig, doc: Dict[str, Any], *, full: bool = False, partial: bool = False) -> Dict[str, Any]:
+    """Mongo doc (or $set patch) → Postgres row.
+
+    Fields without a column go to ``extra`` (jsonb) instead of being dropped;
+    ``full=True`` always sends ``extra`` (whole-document writes);
+    ``partial=True`` for patches (no calendar provider inference).
+    """
     out: Dict[str, Any] = {}
+    extra: Dict[str, Any] = {}
     src = dict(doc)
     if cfg.name == "calendar":
-        src = normalize_calendar_doc(src)
+        src = normalize_calendar_doc(src, infer_provider=not partial)
     if "id" in src and cfg.app_id_field not in src:
         src[cfg.app_id_field] = src["id"]
+    has_extra_col = "extra" in cfg.known_cols
     for k, v in src.items():
         if k == "id" or k == "_id":
             continue
+        if k == "extra" and has_extra_col:
+            if isinstance(v, dict):
+                extra.update(mc.to_json(v))
+            else:
+                extra["extra"] = mc.to_json(v)
+            continue
         if k not in cfg.known_cols:
+            if has_extra_col and k not in cfg.drop_keys:
+                extra[k] = mc.to_json(v)
             continue
         if k in cfg.dt_keys:
             out[k] = _iso(v)
+        elif k in cfg.json_keys:
+            out[k] = mc.to_json(v)
         else:
             out[k] = v
+    if has_extra_col and (extra or full):
+        out["extra"] = extra
     if cfg.app_id_field not in out and src.get(cfg.app_id_field):
         out[cfg.app_id_field] = src[cfg.app_id_field]
     return out
 
 
 def sb_to_mongo(cfg: DomainConfig, row: Dict[str, Any]) -> Dict[str, Any]:
-    out = {k: v for k, v in row.items() if k != "id"}
+    out = {k: v for k, v in row.items() if k not in ("id", "extra")}
     for k in cfg.dt_keys:
         if k in out:
             out[k] = _parse_dt(out[k])
+    extra_val = row.get("extra")
+    for k, v in (extra_val.items() if isinstance(extra_val, dict) else ()):
+        out.setdefault(k, mc.from_json(v))
     return out
 
 
-def _mongo_filter_to_params(query: Dict[str, Any], *, select: str = "*") -> Dict[str, str]:
-    params: Dict[str, str] = {}
+def _split(cfg: DomainConfig, query: Dict[str, Any]):
+    """(PostgREST params, residual Mongo filter). Raises sb_rest.Impossible."""
+    return sb_rest.split_filter(query, cfg.known_cols - {"extra"}, json_cols=cfg.json_keys)
+
+
+def _mongo_filter_to_params(query: Dict[str, Any], *, select: str = "*", cfg: Optional[DomainConfig] = None) -> Dict[str, str]:
+    """Params for the exactly-expressible part of ``query`` (see ``_split``)."""
+    cols = (cfg.known_cols - {"extra"}) if cfg else {k for k in (query or {}) if not str(k).startswith("$")}
+    try:
+        params, _ = sb_rest.split_filter(query, cols, json_cols=(cfg.json_keys if cfg else ()))
+    except sb_rest.Impossible:
+        params = {}
+    out: Dict[str, str] = {}
     if select:
-        params["select"] = select
-    for k, v in (query or {}).items():
-        if k == "_id":
-            continue
-        if isinstance(v, dict):
-            if "$in" in v:
-                vals = ",".join(str(x) for x in v["$in"])
-                params[k] = f"in.({vals})"
-            elif "$ne" in v:
-                params[k] = f"neq.{v['$ne']}"
-            elif "$exists" in v:
-                params[k] = "not.is.null" if v["$exists"] else "is.null"
-            else:
-                # skip complex ops
-                continue
-        elif v is None:
-            params[k] = "is.null"
-        elif isinstance(v, bool):
-            params[k] = f"eq.{str(v).lower()}"
-        else:
-            params[k] = f"eq.{v}"
-    return params
+        out["select"] = select
+    out.update(params)
+    return out
 
 
 def _strip_pg_id(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -589,6 +696,7 @@ def _strip_pg_id(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         return doc
     d = dict(doc)
     d.pop("id", None)
+    d.pop("_pk", None)
     return d
 
 
@@ -602,160 +710,243 @@ def _project(doc: Optional[Dict[str, Any]], projection: Optional[Dict[str, int]]
     return {k: v for k, v in doc.items() if k not in exclude}
 
 
+_ORDER_DEFAULT = "created_at.asc,id.asc"
+
+
 class DualWriteCollection:
     def __init__(self, mongo_col: Any, cfg: DomainConfig):
         self._mongo = mongo_col
         self.cfg = cfg
         self.table = cfg.table
 
-    def find(self, query: Optional[Dict[str, Any]] = None, projection: Optional[Dict[str, int]] = None):
+    # ── Supabase read primitives ──────────────────────────────────────
+    async def _sb_rows(self, query: Dict[str, Any], *, sort=None, skip: int = 0, limit: int = 0) -> List[Dict[str, Any]]:
+        """Docs (+``_pk``) matching the WHOLE filter. Raises SupabaseStoreError."""
+        try:
+            params, residual = _split(self.cfg, query)
+        except sb_rest.Impossible:
+            return []
+        params["select"] = "*"
+        order = sb_rest.order_param(sort or [], self.cfg.known_cols) if sort else _ORDER_DEFAULT
+        exact = not residual and order is not None
+        rows = await sb_rest.fetch_all(
+            _req, self.table, params,
+            order=order or _ORDER_DEFAULT,
+            limit=limit if (exact and limit) else None,
+            offset=skip if exact else 0,
+        )
+        if rows is None:
+            raise SupabaseStoreError(f"{self.table} read failed", table=self.table)
+        docs = []
+        for r in rows:
+            d = sb_to_mongo(self.cfg, r)
+            if residual and not mc.match(d, residual):
+                continue
+            d["_pk"] = r.get("id")
+            docs.append(d)
+        if not exact:
+            if sort:
+                docs = mc.sort_docs(docs, sort)
+            if skip:
+                docs = docs[skip:]
+            if limit:
+                docs = docs[:limit]
+        return docs
+
+    async def _sb_find_one(self, query: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        try:
+            docs = await self._sb_rows(query, limit=1)
+        except SupabaseStoreError:
+            return None
+        return docs[0] if docs else None
+
+    async def _sb_count(self, query: Dict[str, Any]) -> Optional[int]:
+        try:
+            params, residual = _split(self.cfg, query)
+        except sb_rest.Impossible:
+            return 0
+        if not residual:
+            n = await sb_rest.count_exact(_req, self.table, params)
+            if n is not None:
+                return n
+        try:
+            return len(await self._sb_rows(query))
+        except SupabaseStoreError:
+            return None
+
+    # ── reads ─────────────────────────────────────────────────────────
+    def find(self, query: Optional[Dict[str, Any]] = None, projection: Optional[Dict[str, int]] = None, **kwargs: Any):
         q = query or {}
         if self.cfg.name == "calendar":
             q = normalize_calendar_query(q)
-        return _LazyFindCursor(self, q, projection)
+        cur = _LazyFindCursor(self, q, projection)
+        if kwargs.get("sort"):
+            cur.sort(kwargs["sort"])
+        return cur
 
-    async def find_one(self, query: Dict[str, Any], projection: Optional[Dict[str, int]] = None):
+    async def find_one(self, query: Dict[str, Any], projection: Optional[Dict[str, int]] = None, **_: Any):
         if self.cfg.name == "calendar":
             query = normalize_calendar_query(query)
         if is_supabase_primary(self.cfg):
-            row = await self._sb_find_one(query)
-            if row is not None:
-                return _project(_strip_pg_id(sb_to_mongo(self.cfg, row)), projection)
+            try:
+                docs = await self._sb_rows(query, limit=1)
+            except SupabaseStoreError:
+                if not _mongo_fallback_ok(self.cfg):
+                    raise
+                docs = []
+                logger.warning("%s %s: Supabase read failed — Mongo mirror fallback", storage_flags.MONGO_ONLY, self.cfg.name)
+            if docs:
+                return _project(_strip_pg_id(docs[0]), projection)
+            if not _mongo_fallback_ok(self.cfg):
+                return None
         try:
             doc = await self._mongo.find_one(query, projection) if projection is not None else await self._mongo.find_one(query)
         except TypeError:
             doc = await self._mongo.find_one(query)
+        if doc is not None and is_supabase_primary(self.cfg):
+            logger.warning("%s %s: row only in Mongo (%s=%s) — re-run the backfill",
+                           storage_flags.MONGO_ONLY, self.cfg.name, self.cfg.app_id_field,
+                           doc.get(self.cfg.app_id_field, "?"))
         return doc
 
-    async def count_documents(self, query: Dict[str, Any]) -> int:
+    async def count_documents(self, query: Dict[str, Any], **_: Any) -> int:
         if self.cfg.name == "calendar":
             query = normalize_calendar_query(query)
         if is_supabase_primary(self.cfg):
             n = await self._sb_count(query)
             if n is not None:
                 return n
+            if not _mongo_fallback_ok(self.cfg):
+                raise SupabaseStoreError(f"{self.table} count failed", table=self.table)
         return await self._mongo.count_documents(query)
 
-    async def insert_one(self, doc: Dict[str, Any]):
+    # ── writes ────────────────────────────────────────────────────────
+    def _sb_failed(self, what: str) -> None:
+        """Supabase primary write failed: raise unless Mongo still mirrors."""
+        if is_supabase_primary(self.cfg) and not _mongo_fallback_ok(self.cfg):
+            raise SupabaseStoreError(f"{self.table} {what} failed", table=self.table)
+        logger.warning("%s %s SB %s failed (Mongo still written)", storage_flags.MONGO_ONLY, self.cfg.name, what)
+
+    async def _mongo_call(self, fn, *args, **kwargs):
+        """Mongo write: required while Mongo is primary, best-effort mirror
+        once Supabase is primary (a Mongo outage must not fail the request)."""
+        if not is_supabase_primary(self.cfg):
+            return await fn(*args, **kwargs)
+        try:
+            return await fn(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("%s %s mongo mirror write failed: %s", storage_flags.STORE_DRIFT, self.cfg.name, exc)
+            return None
+
+    async def insert_one(self, doc: Dict[str, Any], *_: Any, **__: Any):
         if self.cfg.name == "calendar":
             doc = normalize_calendar_doc(doc)
+        result = None
         if is_mongo_write(self.cfg):
-            result = await self._mongo.insert_one(doc)
-        else:
-            class _R:
-                inserted_id = doc.get("_id") or doc.get(self.cfg.app_id_field)
-            result = _R()
+            result = await self._mongo_call(self._mongo.insert_one, doc)
+        if result is None:
+            result = mc.InsertOneResult(doc.get(self.cfg.app_id_field))
         if is_dual_write(self.cfg):
-            await self._sb_upsert_doc(doc)
+            if not await self._sb_upsert_doc(doc):
+                self._sb_failed("insert")
         return result
 
-    async def insert_many(self, docs: List[Dict[str, Any]]):
+    async def insert_many(self, docs: List[Dict[str, Any]], *_: Any, **__: Any):
         if self.cfg.name == "calendar":
             docs = [normalize_calendar_doc(d) for d in docs]
+        result = None
         if is_mongo_write(self.cfg):
-            result = await self._mongo.insert_many(docs)
-        else:
-            class _R:
-                inserted_ids = [d.get("_id") or d.get(self.cfg.app_id_field) for d in docs]
-            result = _R()
+            result = await self._mongo_call(self._mongo.insert_many, docs)
+        if result is None:
+            result = mc.InsertManyResult([d.get(self.cfg.app_id_field) for d in docs])
         if is_dual_write(self.cfg):
             for d in docs:
-                await self._sb_upsert_doc(d)
+                if not await self._sb_upsert_doc(d):
+                    self._sb_failed("insert")
         return result
 
-    async def update_one(self, query: Dict[str, Any], update: Dict[str, Any], upsert: bool = False):
+    def _normalize_update(self, query: Dict[str, Any], update: Dict[str, Any]):
         if self.cfg.name == "calendar":
             query = normalize_calendar_query(query)
             if "$set" in update:
-                update = {**update, "$set": normalize_calendar_doc(update["$set"])}
+                update = {**update, "$set": normalize_calendar_doc(update["$set"], infer_provider=False)}
             if "$setOnInsert" in update:
-                update = {**update, "$setOnInsert": normalize_calendar_doc(update["$setOnInsert"])}
-        if is_mongo_write(self.cfg):
-            result = await self._mongo.update_one(query, update, upsert=upsert)
-        else:
-            class _R:
-                matched_count = 1
-                modified_count = 1
-                upserted_id = None
-            result = _R()
-        if is_dual_write(self.cfg):
-            await self._sb_update(query, update, upsert=upsert)
-        return result
+                soi = normalize_calendar_doc(update["$setOnInsert"], infer_provider=False)
+                # Mongo rejects an update where $set and $setOnInsert write
+                # the same path; $set already carries those values.
+                set_keys = set(update.get("$set") or {})
+                update = {**update, "$setOnInsert": {k: v for k, v in soi.items() if k not in set_keys}}
+        return query, update
 
-    async def update_many(self, query: Dict[str, Any], update: Dict[str, Any]):
+    async def update_one(self, query: Dict[str, Any], update: Dict[str, Any], upsert: bool = False, **_: Any):
+        query, update = self._normalize_update(query, update)
+        result = None
+        if is_mongo_write(self.cfg):
+            try:
+                result = await self._mongo.update_one(query, update, upsert=upsert)
+            except Exception:
+                if not is_supabase_primary(self.cfg):
+                    raise
+                logger.warning("%s %s mongo mirror update_one failed", storage_flags.STORE_DRIFT, self.cfg.name)
+        sb_res = None
+        if is_dual_write(self.cfg):
+            sb_res = await self._sb_update(query, update, upsert=upsert, many=False)
+            if sb_res is None:
+                self._sb_failed("update")
+        if is_supabase_primary(self.cfg) and sb_res is not None:
+            return sb_res
+        return result if result is not None else (sb_res or mc.UpdateResult(0, 0))
+
+    async def update_many(self, query: Dict[str, Any], update: Dict[str, Any], **_: Any):
+        query, update = self._normalize_update(query, update)
+        result = None
+        if is_mongo_write(self.cfg):
+            try:
+                result = await self._mongo.update_many(query, update)
+            except Exception:
+                if not is_supabase_primary(self.cfg):
+                    raise
+                logger.warning("%s %s mongo mirror update_many failed", storage_flags.STORE_DRIFT, self.cfg.name)
+        sb_res = None
+        if is_dual_write(self.cfg):
+            sb_res = await self._sb_update(query, update, upsert=False, many=True)
+            if sb_res is None:
+                self._sb_failed("update")
+        if is_supabase_primary(self.cfg) and sb_res is not None:
+            return sb_res
+        return result if result is not None else (sb_res or mc.UpdateResult(0, 0))
+
+    async def delete_one(self, query: Dict[str, Any], **_: Any):
+        return await self._delete(query, many=False)
+
+    async def delete_many(self, query: Dict[str, Any], **_: Any):
+        return await self._delete(query, many=True)
+
+    async def _delete(self, query: Dict[str, Any], *, many: bool):
         if self.cfg.name == "calendar":
             query = normalize_calendar_query(query)
-            if "$set" in update:
-                update = {**update, "$set": normalize_calendar_doc(update["$set"])}
+        result = None
         if is_mongo_write(self.cfg):
-            result = await self._mongo.update_many(query, update)
-        else:
-            class _R:
-                matched_count = 0
-                modified_count = 0
-            result = _R()
+            try:
+                result = await (self._mongo.delete_many(query) if many else self._mongo.delete_one(query))
+            except Exception:
+                if not is_supabase_primary(self.cfg):
+                    raise
+                logger.warning("%s %s mongo mirror delete failed", storage_flags.STORE_DRIFT, self.cfg.name)
+        n = None
         if is_dual_write(self.cfg):
-            await self._sb_update(query, update, upsert=False)
-        return result
-
-    async def delete_one(self, query: Dict[str, Any]):
-        if self.cfg.name == "calendar":
-            query = normalize_calendar_query(query)
-        if is_mongo_write(self.cfg):
-            result = await self._mongo.delete_one(query)
-        else:
-            class _R:
-                deleted_count = 1
-            result = _R()
-        if is_dual_write(self.cfg):
-            await self._sb_delete(query)
-        return result
-
-    async def delete_many(self, query: Dict[str, Any]):
-        if self.cfg.name == "calendar":
-            query = normalize_calendar_query(query)
-        if is_mongo_write(self.cfg):
-            result = await self._mongo.delete_many(query)
-        else:
-            class _R:
-                deleted_count = 0
-            result = _R()
-        if is_dual_write(self.cfg):
-            await self._sb_delete(query)
-        return result
+            n = await self._sb_delete(query, many=many)
+            if n is None:
+                self._sb_failed("delete")
+        if is_supabase_primary(self.cfg) and n is not None:
+            return mc.DeleteResult(n)
+        return result if result is not None else mc.DeleteResult(n or 0)
 
     async def create_index(self, *args, **kwargs):
-        if hasattr(self._mongo, "create_index"):
+        if not is_supabase_primary(self.cfg) and hasattr(self._mongo, "create_index"):
             return await self._mongo.create_index(*args, **kwargs)
 
-    async def _sb_find_one(self, query: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        params = _mongo_filter_to_params(query)
-        params["limit"] = "1"
-        resp = await _sb_request("GET", f"/rest/v1/{self.table}", params=params)
-        if resp is None or resp.status_code >= 400:
-            return None
-        rows = resp.json() or []
-        return rows[0] if rows else None
-
-    async def _sb_count(self, query: Dict[str, Any]) -> Optional[int]:
-        params = _mongo_filter_to_params(query, select="")
-        headers = _service_headers("count=exact")
-        if not headers or not SUPABASE_URL:
-            return None
-        try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                resp = await client.head(
-                    f"{SUPABASE_URL}/rest/v1/{self.table}",
-                    headers={**headers, "Prefer": "count=exact"},
-                    params=params,
-                )
-            cr = resp.headers.get("content-range") or ""
-            if "/" in cr:
-                return int(cr.split("/")[-1])
-        except Exception as exc:
-            logger.warning("%s SB count failed: %s", self.cfg.name, exc)
-        return None
-
+    # ── Supabase write primitives ─────────────────────────────────────
     async def _sb_upsert_doc(self, doc: Dict[str, Any]) -> bool:
         if self.cfg.name == "calendar":
             doc = normalize_calendar_doc(doc)
@@ -777,46 +968,137 @@ class DualWriteCollection:
                 )
                 if existing and existing.get("event_id"):
                     payload["event_id"] = existing["event_id"]
-        resp = await _sb_request(
+        resp = await _req(
             "POST",
             f"/rest/v1/{self.table}?on_conflict={conflict}",
             json=payload,
             prefer="resolution=merge-duplicates,return=minimal",
         )
-        if resp is not None and resp.status_code >= 400:
+        if resp is None:
+            return False
+        if resp.status_code >= 400:
             logger.warning("%s SB upsert → %s %s", self.cfg.name, resp.status_code, (resp.text or "")[:160])
             return False
         return True
 
-    async def _sb_update(self, query: Dict[str, Any], update: Dict[str, Any], *, upsert: bool) -> None:
-        fields = update.get("$set") or {}
-        set_on_insert = update.get("$setOnInsert") or {}
-        unset = update.get("$unset") or {}
-        if upsert:
-            merge_keys = ("workspace_id", self.cfg.app_id_field, "external_provider", "external_event_id")
-            merged = {**{k: query.get(k) for k in merge_keys if k in query}}
-            merged.update(set_on_insert)
-            merged.update(fields)
-            if not merged.get(self.cfg.app_id_field):
-                merged[self.cfg.app_id_field] = query.get(self.cfg.app_id_field) or query.get("id")
-            await self._sb_upsert_doc(merged)
-            return
-        patch = mongo_to_sb(self.cfg, fields) if fields else {}
-        for k in unset:
-            if k in self.cfg.known_cols:
-                patch[k] = None
-        params = _mongo_filter_to_params(query, select="")
-        params.pop("select", None)
-        resp = await _sb_request("PATCH", f"/rest/v1/{self.table}", json=patch, params=params, prefer="return=minimal")
-        if resp is not None and resp.status_code >= 400:
-            logger.warning("%s SB update → %s %s", self.cfg.name, resp.status_code, (resp.text or "")[:160])
+    def _column_patch(self, update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Plain SQL patch for $set/$unset on real columns, else None."""
+        touched, simple = mc.update_touches(update)
+        cols = self.cfg.known_cols
+        if not simple or "extra" in touched or any(f not in cols and f not in ("id",) for f in touched):
+            return None
+        fields = dict((update or {}).get("$set") or {})
+        patch = mongo_to_sb(self.cfg, fields, partial=True) if fields else {}
+        patch.pop("extra", None)
+        defaults = dict(self.cfg.not_null_defaults)
+        for k in (update or {}).get("$unset") or {}:
+            if k in cols:
+                patch[k] = defaults.get(k)
+        return patch
 
-    async def _sb_delete(self, query: Dict[str, Any]) -> None:
-        params = _mongo_filter_to_params(query, select="")
-        params.pop("select", None)
-        resp = await _sb_request("DELETE", f"/rest/v1/{self.table}", params=params, prefer="return=minimal")
-        if resp is not None and resp.status_code >= 400:
-            logger.warning("%s SB delete → %s %s", self.cfg.name, resp.status_code, (resp.text or "")[:160])
+    async def _patch(self, params: Dict[str, str], patch: Dict[str, Any]) -> Optional[int]:
+        p = dict(params)
+        p.pop("select", None)
+        p["select"] = self.cfg.app_id_field
+        resp = await _req("PATCH", f"/rest/v1/{self.table}", json=patch, params=p, prefer="return=representation")
+        if resp is None or resp.status_code >= 400:
+            if resp is not None:
+                logger.warning("%s SB update → %s %s", self.cfg.name, resp.status_code, (resp.text or "")[:160])
+            return None
+        try:
+            body = resp.json()
+        except Exception:  # noqa: BLE001
+            body = None
+        return len(body) if isinstance(body, list) else 1
+
+    def _full_row(self, doc: Dict[str, Any]) -> Dict[str, Any]:
+        row = mongo_to_sb(self.cfg, {k: v for k, v in doc.items() if k != "_pk"}, full=True)
+        for k, default in self.cfg.not_null_defaults:
+            if k in self.cfg.known_cols and row.get(k, default) is None:
+                row[k] = default
+        return row
+
+    async def _sb_update(self, query: Dict[str, Any], update: Dict[str, Any], *, upsert: bool, many: bool = True) -> Optional[mc.UpdateResult]:
+        """Mongo update semantics on Supabase. None = Supabase unavailable."""
+        if not update:
+            return mc.UpdateResult(0, 0)
+        try:
+            if upsert:
+                return await self._sb_upsert(query, update)
+            try:
+                params, residual = _split(self.cfg, query)
+            except sb_rest.Impossible:
+                return mc.UpdateResult(0, 0)
+            patch = self._column_patch(update)
+            if patch is not None and not residual:
+                if not patch:
+                    return mc.UpdateResult(0, 0)
+                n = await self._patch(params, patch)
+                return None if n is None else mc.UpdateResult(n, n)
+            docs = await self._sb_rows(query, limit=0 if many else 1)
+            for d in docs:
+                pk = d.pop("_pk")
+                new = mc.apply_update(d, update)
+                if await self._patch({"id": f"eq.{pk}"}, self._full_row(new)) is None:
+                    return None
+            return mc.UpdateResult(len(docs), len(docs))
+        except SupabaseStoreError:
+            return None
+
+    async def _sb_upsert(self, query: Dict[str, Any], update: Dict[str, Any]) -> Optional[mc.UpdateResult]:
+        """Upsert honouring $setOnInsert (only applied when inserting)."""
+        docs = await self._sb_rows(query, limit=1)
+        set_only = {k: v for k, v in update.items() if k != "$setOnInsert"}
+        if docs:
+            pk = docs[0].pop("_pk")
+            patch = self._column_patch(set_only)
+            if patch is None:
+                patch = self._full_row(mc.apply_update(docs[0], set_only))
+            if not patch:
+                return mc.UpdateResult(1, 0)
+            n = await self._patch({"id": f"eq.{pk}"}, patch)
+            return None if n is None else mc.UpdateResult(1, n)
+        new_doc = mc.apply_update(mc.seed_from_query(query), update, is_insert=True)
+        if not new_doc.get(self.cfg.app_id_field):
+            new_doc[self.cfg.app_id_field] = query.get(self.cfg.app_id_field) or query.get("id") or str(uuid.uuid4())
+        ok = await self._sb_upsert_doc(new_doc)
+        if not ok:
+            return None
+        return mc.UpdateResult(0, 0, new_doc.get(self.cfg.app_id_field))
+
+    async def _sb_delete(self, query: Dict[str, Any], *, many: bool) -> Optional[int]:
+        try:
+            try:
+                params, residual = _split(self.cfg, query)
+            except sb_rest.Impossible:
+                return 0
+            if residual or not many:
+                docs = await self._sb_rows(query, limit=0 if many else 1)
+                ids = [d["_pk"] for d in docs if d.get("_pk")]
+                total = 0
+                for chunk in sb_rest.chunked(ids, 100):
+                    n = await self._delete_params({"id": "in.(" + ",".join(sb_rest.quote(i) for i in chunk) + ")"})
+                    if n is None:
+                        return None
+                    total += n
+                return total
+            return await self._delete_params(params)
+        except SupabaseStoreError:
+            return None
+
+    async def _delete_params(self, params: Dict[str, str]) -> Optional[int]:
+        p = dict(params)
+        p["select"] = self.cfg.app_id_field
+        resp = await _req("DELETE", f"/rest/v1/{self.table}", params=p, prefer="return=representation")
+        if resp is None or resp.status_code >= 400:
+            if resp is not None:
+                logger.warning("%s SB delete → %s %s", self.cfg.name, resp.status_code, (resp.text or "")[:160])
+            return None
+        try:
+            body = resp.json()
+        except Exception:  # noqa: BLE001
+            body = None
+        return len(body) if isinstance(body, list) else 1
 
 
 class _LazyFindCursor:
@@ -824,24 +1106,35 @@ class _LazyFindCursor:
         self._store = store
         self._query = query
         self._projection = projection
-        self._sort: Optional[Tuple[str, int]] = None
+        self._sort: List[Tuple[str, int]] = []
+        self._skip = 0
+        self._limit = 0
 
-    def sort(self, key: str, direction: int = 1):
-        self._sort = (key, direction)
+    def sort(self, key: Any, direction: Optional[int] = None):
+        self._sort = mc.normalize_sort(key, direction)
         return self
 
-    async def to_list(self, n: int) -> List[Dict[str, Any]]:
+    def skip(self, n: int):
+        self._skip = int(n or 0)
+        return self
+
+    def limit(self, n: int):
+        self._limit = int(n or 0)
+        return self
+
+    async def to_list(self, n: Optional[int] = None) -> List[Dict[str, Any]]:
         cfg = self._store.cfg
+        limit = self._limit
+        if n:
+            limit = min(limit, int(n)) if limit else int(n)
         if is_supabase_primary(cfg):
-            params = _mongo_filter_to_params(self._query)
-            params["limit"] = str(n)
-            if self._sort:
-                key, direction = self._sort
-                params["order"] = f"{key}.{'desc' if direction < 0 else 'asc'}"
-            resp = await _sb_request("GET", f"/rest/v1/{self._store.table}", params=params)
-            if resp is not None and resp.status_code < 400:
-                rows = resp.json() or []
-                return [_project(_strip_pg_id(sb_to_mongo(cfg, r)), self._projection) for r in rows]
+            try:
+                docs = await self._store._sb_rows(self._query, sort=self._sort, skip=self._skip, limit=limit)
+                return [_project(_strip_pg_id(d), self._projection) for d in docs]
+            except SupabaseStoreError:
+                if not _mongo_fallback_ok(cfg):
+                    raise
+                logger.warning("%s %s: Supabase list failed — Mongo mirror fallback", storage_flags.MONGO_ONLY, cfg.name)
         try:
             cursor = (
                 self._store._mongo.find(self._query, self._projection)
@@ -851,10 +1144,28 @@ class _LazyFindCursor:
         except TypeError:
             cursor = self._store._mongo.find(self._query)
         if self._sort and hasattr(cursor, "sort"):
-            cursor = cursor.sort(self._sort[0], self._sort[1])
+            if len(self._sort) == 1:
+                cursor = cursor.sort(self._sort[0][0], self._sort[0][1])
+            else:
+                cursor = cursor.sort(self._sort)
+        if self._skip and hasattr(cursor, "skip"):
+            cursor = cursor.skip(self._skip)
         if hasattr(cursor, "to_list"):
-            return await cursor.to_list(n)
+            return await cursor.to_list(limit or None)
         return []
+
+    def __aiter__(self):
+        self._buf: Optional[List[Dict[str, Any]]] = None
+        self._pos = 0
+        return self
+
+    async def __anext__(self):
+        if self._buf is None:
+            self._buf = await self.to_list(None)
+        if self._pos >= len(self._buf):
+            raise StopAsyncIteration
+        self._pos += 1
+        return self._buf[self._pos - 1]
 
 
 def wrap_activity_col(mongo_col: Any) -> DualWriteCollection:

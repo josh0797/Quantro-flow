@@ -9,6 +9,7 @@ instead.
 """
 from __future__ import annotations
 
+import provider_secrets_store
 from errors import QuantroError
 from ..base import ActionContext, ActionResult
 
@@ -16,7 +17,11 @@ from ..base import ActionContext, ActionResult
 async def _access_token_or_raise(ctx: ActionContext, action_id: str) -> str:
     msoa = ctx.dep("msoa_module")
     col = ctx.dep("microsoft_integrations_col")
-    doc = await col.find_one({"workspace_id": ctx.workspace_id})
+    # Through provider_secrets_store (Supabase primary) — never a raw
+    # Mongo read, which returned stale/missing docs once secrets moved.
+    doc = await provider_secrets_store.get_connection(
+        provider="microsoft", workspace_id=ctx.workspace_id, mongo_col=col,
+    )
     if not doc:
         raise QuantroError("provider_not_connected", "Microsoft is not connected for this workspace")
 

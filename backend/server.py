@@ -22,13 +22,16 @@ from jwt import PyJWKClient, InvalidTokenError, ExpiredSignatureError
 from fastapi import FastAPI, HTTPException, Query, Request, Response, Depends
 from fastapi.responses import StreamingResponse, RedirectResponse, PlainTextResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Tuple
 from ai_billing import run_ai_request
 import supabase_admin
 import provider_secrets_store as secrets_store
 import connect_store
+import doc_store
+import mongo_legacy
+import sb_rest
+import storage_flags
 
 # ─── Quantro Connect + Quantro Actions ─────────────────────────────────
 # New platform-layer modules (see integrations/ and actions/ packages).
@@ -56,7 +59,7 @@ from actions.store import (
     wrap_action_policies_col,
 )
 from inbox_store import wrap_inbox_col
-from sync_lock import acquire_sync_lock_lease
+from sync_lock import acquire_sync_lock_lease, acquire_sync_lock_lease_supabase
 from product_domain_store import (
     wrap_activity_col, wrap_content_items_col, wrap_content_templates_col,
     wrap_contacts_col, wrap_calendar_col, product_domains_health,
@@ -65,8 +68,8 @@ from product_domain_store import (
 )
 
 # ─── Config ────────────────────────────────────────────────────────────
-MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
-DB_NAME = os.environ.get("DB_NAME", "quantro_os")
+# MongoDB is legacy (being retired): mongo_legacy.py owns MONGO_URL/DB_NAME
+# and only connects if a storage flag still routes a domain to Mongo.
 # AI Billing — every AI request flows through ai_billing.run_ai_request.
 # Emergent LLM (EMERGENT_LLM_KEY / emergentintegrations) removed in Phase 0.
 # Quantro uses OPENAI_API_KEY (credits) or the user's own key. See ai_billing.py.
@@ -98,61 +101,120 @@ def _get_jwks_client() -> Optional[PyJWKClient]:
             _jwks_client = None
     return _jwks_client
 
-# ─── MongoDB ───────────────────────────────────────────────────────────
-client = AsyncIOMotorClient(
-    MONGO_URL,
-    # Fail fast on Fly/Atlas network issues so lifespan can soft-fail
-    # instead of blocking health checks for 30s+ per call.
-    serverSelectionTimeoutMS=int(os.environ.get("MONGO_SERVER_SELECTION_TIMEOUT_MS") or 8000),
-)
-db = client[DB_NAME]
+# ─── Storage (Supabase; legacy MongoDB behind flags) ──────────────────
+# Every collection below is a Motor-shaped facade. Which store serves it is
+# decided per domain by storage_flags.py (QUANTRO_<DOMAIN>_PRIMARY /
+# *_MONGO_MIRROR; unset = Supabase, no mirror). The Mongo side is a lazy
+# proxy (mongo_legacy.py): no connection is opened unless a flag still
+# routes a domain to Mongo, so startup does not require Mongo.
+_MONGO_DOMAINS = {
+    "inbox_items": "inbox",
+    "calendar_events": "calendar",
+    "contacts": "contacts",
+    "activity_events": "activity",
+    "content_items": "content",
+    "content_templates": "content",
+    "automation_policies": "actions",
+    "action_executions": "actions",
+    "action_policies": "actions",
+    "integrations_config": "integrations",
+    "google_integrations": "secrets",
+    "google_oauth_state": "secrets",
+    "microsoft_integrations": "secrets",
+    "microsoft_oauth_state": "secrets",
+    "facturapi_connections": "secrets",
+    "facturapi_webhook_events": "secrets",
+    "sync_locks": "docs",
+    "user_sessions": "docs",
+    **{name: "docs" for name in doc_store.DOC_COLLECTIONS},
+}
+db = mongo_legacy.LazyDatabase(_MONGO_DOMAINS)
+
+
+def _doc_col(name: str) -> doc_store.FlowDocCollection:
+    """Collection that only ever lived in Mongo → Supabase flow_documents."""
+    return doc_store.wrap(name, db[name])
+
 
 # Collections
-# Phase 6.1: inbox_items dual-write / optional Supabase SoT
-# (QUANTRO_INBOX_PRIMARY, default mongo). See docs/phase6-inbox-items.md.
+# Phase 6.1: inbox_items (QUANTRO_INBOX_PRIMARY). See docs/phase6-inbox-items.md.
 inbox_col = wrap_inbox_col(db["inbox_items"])
 calendar_col = wrap_calendar_col(db["calendar_events"])
 contacts_col = wrap_contacts_col(db["contacts"])
-agents_col = db["agents"]
-onboarding_col = db["onboarding_tasks"]
+agents_col = _doc_col("agents")
+onboarding_col = _doc_col("onboarding_tasks")
 content_col = wrap_content_items_col(db["content_items"])
 activity_col = wrap_activity_col(db["activity_events"])
-# Phase 3: automation_policies dual-write / optional Supabase SoT
-# (QUANTRO_ACTIONS_PRIMARY). escalation_rules remain Mongo-only this phase.
+# Phase 3: automation_policies (QUANTRO_ACTIONS_PRIMARY).
 policies_col = wrap_automation_policies_col(db["automation_policies"])
-escalation_col = db["escalation_rules"]
+escalation_col = _doc_col("escalation_rules")
 templates_col = wrap_content_templates_col(db["content_templates"])
-business_profile_col = db["business_profile"]
-integrations_config_col = db["integrations_config"]
-system_health_col = db["system_health_events"]
+business_profile_col = _doc_col("business_profile")
+# Phase 4: integrations catalog (QUANTRO_INTEGRATIONS_CONFIG_PRIMARY).
+integrations_config_col = connect_store.IntegrationsConfigCollection(db["integrations_config"])
+system_health_col = _doc_col("system_health_events")
 # Phase 7a — Auth + multi-tenant
-users_col = db["users"]
+users_col = _doc_col("users")
 # Phase 1: user_sessions is FROZEN / unused. Auth is Supabase JWT only;
-# do not read or write this collection. Kept bound so legacy ad-hoc
-# scripts do not explode if they import server collections by name.
+# do not read or write this collection. Kept bound (lazy — never connects)
+# so legacy ad-hoc scripts do not explode if they import it by name.
 user_sessions_col = db["user_sessions"]  # frozen — see docs/phase1-identity-sot.md
-workspaces_col = db["workspaces"]
+workspaces_col = _doc_col("workspaces")
 # Identity SoT is Supabase org_members / invitations / org_audit_logs
-# when QUANTRO_DB_PRIMARY=supabase (Phase 1). Mongo cols below are an
-# optional mirror (QUANTRO_MONGO_MIRROR) or the rollback read path.
-workspace_members_col = db["workspace_members"]
-workspace_invites_col = db["workspace_invites"]
-audit_log_col = db["audit_log"]
-# Phase 7e / Phase 2 — Google OAuth (Gmail + Calendar)
-# Mongo cols remain the default read primary until QUANTRO_SECRETS_PRIMARY=supabase.
-# Dual-write via provider_secrets_store (see docs/phase2-oauth-secrets.md).
+# when QUANTRO_DB_PRIMARY=supabase (Phase 1). These are Flow's own docs:
+# the membership cache _active_workspace_id reads, plus the only store for
+# workspaces that have no org_id yet. Always written (_local_identity_writes).
+workspace_members_col = _doc_col("workspace_members")
+workspace_invites_col = _doc_col("workspace_invites")
+audit_log_col = _doc_col("audit_log")
+people_onboarding_col = _doc_col("people_onboarding_steps")
+# Phase 2 — Google / Microsoft OAuth docs + CSRF state. Only ever passed as
+# ``mongo_col=`` to provider_secrets_store (QUANTRO_SECRETS_PRIMARY).
 google_integrations_col = db["google_integrations"]
 google_oauth_state_col = db["google_oauth_state"]
-# Phase 7e.2 / Phase 2 — Microsoft Outlook OAuth (Mail + Calendar)
 microsoft_integrations_col = db["microsoft_integrations"]
 microsoft_oauth_state_col = db["microsoft_oauth_state"]
-# Quantro Connect — Facturapi (CFDI México)
+# Quantro Connect — Facturapi (CFDI México), via connect_store.
 facturapi_connections_col = db["facturapi_connections"]
 facturapi_webhook_events_col = db["facturapi_webhook_events"]
-# Quantro Actions — Phase 3 dual-write (default primary=mongo)
-# See docs/phase3-actions-postgres.md (QUANTRO_ACTIONS_PRIMARY).
+# Quantro Actions — Phase 3 (QUANTRO_ACTIONS_PRIMARY).
 action_executions_col = wrap_executions_col(db["action_executions"])
 action_policies_col = wrap_action_policies_col(db["action_policies"])  # legacy auto-approve overrides
+
+
+# Name → facade, for startup repairs that iterate collection names.
+_COLLECTIONS_BY_NAME: Dict[str, Any] = {
+    "inbox_items": inbox_col,
+    "calendar_events": calendar_col,
+    "contacts": contacts_col,
+    "agents": agents_col,
+    "onboarding_tasks": onboarding_col,
+    "content_items": content_col,
+    "activity_events": activity_col,
+    "automation_policies": policies_col,
+    "escalation_rules": escalation_col,
+    "content_templates": templates_col,
+    "business_profile": business_profile_col,
+    "integrations_config": integrations_config_col,
+    "system_health_events": system_health_col,
+}
+
+
+def _local_identity_writes() -> bool:
+    """Write Flow's own workspace_members / invites / audit_log docs?
+
+    Once those docs live in Supabase (``flow_documents``) they are not a
+    "Mongo mirror" any more: they are the membership cache every request
+    reads and the only store for workspaces without an org_id — so always
+    write them. While they are still on Mongo the Phase 1 mirror flags
+    decide, as before.
+    """
+    return (
+        doc_store.sb_primary()
+        or supabase_admin.is_mongo_mirror_enabled()
+        or supabase_admin.is_mongo_identity_primary()
+    )
+
 
 # The workspace_id used by pre-auth seed + backfill. The first user to
 # log in claims this workspace (rename + become Owner). Subsequent users
@@ -325,16 +387,30 @@ async def _upsert_user_from_claims(claims: dict) -> dict:
         await users_col.insert_one(user_doc)
         existing = user_doc
     else:
-        await users_col.update_one(
-            {"user_id": user_id},
-            {"$set": {
-                "email": email,
-                "name": name,
-                "picture": picture,
-                "last_login_at": datetime.now(timezone.utc),
-                "auth_provider": "supabase",
-            }},
+        # This runs on EVERY authenticated request: only write when the
+        # profile changed or last_login_at is stale (> 5 min), instead of
+        # one write per API call.
+        last = existing.get("last_login_at")
+        if isinstance(last, datetime) and last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        stale = not isinstance(last, datetime) or datetime.now(timezone.utc) - last > timedelta(minutes=5)
+        changed = (
+            existing.get("email") != email
+            or existing.get("name") != name
+            or existing.get("picture") != picture
+            or existing.get("auth_provider") != "supabase"
         )
+        if stale or changed:
+            await users_col.update_one(
+                {"user_id": user_id},
+                {"$set": {
+                    "email": email,
+                    "name": name,
+                    "picture": picture,
+                    "last_login_at": datetime.now(timezone.utc),
+                    "auth_provider": "supabase",
+                }},
+            )
         existing.update({"email": email, "name": name, "picture": picture})
 
     # Ensure the user has an active workspace.
@@ -447,7 +523,7 @@ async def log_audit(
     except Exception:  # noqa: BLE001
         pass
 
-    if supabase_admin.is_mongo_mirror_enabled() or supabase_admin.is_mongo_identity_primary():
+    if _local_identity_writes():
         try:
             await audit_log_col.insert_one({
                 "event_id": str(uuid.uuid4()),
@@ -758,6 +834,34 @@ async def execute_action_for_item(item, source="auto"):
     return {"executed": executed, "action_type": action_type, "results": results}
 
 
+def _inbox_view(item: Optional[dict]) -> Optional[dict]:
+    """Inbox item with the fields the action/AI paths index directly.
+
+    Gmail/Outlook-synced rows carry ``from_address``/``preview`` instead of
+    the demo seed's ``from_email``/``body``. They only became visible in the
+    Supabase-primary inbox after the Mongo exit backfill, so give the
+    analyze/approve paths the same keys (read-side only, never written).
+    """
+    if item is None:
+        return None
+    view = dict(item)
+    view["from_name"] = view.get("from_name") or view.get("from_address") or ""
+    view["from_email"] = view.get("from_email") or view.get("from_address") or ""
+    view["subject"] = view.get("subject") or ""
+    view["body"] = view.get("body") or view.get("preview") or ""
+    if not view.get("inbox_id") and view.get("id"):
+        view["inbox_id"] = view["id"]
+    return view
+
+
+def _as_iso_text(value: Any) -> str:
+    """Calendar times are ISO strings in legacy Mongo docs and datetimes when
+    read back from Supabase (timestamptz). String checks need text."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value or ""
+
+
 async def evaluate_advanced_escalation(item, intent, confidence, policy_action):
     """Evaluate advanced escalation conditions beyond simple intent/keyword matching."""
     escalation_info = None
@@ -788,7 +892,7 @@ async def evaluate_advanced_escalation(item, intent, confidence, policy_action):
                     existing_events = await calendar_col.find({"workspace_id": workspace_id}).to_list(100)
                     for ev in existing_events:
                         try:
-                            ev_start = ev.get("start_time", "")
+                            ev_start = _as_iso_text(ev.get("start_time"))
                             if proposed_dt.lower() in ev_start.lower() or ev_start[:10] == proposed_dt[:10]:
                                 matched = True
                                 escalation_reasons.append(f"Potential calendar conflict with '{ev.get('title', 'existing event')}'")
@@ -799,7 +903,7 @@ async def evaluate_advanced_escalation(item, intent, confidence, policy_action):
                 if not matched:
                     from datetime import date
                     today_str = date.today().isoformat()
-                    today_events = [e for e in await calendar_col.find({"workspace_id": workspace_id}).to_list(100) if today_str in e.get("start_time", "")]
+                    today_events = [e for e in await calendar_col.find({"workspace_id": workspace_id}).to_list(100) if today_str in _as_iso_text(e.get("start_time"))]
                     if len(today_events) >= 4:
                         matched = True
                         escalation_reasons.append(f"Calendar is busy ({len(today_events)} events today)")
@@ -1188,7 +1292,8 @@ async def ensure_integrations_seeded():
                 patch["workspace_id"] = DEFAULT_WORKSPACE_ID
             if patch:
                 await integrations_config_col.update_one(
-                    {"_id": existing["_id"]}, {"$set": patch}
+                    {"workspace_id": DEFAULT_WORKSPACE_ID, "provider": item["provider"]},
+                    {"$set": patch},
                 )
                 repairs.append({
                     "type": "metadata_backfilled",
@@ -1228,6 +1333,24 @@ BACKFILLED_COLLECTIONS = [
 ]
 
 
+def _legacy_repair_targets(names: List[str]) -> List[Tuple[str, Any]]:
+    """(name, facade) for collections whose store is still Mongo-primary.
+
+    The startup repairs below were written for legacy Mongo data. Once a
+    domain is on Supabase they are skipped: the Mongo → Supabase backfill
+    (scripts/mongo_to_supabase.py) applies the same defaults while copying.
+    Going through the facade keeps the Supabase shadow in sync meanwhile.
+    """
+    out: List[Tuple[str, Any]] = []
+    for name in names:
+        domain = _MONGO_DOMAINS.get(name)
+        col = _COLLECTIONS_BY_NAME.get(name)
+        if col is None or domain is None or storage_flags.domain_on_supabase(domain):
+            continue
+        out.append((name, col))
+    return out
+
+
 async def backfill_simulation_flag():
     """Mark legacy un-flagged operational records as simulation data.
 
@@ -1235,13 +1358,17 @@ async def backfill_simulation_flag():
     that already have `is_simulation: True` or `is_simulation: False` are
     left untouched, so user-created live records remain in Live Mode."""
     repaired = {}
-    for name in BACKFILLED_COLLECTIONS:
-        col = db[name]
-        res = await col.update_many(
-            {"is_simulation": {"$exists": False}},
-            {"$set": {"is_simulation": True}},
-        )
-        if res.modified_count:
+    for name, col in _legacy_repair_targets(BACKFILLED_COLLECTIONS):
+        # One collection failing must not skip the rest (or abort startup).
+        try:
+            res = await col.update_many(
+                {"is_simulation": {"$exists": False}},
+                {"$set": {"is_simulation": True}},
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[startup] simulation-flag repair skipped for {name}: {type(exc).__name__}: {exc}")
+            continue
+        if getattr(res, "modified_count", 0):
             repaired[name] = res.modified_count
     if repaired:
         try:
@@ -1275,12 +1402,16 @@ WORKSPACE_SCOPED_COLLECTIONS = [
 
 async def backfill_workspace_scoping():
     """Idempotently tag legacy records with workspace_id=DEFAULT_WORKSPACE_ID."""
-    for name in WORKSPACE_SCOPED_COLLECTIONS:
-        col = db[name]
-        await col.update_many(
-            {"workspace_id": {"$exists": False}},
-            {"$set": {"workspace_id": DEFAULT_WORKSPACE_ID}},
-        )
+    for name, col in _legacy_repair_targets(WORKSPACE_SCOPED_COLLECTIONS):
+        # One collection failing must not skip the rest, nor the default
+        # business-profile / workspace-shell steps below.
+        try:
+            await col.update_many(
+                {"workspace_id": {"$exists": False}},
+                {"$set": {"workspace_id": DEFAULT_WORKSPACE_ID}},
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[startup] workspace-scoping repair skipped for {name}: {type(exc).__name__}: {exc}")
     # Ensure the default business profile document exists with workspace_id.
     existing = await business_profile_col.find_one({"workspace_id": DEFAULT_WORKSPACE_ID})
     if not existing:
@@ -1312,7 +1443,9 @@ async def backfill_workspace_scoping():
 
 async def seed_workspace_config(workspace_id: str, *, industry: str = "other", language: str = "es"):
     """Create the baseline business_profile + integrations_config + policies
-    for a brand-new workspace. Idempotent: never overwrites existing configs."""
+    for a brand-new workspace. Idempotent: never overwrites existing configs.
+    One read per collection (not one per default item): this runs for every
+    workspace at startup and each read is an HTTP round-trip on Supabase."""
     now = datetime.now(timezone.utc)
 
     # Business profile
@@ -1337,11 +1470,12 @@ async def seed_workspace_config(workspace_id: str, *, industry: str = "other", l
         })
 
     # Integrations catalog (one row per provider for this workspace)
+    have_providers = {
+        r.get("provider")
+        for r in await integrations_config_col.find({"workspace_id": workspace_id}, {"_id": 0, "provider": 1}).to_list(500)
+    }
     for item in DEFAULT_INTEGRATIONS_CATALOG:
-        existing = await integrations_config_col.find_one({
-            "workspace_id": workspace_id, "provider": item["provider"]
-        })
-        if not existing:
+        if item["provider"] not in have_providers:
             await integrations_config_col.insert_one({
                 "integration_id": str(uuid.uuid4()),
                 "workspace_id": workspace_id,
@@ -1356,9 +1490,12 @@ async def seed_workspace_config(workspace_id: str, *, industry: str = "other", l
             })
 
     # Automation policies (default per-intent rules) — idempotent per intent.
+    have_intents = {
+        r.get("intent")
+        for r in await policies_col.find({"workspace_id": workspace_id}, {"_id": 0, "intent": 1}).to_list(1000)
+    }
     for p in DEFAULT_AUTOMATION_POLICIES:
-        existing = await policies_col.find_one({"workspace_id": workspace_id, "intent": p["intent"]})
-        if not existing:
+        if p["intent"] not in have_intents:
             await policies_col.insert_one({
                 "workspace_id": workspace_id,
                 "policy_id": str(uuid.uuid4()),
@@ -1374,9 +1511,12 @@ async def seed_workspace_config(workspace_id: str, *, industry: str = "other", l
             })
 
     # Escalation rules — idempotent per rule name.
+    have_rules = {
+        r.get("name")
+        for r in await escalation_col.find({"workspace_id": workspace_id}, {"_id": 0, "name": 1}).to_list(1000)
+    }
     for r in DEFAULT_ESCALATION_RULES:
-        existing = await escalation_col.find_one({"workspace_id": workspace_id, "name": r["name"]})
-        if not existing:
+        if r["name"] not in have_rules:
             await escalation_col.insert_one({
                 "workspace_id": workspace_id,
                 "rule_id": str(uuid.uuid4()),
@@ -1390,9 +1530,12 @@ async def seed_workspace_config(workspace_id: str, *, industry: str = "other", l
             })
 
     # Content templates — idempotent per template name.
+    have_templates = {
+        r.get("name")
+        for r in await templates_col.find({"workspace_id": workspace_id}, {"_id": 0, "name": 1}).to_list(1000)
+    }
     for tpl in DEFAULT_CONTENT_TEMPLATES:
-        existing = await templates_col.find_one({"workspace_id": workspace_id, "name": tpl["name"]})
-        if not existing:
+        if tpl["name"] not in have_templates:
             await templates_col.insert_one({
                 "workspace_id": workspace_id,
                 "template_id": str(uuid.uuid4()),
@@ -1601,23 +1744,44 @@ async def reconcile_supabase_memberships_to_mongo(user_doc: dict) -> Optional[st
 
 
 # ─── Lifespan ──────────────────────────────────────────────────────────
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Soft-fail startup jobs so /api/health can bind even when Mongo/Atlas
-    # is unreachable (common on first Fly deploys before Network Access).
-    for _label, _coro in (
-        ("seed_database", seed_database),
-        ("ensure_integrations_seeded", ensure_integrations_seeded),
-        ("backfill_simulation_flag", backfill_simulation_flag),
-        ("backfill_workspace_scoping", backfill_workspace_scoping),
-        ("migrate_legacy_role_names", migrate_legacy_role_names),
-        ("ensure_action_indexes", lambda: ensure_action_indexes(action_executions_col)),
-        ("backfill_workspace_automations", backfill_workspace_automations),
-    ):
+async def _ensure_action_indexes_if_mongo():
+    # Postgres indexes ship in migrations; only a Mongo-primary actions
+    # store needs the Motor index.
+    if not storage_flags.domain_on_supabase("actions"):
+        await ensure_action_indexes(action_executions_col)
+
+
+STARTUP_JOBS = (
+    ("seed_database", lambda: seed_database()),
+    ("ensure_integrations_seeded", lambda: ensure_integrations_seeded()),
+    ("backfill_simulation_flag", lambda: backfill_simulation_flag()),
+    ("backfill_workspace_scoping", lambda: backfill_workspace_scoping()),
+    ("migrate_legacy_role_names", lambda: migrate_legacy_role_names()),
+    ("ensure_action_indexes", lambda: _ensure_action_indexes_if_mongo()),
+    ("backfill_workspace_automations", lambda: backfill_workspace_automations()),
+)
+
+
+async def run_startup_jobs() -> Dict[str, str]:
+    """Soft-fail startup jobs so /api/health can bind even when a store is
+    unreachable. Returns {job: "ok" | error class} (tests use it)."""
+    outcome: Dict[str, str] = {}
+    for _label, _coro in STARTUP_JOBS:
         try:
             await _coro()
+            outcome[_label] = "ok"
         except Exception as exc:  # noqa: BLE001
+            outcome[_label] = type(exc).__name__
             print(f"[startup] {_label} failed (continuing): {exc}")
+    return outcome
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print(f"[startup] storage: {storage_flags.summary()}")
+    # Idempotent repairs/seeding run in the background: over Supabase REST they
+    # take longer than they did on Mongo, and /api/health must bind at once.
+    startup_task = asyncio.create_task(run_startup_jobs())
 
     # Phase 7e — Background sync scheduler. We launch a single asyncio
     # task that wakes up every PERIODIC_SYNC_INTERVAL_SECS and calls the
@@ -1631,12 +1795,14 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        sync_task.cancel()
-        try:
-            await sync_task
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001
-            pass
-        client.close()
+        for task in (sync_task, startup_task):
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        mongo_legacy.close()
+        await sb_rest.aclose()
 
 
 # ─── Periodic provider sync (Phase 7e) ────────────────────────────────
@@ -1751,8 +1917,9 @@ _local_sync_locks: Dict[str, float] = {}
 async def _acquire_sync_lock(provider: str, workspace_id: str, owner_id: Optional[str] = None) -> bool:
     """Return True if this instance should run sync for provider+workspace.
 
-    Prefer atomic Mongo lease (multi-instance); fall back to in-process
-    window if Mongo is unavailable.
+    Atomic lease in Supabase ``flow_sync_locks`` (legacy: Mongo
+    ``sync_locks`` while QUANTRO_DOCS_PRIMARY=mongo); falls back to the
+    in-process window if the store is unavailable.
     """
     import time as _time
     key = f"{provider}:{workspace_id}"
@@ -1762,16 +1929,24 @@ async def _acquire_sync_lock(provider: str, workspace_id: str, owner_id: Optiona
         return False
     acquired = False
     try:
-        lock_col = db["sync_locks"]
-        acquired = await acquire_sync_lock_lease(
-            lock_col,
-            provider=provider,
-            workspace_id=workspace_id,
-            window_seconds=_SYNC_LOCK_WINDOW_SECONDS,
-            owner_id=owner_id,
-        )
+        if doc_store.sb_primary():
+            acquired = await acquire_sync_lock_lease_supabase(
+                provider=provider,
+                workspace_id=workspace_id,
+                window_seconds=_SYNC_LOCK_WINDOW_SECONDS,
+                owner_id=owner_id,
+                requester=doc_store._req,
+            )
+        else:
+            acquired = await acquire_sync_lock_lease(
+                db["sync_locks"],
+                provider=provider,
+                workspace_id=workspace_id,
+                window_seconds=_SYNC_LOCK_WINDOW_SECONDS,
+                owner_id=owner_id,
+            )
     except Exception:  # noqa: BLE001
-        # Mongo unavailable — single-process fallback only.
+        # Lock store unavailable — single-process fallback only.
         acquired = True
     if not acquired:
         return False
@@ -2353,7 +2528,7 @@ async def update_member_role(
                 )
             except Exception:  # noqa: BLE001
                 pass
-        if supabase_admin.is_mongo_mirror_enabled() or supabase_admin.is_mongo_identity_primary():
+        if _local_identity_writes():
             await workspace_members_col.update_one(
                 {"user_id": user.user_id, "workspace_id": workspace_id},
                 {"$set": {"role": "leader"}},
@@ -2380,7 +2555,7 @@ async def update_member_role(
             if supabase_admin.is_supabase_primary():
                 raise HTTPException(status_code=502, detail="Failed to update role in Supabase")
 
-    if supabase_admin.is_mongo_mirror_enabled() or supabase_admin.is_mongo_identity_primary():
+    if _local_identity_writes():
         await workspace_members_col.update_one(
             {"user_id": target_user_id, "workspace_id": workspace_id},
             {"$set": {"role": new_role, "role_updated_at": datetime.now(timezone.utc)}},
@@ -2446,7 +2621,7 @@ async def remove_member(
             if supabase_admin.is_supabase_primary():
                 raise HTTPException(status_code=502, detail="Failed to remove member in Supabase")
 
-    if supabase_admin.is_mongo_mirror_enabled() or supabase_admin.is_mongo_identity_primary():
+    if _local_identity_writes():
         await workspace_members_col.delete_one(
             {"user_id": target_user_id, "workspace_id": workspace_id}
         )
@@ -2548,7 +2723,7 @@ async def create_invite(
         "supabase_token": sb_token,
     }
 
-    if supabase_admin.is_mongo_mirror_enabled() or supabase_admin.is_mongo_identity_primary():
+    if _local_identity_writes():
         await workspace_invites_col.insert_one(dict(invite_doc))
 
     await log_audit(
@@ -2648,7 +2823,7 @@ async def revoke_invite(
             revoked_in_sb = False
 
     matched = 0
-    if supabase_admin.is_mongo_mirror_enabled() or supabase_admin.is_mongo_identity_primary():
+    if _local_identity_writes():
         result = await workspace_invites_col.update_one(
             {"workspace_id": workspace_id, "invite_id": invite_id},
             {"$set": {"revoked": True, "revoked_at": datetime.now(timezone.utc), "revoked_by": user.user_id}},
@@ -2806,7 +2981,7 @@ async def accept_invite(token: str, user: User = Depends(get_current_user)):
             except Exception:  # noqa: BLE001
                 pass
 
-    if supabase_admin.is_mongo_mirror_enabled() or supabase_admin.is_mongo_identity_primary():
+    if _local_identity_writes():
         await workspace_members_col.update_one(
             {"workspace_id": workspace_id, "user_id": user.user_id},
             {"$set": {
@@ -2848,7 +3023,7 @@ async def accept_invite(token: str, user: User = Depends(get_current_user)):
 # We persist the same five canonical step keys per (workspace_id,
 # member_user_id) so the UI can show progress + completed_at timestamps
 # without recomputing on every render.
-people_onboarding_col = db["people_onboarding_steps"]
+# people_onboarding_col is bound at the top (flow_documents).
 
 ONBOARDING_STEPS = [
     "invitation_sent",
@@ -3186,6 +3361,22 @@ async def mark_onboarding_complete(
             },
             upsert=True,
         )
+    # Same Supabase shadow as the per-step endpoint (mapped workspaces only).
+    org_id = await workspace_to_org_id(workspace_id)
+    if org_id and supabase_admin.is_dual_write_enabled():
+        for key in ONBOARDING_STEPS:
+            try:
+                await supabase_admin.upsert_onboarding_step(
+                    org_id=org_id,
+                    member_id=member_user_id,
+                    step_key=key,
+                    status="completed",
+                    metadata={"forced_by": user.user_id},
+                    access_token=user.access_token or "",
+                    completed_at_iso=now.isoformat(),
+                )
+            except Exception:  # noqa: BLE001
+                pass
     await log_audit(
         "onboarding.completed",
         f"{user.email} marked onboarding complete for {member_user_id}",
@@ -3614,6 +3805,15 @@ async def ready():
     if not sb_ok:
         ok = False
 
+    # Effective storage routing (no secrets) — verify the Mongo exit here.
+    try:
+        storage = storage_flags.summary()
+        storage["mongo_client_created"] = mongo_legacy.client_created()
+        storage["mongo_disallowed_access_count"] = mongo_legacy.disallowed_access_count()
+        checks["storage"] = storage
+    except Exception as exc:  # noqa: BLE001
+        checks["storage"] = {"error": type(exc).__name__}
+
     # Store primary flags (no secrets)
     try:
         checks["secrets"] = secrets_store.secrets_health()
@@ -3631,7 +3831,7 @@ async def ready():
         if hasattr(actions_store, "actions_health"):
             checks["actions"] = actions_store.actions_health()
         else:
-            primary = (os.environ.get("QUANTRO_ACTIONS_PRIMARY") or "mongo").lower()
+            primary = storage_flags.parse_primary("QUANTRO_ACTIONS_PRIMARY")
             checks["actions"] = {"actions_primary": primary, "configured": True}
     except Exception as exc:  # noqa: BLE001
         checks["actions"] = {"error": type(exc).__name__}
@@ -3780,7 +3980,11 @@ async def _quantro_connect_health_checks(workspace_id: str) -> List[Dict[str, An
         "detail": f"Google: {'configured' if goog.is_oauth_configured() else 'not configured'} · Microsoft: {'configured' if msoa.is_oauth_configured() else 'not configured'}",
     })
 
-    facturapi_doc = await facturapi_connections_col.find_one({"workspace_id": workspace_id}, {"_id": 0, "status": 1, "last_error": 1, "environment": 1})
+    facturapi_doc = await connect_store.get_facturapi_connection(
+        workspace_id=workspace_id,
+        mongo_col=facturapi_connections_col,
+        projection={"_id": 0, "status": 1, "last_error": 1, "environment": 1},
+    )
     checks.append({
         "id": "facturapi_connectivity", "label": "Facturapi connectivity",
         "ok": not facturapi_doc or facturapi_doc.get("status") != "error",
@@ -3823,10 +4027,11 @@ async def _quantro_connect_health_checks(workspace_id: str) -> List[Dict[str, An
         "detail": "All syncs are recent" if not stale else f"No sync in 7+ days: {', '.join(stale)}",
     })
 
-    recent_failed_webhooks = await facturapi_webhook_events_col.count_documents({
-        "workspace_id": workspace_id, "signature_valid": False,
-        "received_at": {"$gte": datetime.now(timezone.utc) - timedelta(hours=24)},
-    })
+    recent_failed_webhooks = await connect_store.count_unverified_webhooks(
+        workspace_id=workspace_id,
+        since=datetime.now(timezone.utc) - timedelta(hours=24),
+        mongo_col=facturapi_webhook_events_col,
+    )
     checks.append({
         "id": "webhook_failures", "label": "No recent webhook signature failures",
         "ok": recent_failed_webhooks == 0,
@@ -3912,7 +4117,7 @@ async def get_inbox_item(inbox_id: str, workspace_id: str = Depends(get_current_
 
 @app.post("/api/inbox/{inbox_id}/analyze")
 async def analyze_inbox_item(inbox_id: str, workspace_id: str = Depends(get_current_workspace_id), user: User = Depends(get_current_user)):
-    item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
+    item = _inbox_view(await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id}))
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
     
@@ -3964,7 +4169,7 @@ async def analyze_inbox_item(inbox_id: str, workspace_id: str = Depends(get_curr
     policy_action = _normalize_policy_action(policy_action)
 
     # Evaluate advanced escalation conditions (applies to all policy actions)
-    updated_item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
+    updated_item = _inbox_view(await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id}))
     escalation_info = await evaluate_advanced_escalation(updated_item, intent, confidence, policy_action)
 
     # If escalation triggered, override policy action
@@ -3988,7 +4193,7 @@ async def analyze_inbox_item(inbox_id: str, workspace_id: str = Depends(get_curr
 
 @app.post("/api/inbox/{inbox_id}/approve")
 async def approve_inbox_action(inbox_id: str, workspace_id: str = Depends(get_current_workspace_id)):
-    item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
+    item = _inbox_view(await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id}))
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
     if not item.get("ai_suggested_action"):
@@ -4105,7 +4310,7 @@ async def approve_inbox_action(inbox_id: str, workspace_id: str = Depends(get_cu
 
 @app.post("/api/inbox/{inbox_id}/decline")
 async def decline_inbox_action(inbox_id: str, workspace_id: str = Depends(get_current_workspace_id)):
-    item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
+    item = _inbox_view(await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id}))
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
     await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"status": "declined"}})
@@ -4123,7 +4328,7 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
     language = await _workspace_language(workspace_id)
     
     for inbox_id in req.inbox_ids:
-        item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
+        item = _inbox_view(await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id}))
         if not item:
             results.append({"inbox_id": inbox_id, "status": "error", "error": "Not found"})
             continue
@@ -4178,7 +4383,7 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
             policy_action = _normalize_policy_action(policy_action)
 
             # Evaluate advanced escalation conditions (applies to all policy actions)
-            updated_item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
+            updated_item = _inbox_view(await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id}))
             escalation_info = await evaluate_advanced_escalation(updated_item, intent, confidence, policy_action)
             
             # If escalation triggered, override policy action
@@ -4241,7 +4446,7 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
     results = []
     
     for inbox_id in req.inbox_ids:
-        item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
+        item = _inbox_view(await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id}))
         if not item or not item.get("ai_suggested_action"):
             results.append({"inbox_id": inbox_id, "status": "skipped", "reason": "No action available"})
             continue
@@ -4340,7 +4545,7 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
 @app.put("/api/inbox/{inbox_id}/details")
 async def update_inbox_details(inbox_id: str, req: UpdateInboxDetailsRequest, workspace_id: str = Depends(get_current_workspace_id)):
     """Allow user to edit AI-extracted entities and suggested action before approving."""
-    item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
+    item = _inbox_view(await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id}))
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
     
@@ -4374,7 +4579,7 @@ async def update_inbox_details(inbox_id: str, req: UpdateInboxDetailsRequest, wo
 @app.post("/api/inbox/{inbox_id}/approve-with-overrides")
 async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest, workspace_id: str = Depends(get_current_workspace_id)):
     """Approve an action with optional manual overrides for details."""
-    item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
+    item = _inbox_view(await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id}))
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
     if not item.get("ai_suggested_action"):
@@ -4772,7 +4977,7 @@ async def update_policy(policy_id: str, req: AutomationPolicyRequest, workspace_
 @app.get("/api/policies/evaluate/{inbox_id}")
 async def evaluate_policy_for_item(inbox_id: str, workspace_id: str = Depends(get_current_workspace_id)):
     """Evaluate what action a policy would take for a given inbox item."""
-    item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
+    item = _inbox_view(await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id}))
     if not item or not item.get("ai_intent"):
         return {"action": "manual_review", "reason": "No AI classification available", "escalation": None}
     
@@ -4967,8 +5172,10 @@ async def generate_from_template(template_id: str, req: GenerateFromTemplateRequ
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
     
-    # Fill in variables manually first
-    body = template["body_template"]
+    # Fill in variables manually first (templates created outside Flow's
+    # editor may only carry the Supabase `body`/`channel` columns).
+    legacy_body = template.get("body")
+    body = template.get("body_template") or (legacy_body if isinstance(legacy_body, str) else "") or ""
     subject = template.get("subject_template", "") or ""
     for key, value in req.context.items():
         body = body.replace(f"{{{{{key}}}}}", str(value))
@@ -4978,7 +5185,7 @@ async def generate_from_template(template_id: str, req: GenerateFromTemplateRequ
     template_prompt = await build_template_prompt(workspace_id=workspace_id)
     language = await _workspace_language(workspace_id)
 
-    prompt = f"Template category: {template['category']}\nTemplate name: {template['name']}\n\nSubject (if email): {subject}\n\nBody:\n{body}\n\nContext: {json.dumps(req.context)}\n\nPlease enhance this content while keeping the overall structure and intent."
+    prompt = f"Template category: {template.get('category')}\nTemplate name: {template.get('name')}\n\nSubject (if email): {subject}\n\nBody:\n{body}\n\nContext: {json.dumps(req.context)}\n\nPlease enhance this content while keeping the overall structure and intent."
 
     ai_response = await run_ai_request(
         user_id=user.user_id,
@@ -4995,7 +5202,8 @@ async def generate_from_template(template_id: str, req: GenerateFromTemplateRequ
         ai_result = {"subject": subject, "body": body, "enhanced": False}
     
     # Save as content item
-    content_type = "email_draft" if template["template_type"] == "email" else "social_post"
+    template_type = template.get("template_type") or ("email" if (template.get("channel") or "email") == "email" else "social_post")
+    content_type = "email_draft" if template_type == "email" else "social_post"
     
     if content_type == "email_draft":
         content_data = {
@@ -5006,22 +5214,26 @@ async def generate_from_template(template_id: str, req: GenerateFromTemplateRequ
     else:
         content_data = {
             "text": ai_result.get("body") or body,
-            "hashtags": [f"#{tag}" for tag in template.get("tags", [])],
+            "hashtags": [f"#{tag}" for tag in (template.get("tags") or [])],
             "platform": "instagram",
         }
     
     content_item = {
         "content_id": str(uuid.uuid4()),
         "type": content_type,
-        "title": f"{template['name']} - {req.context.get('contact_name', 'Generated')}",
+        "title": f"{template.get('name')} - {req.context.get('contact_name', 'Generated')}",
         "content": content_data,
         "status": "draft",
         "created_at": now_iso(),
         "created_by": "ai_template",
         "template_id": template_id,
+        # Without these the Supabase write was skipped (no workspace_id) and
+        # the item was only reachable through Mongo's startup re-tagging.
+        "workspace_id": workspace_id,
+        "is_simulation": await is_simulation_mode(workspace_id),
     }
     await content_col.insert_one(content_item)
-    await log_activity("content", "Content from template", f"Generated '{template['name']}' content", content_item["content_id"], "content")
+    await log_activity("content", "Content from template", f"Generated '{template.get('name')}' content", content_item["content_id"], "content", workspace_id=workspace_id)
     
     return {"success": True, "item": serialize_doc(content_item), "enhanced": ai_result.get("enhanced", False)}
 
@@ -6830,6 +7042,17 @@ action_executor = ActionExecutor(
         "quantro_invoicing_adapter": quantro_invoicing_adapter,
     },
 )
+
+
+@app.exception_handler(sb_rest.SupabaseStoreError)
+async def supabase_store_error_handler(request: Request, exc: sb_rest.SupabaseStoreError):
+    """A Supabase-primary store could not read/write. 503 (retryable) instead
+    of a silent Mongo fallback or a dropped write. Never includes row data."""
+    print(f"[storage] {request.method} {request.url.path}: {exc}")
+    return JSONResponse(
+        status_code=503,
+        content={"error": "storage_unavailable", "message": "Storage temporarily unavailable. Please retry."},
+    )
 
 
 @app.exception_handler(QuantroError)
