@@ -37,12 +37,18 @@ Pieces:
   WARNING and above reach `fly logs`):
   * `MONGO_ONLY` — Mongo holds, or just received, data Supabase lacks: a
     Supabase write degraded to Mongo, a shadow copy failed, or a read was
-    answered from Mongo (the line carries the row's id, never its content).
-    The backfill (`--apply`) repairs these.
+    answered from Mongo (the line carries the row's id and the names of the
+    lookup's key columns, never content). The id is the MONGO row's: for a
+    lookup on other columns (calendar sync: `lookup on
+    external_event_id,external_provider,workspace_id`) Supabase may hold the
+    same id under other key values — see bug 13. The backfill (`--apply`)
+    repairs these; its `--verify` fails on any it cannot decide.
   * `STORE_DRIFT` — the stores disagree in a way the backfill does **not**
     repair: a Mongo mirror write/delete failed while Supabase is primary (Mongo
     is now stale), or a shadow delete failed while Mongo is primary (Supabase
-    kept a row). Review each by hand.
+    kept a row), or (`STORE_DRIFT calendar: legacy-provider row(s) duplicate a
+    synced event`) Supabase holds a synced event twice — see bug 13. Review
+    each by hand.
 * `fly.toml` `[env]` pins today's routing (`QUANTRO_DOCS_PRIMARY=mongo`,
   `QUANTRO_CALENDAR_PRIMARY=mongo`, `QUANTRO_INTEGRATIONS_CONFIG_PRIMARY=mongo`,
   `QUANTRO_MONGO_MIRROR=1`) so deploying the code changes nothing. The cutover
@@ -87,6 +93,34 @@ Live bugs this also fixes (all were silent in production):
 12. (`fix/activity-workspace-leak`) Accepting a Supabase invitation of an org
     that has no Flow workspace (e.g. a Quantro OS invitation) made the
     account a member of the `"default"` workspace. Such tokens now 404.
+13. (`fix/calendar-sync-supabase-ids`) Synced calendar events whose Supabase
+    row reads `external_provider = 'internal'` with the provider's event id:
+    konta `20260919010000` set `internal` on every row without a provider
+    (the shadows of synced events had lost their Google/Outlook id), and the
+    backfill's `fill` later filled `external_event_id` but kept the non-NULL
+    `internal`. The sync looks events up by (workspace, provider, external
+    id), missed these rows in Supabase and found them in Mongo — the 6a
+    `MONGO_ONLY calendar: row only in Mongo (event_id=…)` lines, while the
+    backfill matched them by (workspace, event_id) (`matched_by_alt_key`) and
+    called them `same`. In 6a a changed event then got a 409 in Supabase (the
+    UI kept the old title/time; only Mongo was updated); **after 6b the next
+    sync inserted every such event a second time**. Fixed in code (the sync
+    resolves the row in Supabase by external id and repairs its provider in
+    place, keeping `event_id`) and in data (the backfill now lets Mongo's
+    provider replace the migration-inferred `internal`, and its `--verify`
+    fails with `REVIEW: calendar_events` if a row it cannot decide remains).
+    Rows whose `event_id` differs between the stores under the same external
+    identity are harmless: the sync resolves them by identity and Supabase's
+    id is the one every list has returned since 6a.
+    Two more shapes left a second, frozen copy of an event after 6b while
+    the gate passed; the backfill now fills that copy instead of inserting
+    a new row beside it, and `--verify` fails on every calendar row no sync
+    could keep: (a) Mongo holds an event twice (the legacy `gcal_id` doc and
+    the canonical doc beside it) and Supabase the older doc's copy, still
+    without the Google id — invisible to the sync, and a Google disconnect
+    missed it (`is_real` NULL); (b) a legacy-provider row whose `event_id`
+    differs from Mongo's — the backfill inserted Mongo's row beside it, and
+    the sync, which takes the exact identity first, never repaired it.
 
 ---
 
@@ -271,7 +305,9 @@ fly ssh console -a $APP -C "sh -c 'cd /app && python -m scripts.mongo_to_supabas
 ```
 
 Exit 0 means every dataset shows `insert=0 update=0 error=0` **and** there is no
-`REVIEW:` line. A `REVIEW:` line means an access-granting row (workspace member
+`REVIEW:` line. A `REVIEW: calendar_events …` line is a calendar row no sync
+could keep once the mirrors are off — see "Calendar specifically" under the
+gate before 6b. Any other `REVIEW:` line means an access-granting row (workspace member
 or invite) exists only in Supabase while Mongo is still its source of truth —
 a shadow delete that failed. The backfill never deletes; after confirming the
 member/invite is really gone in the app, remove it by hand (**WRITE**):
@@ -316,7 +352,10 @@ Each `MONGO_ONLY` line is a row Supabase did not have, a Supabase write that
 degraded to Mongo, or a read answered from Mongo; it is repaired by the gate
 below. Each `STORE_DRIFT` line names a row to review by hand.
 
-**Gate before 6b (mandatory, mirrors still on):** immediately before 6b, run
+**Gate before 6b (mandatory, mirrors still on):** first, `fix/calendar-sync-supabase-ids`
+must be live (a normal `fly deploy`, no flag changes; bug 13 — without it the
+first Google/Outlook sync after 6b duplicates calendar events). Then,
+immediately before 6b, run
 step 4 (`--apply`; it now uses `fill` for every domain), step 4b
 (`fix_activity_workspace --apply`, then `--verify`, both exit 0 — it catches
 any leaked row the apply just copied from Mongo; the default workspace's own
@@ -324,6 +363,78 @@ activity since the deploy is never touched, so members may keep working) and
 step 5 (`--verify`, exit 0). Then check that no new `MONGO_ONLY` line appeared since the verify
 started (`fly logs -a $APP --no-tail | grep MONGO_ONLY`); if one did, repeat the
 gate. Anything written only to Mongo after this point would be lost at 6b.
+
+Calendar specifically (bug 13) — **every item is a hard gate**:
+
+* the step 4 dry run shows `calendar_events` `update` > 0 with
+  `matched_by_alt_key=N` (and `matched_by_older_duplicate=M` when Mongo held
+  an event twice) and up to 20 `matched_by_alt_key:` event ids — rows the
+  apply fixes in place, keeping Supabase's `event_id`. After the apply, step 5
+  must show **no** `REVIEW: calendar_events …` line. Each names its rows in
+  the `review:` list (`<event_id> (<reason>)`, up to 20; the Supabase row's
+  `event_id`); do not turn the mirrors off while one is left:
+  * `alt_key_unresolved` — Supabase holds a synced event's event_id under
+    another (provider, external id) than Mongo (fill keeps Supabase's value,
+    so the backfill cannot decide it). Look at those event ids in both
+    stores.
+  * `duplicate_shadow` (`E1 (duplicate_shadow of E2)`) — row E1 is a second
+    copy of the event row E2 holds, E2 being the row the sync keeps (E1: the
+    Supabase copy of an older Mongo duplicate, or a legacy-provider row
+    beside the synced one). After 6b nothing updates or removes E1 and the
+    event is listed twice. Compare the two rows; if E1 carries something E2
+    lacks (e.g. `contact_id`), copy it over, then delete E1.
+  * `legacy_provider` — a provider's event id under provider `internal`/NULL
+    that no Mongo row fixes. If another row holds the same
+    `external_event_id` in that workspace it is a duplicate: delete it.
+    Otherwise set the provider from the source (below).
+  * `no_external_id` — a live row of a synced source without an external id
+    (no sync can find it; a disconnect deletes by `is_real`, which such rows
+    often lack). A demo row (seed titles, `is_real` NULL) gets
+    `is_simulation = true`; any other is a stale copy of a synced event:
+    delete it (the sync inserts the event again under its identity if it
+    still exists).
+
+  ```sql
+  -- read-only: look before writing
+  select event_id, external_provider, external_event_id, source, is_real, is_simulation,
+         title, start_time, contact_id, updated_at
+    from calendar_events where event_id in ('<ids from the report>');
+  -- WRITE, per the review above (one workspace at a time)
+  delete from calendar_events where workspace_id = '<ws>' and event_id in ('<ids>');
+  update calendar_events                                   -- legacy_provider, no duplicate
+     set external_provider = case source when 'google_calendar' then 'google'
+                                         when 'outlook_calendar' then 'microsoft' end
+   where workspace_id = '<ws>' and event_id in ('<ids>')
+     and source in ('google_calendar', 'outlook_calendar');
+  update calendar_events set is_simulation = true           -- no_external_id, demo row
+   where workspace_id = '<ws>' and event_id in ('<ids>');
+  ```
+
+  Then step 5 again.
+* read-only cross-check in the Supabase SQL editor, **both expected 0** (they
+  see rows with no Mongo copy as well; any row counted blocks 6b until it is
+  reviewed as above):
+
+  ```sql
+  select count(*) from calendar_events
+   where external_event_id is not null
+     and coalesce(external_provider, 'internal') = 'internal';
+  select count(*) from calendar_events
+   where source in ('google_calendar', 'outlook_calendar')
+     and is_simulation = false
+     and external_event_id is null;
+  ```
+
+* `mongo_duplicates=N` in the dry run's `calendar_events` notes means Mongo
+  holds N events twice (the older copies' Mongo `_id`s are under `skipped: …
+  (older_duplicate_of_key)`). The apply fills an older copy's Supabase row
+  when the event has no other; step 5 reports `duplicate_shadow` for any
+  left beside the synced row.
+* since the fix is live, a sync never logs `MONGO_ONLY calendar … lookup on
+  external_event_id,external_provider,workspace_id` for those rows; such a
+  line after the verify means a `REVIEW` case above — repeat the gate. A
+  `STORE_DRIFT calendar: legacy-provider row(s) duplicate a synced event`
+  line names a `duplicate_shadow` (its `duplicate event_id`) — same review.
 
 6b — Mongo out of the request path:
 
@@ -391,7 +502,7 @@ once), disconnect/reconnect on a test workspace; System health card.
 | Mongo collection | Supabase target | key | policy |
 |---|---|---|---|
 | users, workspaces, workspace_members, workspace_invites, audit_log, people_onboarding_steps, business_profile, agents, onboarding_tasks, escalation_rules, system_health_events | `flow_documents` | (collection, Mongo `_id`) | docs domain |
-| calendar_events | `calendar_events` | (ws, provider, external id) or (ws, event_id) | calendar |
+| calendar_events | `calendar_events` | (ws, provider, external id) or (ws, event_id); else, as alt keys, (ws, event_id), then (ws, external id) of a legacy-provider row, then those of the key's older Mongo duplicates (ids printed; a synced event matched this way that stays `same` — note `alt_key_unresolved` — is a `REVIEW` failure of `--verify`). A Supabase provider `internal` next to Mongo's google/microsoft is replaced; rows no sync could keep after 6b (`duplicate_shadow`, `legacy_provider`, `no_external_id`) are `REVIEW` failures (bug 13) | calendar |
 | integrations_config | `integrations_config` | (ws, provider); newest duplicate wins | integrations |
 | inbox_items | `inbox_items` | (ws, inbox_id), else (ws, gmail_id)/(ws, ms_id) | inbox |
 | contacts, content_items, content_templates | same names | (ws, app id); a content item generated from a template whose own `workspace_id` is missing/`default`/`__unattributed__` takes its template's workspace (template gone: `__unattributed__` if it had none, else it stays) | contacts/content |
@@ -404,7 +515,8 @@ once), disconnect/reconnect on a test workspace; System health card.
 Report columns: `mongo insert update same skip error sb_only`; per-dataset
 lines list up to 20 ids for `insert:`, `skipped:`, `errors:` and
 `supabase_only:` (rows only Supabase has; reported for workspace members /
-invites and provider connections). Exit codes: 0 ok · 1 errors, pending
+invites and provider connections), plus `matched_by_alt_key:` and `review:`
+(`<id> (<reason>)`, calendar). Exit codes: 0 ok · 1 errors, pending
 writes under `--verify`, or a `REVIEW:` row · 2 schema preflight failed,
 stale Mongo refused, or missing env.
 
