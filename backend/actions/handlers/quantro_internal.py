@@ -11,7 +11,8 @@ agent" in the codebase.
 
 Deps expected in ActionContext.deps:
     calendar_col, contacts_col, agents_col, onboarding_col — Mongo collections
-    log_activity — async fn(event_type, title, description, related_id=None, related_type=None, workspace_id=None)
+    log_activity — async fn(event_type, title, description, related_id=None, related_type=None, *, workspace_id)
+                   (workspace_id is required; every call passes ctx.workspace_id)
     is_simulation_mode — async fn(workspace_id) -> bool
 
 Simulation Mode note: internal Mongo writes are allowed during
