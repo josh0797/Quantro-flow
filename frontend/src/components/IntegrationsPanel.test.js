@@ -206,6 +206,18 @@ describe('actions', () => {
     expect(toast.success).toHaveBeenCalledWith(expect.any(String), { description: 'Conexión con OpenAI verificada.' });
   });
 
+  it('sends the model the backend uses when a legacy model is saved (e.g. gpt-4-turbo)', async () => {
+    // A legacy row from the old card: status connected but no key stored.
+    rows = [{ provider: 'openai', status: 'connected', config: { model: 'gpt-4-turbo' } }];
+    await mount();
+    await typeInto(byTestId('openai-api_key-input'), 'sk-proj-test-key-1234567890');
+    await click(byTestId('connect-openai-button'));
+    await flush(6);
+
+    const [put] = callsTo('/api/integrations/openai', 'PUT');
+    expect(JSON.parse(put[1].body).config.model).toBe(OPENAI_DEFAULT_MODEL);
+  });
+
   it('shows the backend validation message when the key is rejected on save', async () => {
     putResponse = jsonResponse({ detail: { error: 'invalid_openai_key_format', message: 'Eso no parece una clave.' } }, 400);
     await mount();

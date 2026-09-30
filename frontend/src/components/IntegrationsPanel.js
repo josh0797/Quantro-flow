@@ -72,6 +72,10 @@ export const INTEGRATION_MANIFEST = [
         required: false,
         options: OPENAI_MODEL_OPTIONS,
         default: OPENAI_DEFAULT_MODEL,
+        // A legacy saved model (e.g. "gpt-4-turbo", offered by the old card)
+        // runs on the default and would be rejected on save — show and send
+        // the model the backend actually uses.
+        normalize: resolveOwnKeyModel,
       },
     ],
   },
@@ -369,6 +373,12 @@ function CopyableEndpoint({ url, testId }) {
   );
 }
 
+// Initial form value of a manifest field from the (redacted) backend config.
+function fieldValue(f, config) {
+  const raw = config[f.key] ?? f.default ?? '';
+  return f.normalize ? f.normalize(raw) : raw;
+}
+
 function formatTime(iso) {
   try {
     return new Date(iso).toLocaleString();
@@ -427,7 +437,7 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
   const [formValues, setFormValues] = useState(() => {
     const init = {};
     for (const f of manifest.fields || []) {
-      init[f.key] = existingConfig[f.key] ?? f.default ?? '';
+      init[f.key] = fieldValue(f, existingConfig);
     }
     return init;
   });
@@ -436,7 +446,7 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
   useEffect(() => {
     const next = {};
     for (const f of manifest.fields || []) {
-      next[f.key] = (backendState?.config || {})[f.key] ?? f.default ?? '';
+      next[f.key] = fieldValue(f, backendState?.config || {});
     }
     setFormValues(next);
   }, [backendState, manifest]);
