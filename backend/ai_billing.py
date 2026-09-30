@@ -210,17 +210,22 @@ def get_user_api_key(profile: dict) -> Optional[str]:  # noqa: ARG001
 
 
 def format_block_message(language: str = "es", reason: str = "") -> str:
-    """User-facing copy returned with HTTP 402 when AI is blocked."""
+    """User-facing copy returned with HTTP 402 when AI is blocked.
+
+    Never tells the user to add their own OpenAI key: the frontend hides
+    that option (OWN_OPENAI_KEY_ENABLED = false in billing.js) because
+    ``get_user_api_key`` is still a stub. The way out is upgrading the plan
+    or, for a used-up bag, waiting for the next monthly cycle.
+    """
     if reason == "coupon_no_user_key":
         if language == "en":
             return (
                 "Trial accounts don\u2019t include Quantro AI credits. "
-                "Add your own OpenAI API key in Settings to use AI features."
+                "Upgrade your plan to use smart features."
             )
         return (
             "Las cuentas de prueba no incluyen cr\u00e9ditos de Quantro IA. "
-            "Agrega tu propia API key de OpenAI en Configuraci\u00f3n para "
-            "usar las funciones inteligentes."
+            "Actualiza tu plan para usar las funciones inteligentes."
         )
     if reason == "plan_no_credits":
         if language == "en":
@@ -235,13 +240,13 @@ def format_block_message(language: str = "es", reason: str = "") -> str:
     if language == "en":
         return (
             "You\u2019ve used up your Quantro AI credits for this cycle. "
-            "Add your own OpenAI API key in Settings to keep using smart features, "
-            "or upgrade your plan."
+            "Upgrade your plan or wait for the next monthly cycle, "
+            "when your credits renew."
         )
     return (
         "Se acabaron tus cr\u00e9ditos IA de Quantro este ciclo. "
-        "Agrega tu propia API key de OpenAI en Configuraci\u00f3n para seguir usando "
-        "las funciones inteligentes, o actualiza tu plan."
+        "Actualiza tu plan o espera al siguiente ciclo mensual, "
+        "cuando se renuevan tus cr\u00e9ditos."
     )
 
 
@@ -425,13 +430,25 @@ async def run_ai_request(
     else:  # user_api
         api_key = get_user_api_key(profile)
         if not api_key:
-            # Profile flagged as having a key but we couldn't read it.
+            # Profile flagged as having a key but we couldn't read it
+            # (get_user_api_key is a stub). Show the copy this user would
+            # get with no key at all (trial / plan without credits / bag
+            # used up) so we never point them at an own-key option the UI
+            # hides. The reason code stays "user_api_key_unavailable".
+            keyless = resolve_credits_state(
+                email=email,
+                profile={
+                    **profile,
+                    "user_openai_api_key_encrypted": None,
+                    "has_user_api_key": False,
+                },
+            )
             raise HTTPException(
                 status_code=402,
                 detail={
                     "error": "ai_blocked",
                     "reason": "user_api_key_unavailable",
-                    "message": format_block_message(language, "coupon_no_user_key"),
+                    "message": format_block_message(language, keyless.reason),
                 },
             )
         model = (model_requested or QUANTRO_FORCED_MODEL).strip()

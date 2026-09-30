@@ -60,6 +60,15 @@ export function planCreditsFeature(planKey) {
 // Internal QA accounts always get the top tier in credits + calls.
 export const TEST_USER_CREDITS = 20;
 
+// "Bring your own OpenAI key" is hidden until the backend can use it:
+// PUT /api/integrations/openai stores a key, but ai_billing.get_user_api_key
+// is still a stub that returns None, so a saved key never runs a request.
+// While false, Settings → Integrations doesn't render the OpenAI card and
+// Plan & usage doesn't offer "Agregar mi API key" — out-of-credits users
+// are pointed at upgrading or the next monthly cycle instead. Flip to true
+// only once get_user_api_key decrypts and returns the stored key.
+export const OWN_OPENAI_KEY_ENABLED = false;
+
 // Per-1M-tokens pricing for every model we route through Quantro's key.
 // When the user runs on Quantro credits we ALWAYS force gpt-4o-mini so
 // costs stay predictable. The other entries exist only so the helper

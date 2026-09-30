@@ -183,6 +183,81 @@ def test_plan_no_credits_message_language():
     assert "créditos" in format_block_message("es", "plan_no_credits")
 
 
+# Owner decision (2026-09-30): the "own OpenAI key" option is hidden in the
+# UI (get_user_api_key is a stub), so no 402 copy may send users to it. The
+# way out is upgrading the plan or, for a used-up bag, the next monthly cycle.
+_BLOCK_REASONS = ["coupon_no_user_key", "plan_no_credits", "no_credits_no_user_key", ""]
+
+
+@pytest.mark.parametrize("language", ["es", "en"])
+@pytest.mark.parametrize("reason", _BLOCK_REASONS)
+def test_block_messages_never_point_to_an_own_api_key(language, reason):
+    msg = format_block_message(language, reason)
+    lowered = msg.lower()
+    for forbidden in ("api key", "openai", "propia", "your own", "configuración", "settings"):
+        assert forbidden not in lowered, (reason, language, msg)
+    assert ("actualiza" in lowered) if language == "es" else ("upgrade" in lowered)
+
+
+@pytest.mark.parametrize(
+    "language,expected",
+    [("es", "espera al siguiente ciclo mensual"), ("en", "wait for the next monthly cycle")],
+)
+@pytest.mark.parametrize("reason", ["no_credits_no_user_key", ""])
+def test_used_up_message_offers_upgrade_or_next_monthly_cycle(language, expected, reason):
+    assert expected in format_block_message(language, reason)
+
+
+@pytest.mark.parametrize("language", ["es", "en"])
+@pytest.mark.parametrize("reason", ["coupon_no_user_key", "plan_no_credits"])
+def test_no_bag_messages_do_not_promise_a_refill(language, reason):
+    # Trial accounts and plans without included credits never get a bag,
+    # so waiting for the next cycle wouldn't help them.
+    lowered = format_block_message(language, reason).lower()
+    assert "ciclo mensual" not in lowered
+    assert "monthly cycle" not in lowered
+
+
+@pytest.mark.parametrize(
+    "cols,expected_reason",
+    [
+        ({"plan": "pro", "ai_credits_total": 10, "ai_credits_used": 10, "ai_credits_remaining": 0},
+         "no_credits_no_user_key"),
+        ({"plan": "essential", "ai_credits_total": 0, "ai_credits_used": 0, "ai_credits_remaining": 0},
+         "plan_no_credits"),
+        ({"plan": "pro", "has_coupon": True}, "coupon_no_user_key"),
+    ],
+    ids=["pro_used_up", "essential", "coupon"],
+)
+async def test_flagged_but_unreadable_own_key_gets_the_keyless_copy(monkeypatch, cols, expected_reason):
+    # A profile flagged as having its own key routes to "user_api", but the
+    # stub can't read the key: the 402 keeps reason user_api_key_unavailable
+    # and shows the message this user would get with no key at all.
+    async def fake_fetch_profile(user_id, access_token):
+        return _profile(has_user_api_key=True, **cols)
+
+    def must_not_be_called():
+        raise AssertionError("Quantro's OpenAI key must not be used on the user_api path")
+
+    monkeypatch.setattr(ai_billing, "fetch_profile", fake_fetch_profile)
+    monkeypatch.setattr(ai_billing, "get_quantro_api_key", must_not_be_called)
+
+    for language in ("es", "en"):
+        with pytest.raises(HTTPException) as exc:
+            await ai_billing.run_ai_request(
+                user_id=USER_ID,
+                email="owner@example.com",
+                access_token="user-jwt",
+                system_prompt="s",
+                user_prompt="u",
+                language=language,
+            )
+        assert exc.value.status_code == 402
+        assert exc.value.detail["error"] == "ai_blocked"
+        assert exc.value.detail["reason"] == "user_api_key_unavailable"
+        assert exc.value.detail["message"] == format_block_message(language, expected_reason)
+
+
 async def test_run_ai_request_blocks_essential_with_plan_reason(monkeypatch):
     async def fake_fetch_profile(user_id, access_token):
         assert user_id == USER_ID

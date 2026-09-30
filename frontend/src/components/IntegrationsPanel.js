@@ -28,12 +28,16 @@ import { Separator } from '@/components/ui/separator';
 import { toast } from 'sonner';
 import { useLanguage } from '../context/LanguageContext';
 import { authFetch } from '../lib/authFetch';
+import { OWN_OPENAI_KEY_ENABLED } from '../lib/billing';
 
 /**
  * Static manifest of supported integrations. This is the source of truth
  * for what users see — even if the backend returns an empty list, the
  * cards will still render so the Settings panel is never blank.
  * Backend `status` / `last_sync_at` / `config` values are merged on top.
+ *
+ * The `openai` entry is kept but not rendered while OWN_OPENAI_KEY_ENABLED
+ * is false (see lib/billing.js): the backend can't use a saved key yet.
  */
 const INTEGRATION_MANIFEST = [
   {
@@ -42,7 +46,6 @@ const INTEGRATION_MANIFEST = [
     group: 'ai',
     name: 'OpenAI / LLM Provider',
     description: 'Powers AI classification, drafting, and auto-execution across your workflows.',
-    helper: 'This workspace is currently powered by the Emergent Universal Key. Add your own key to override it per workspace.',
     icon: Sparkles,
     gradient: 'from-emerald-500 to-teal-500',
     connectLabelKey: 'integrations.actions.save_and_connect',
@@ -116,6 +119,12 @@ const INTEGRATION_MANIFEST = [
     showEndpoint: true,
   },
 ];
+
+// What Settings → Integrations actually renders. A group left with no
+// visible card (AI, while the OpenAI card is hidden) is skipped entirely.
+export const VISIBLE_INTEGRATIONS = INTEGRATION_MANIFEST.filter(
+  (m) => m.id !== 'openai' || OWN_OPENAI_KEY_ENABLED,
+);
 
 // Gmail / Outlook (mail + calendar) are no longer a group here: they are
 // Quantro Connect providers, rendered by <ConnectPanel /> (passed in as
@@ -592,7 +601,8 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
 /**
  * IntegrationsPanel — Settings → Integrations. Order: system status,
  * then `children` (the Quantro Connect provider catalog), then the
- * key-based integrations (AI provider, CRM, webhooks).
+ * key-based integrations (CRM, webhooks; the AI provider card only when
+ * OWN_OPENAI_KEY_ENABLED).
  */
 export default function IntegrationsPanel({ children }) {
   const { t } = useLanguage();
@@ -723,7 +733,7 @@ export default function IntegrationsPanel({ children }) {
           <Loader2 className="animate-spin text-muted-foreground" size={32} />
         </div>
       ) : GROUPS.map((group) => {
-        const items = INTEGRATION_MANIFEST.filter((m) => m.group === group.key);
+        const items = VISIBLE_INTEGRATIONS.filter((m) => m.group === group.key);
         if (items.length === 0) return null;
         const GroupIcon = group.icon;
         return (

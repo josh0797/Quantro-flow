@@ -119,9 +119,9 @@ export const translations = {
       credits_source_user: 'API propia',
       credits_source_blocked: 'Sin créditos',
       credits_source_not_included: 'No incluidos',
-      credits_low_warning: 'Te quedan menos del 20% de tus créditos IA. Considera actualizar tu plan o agregar tu propia API key.',
+      credits_low_warning: 'Te quedan menos del 20% de tus créditos IA. Considera actualizar tu plan.',
       credits_fallback_user_key: 'Estás usando tu propia API key de OpenAI. Quantro no descuenta créditos.',
-      credits_blocked_message: 'Se acabaron tus créditos IA. Agrega tu propia API key de OpenAI o actualiza tu plan para seguir usando funciones inteligentes.',
+      credits_blocked_message: 'Se acabaron tus créditos IA de este ciclo. Actualiza tu plan o espera al siguiente ciclo mensual, cuando se renuevan tus créditos.',
       credits_plan_not_included: 'Tu plan no incluye créditos IA de Quantro. Actualiza a Pro para usar las funciones inteligentes.',
       add_own_api_key: 'Agregar mi API key',
       credits_pricing_hint: 'Quantro fuerza gpt-4o-mini al usar tus créditos · entrada $0.15/1M · salida $0.60/1M tokens.',
@@ -829,8 +829,6 @@ export const translations = {
         name: 'Proveedor OpenAI / LLM',
         description:
           'Potencia la clasificación IA, redacción y auto-ejecución en todos tus flujos.',
-        helper:
-          'Este workspace está alimentado por la Clave Universal Emergent. Añade tu propia clave para sobrescribirla por workspace.',
         api_key: 'API Key',
         default_model: 'Modelo Predeterminado',
       },
@@ -1494,9 +1492,9 @@ export const translations = {
       credits_source_user: 'Your own API key',
       credits_source_blocked: 'Out of credits',
       credits_source_not_included: 'Not included',
-      credits_low_warning: 'Less than 20% of your AI credits remaining. Consider upgrading your plan or adding your own API key.',
+      credits_low_warning: 'Less than 20% of your AI credits remaining. Consider upgrading your plan.',
       credits_fallback_user_key: 'Using your own OpenAI key. Quantro is not deducting credits.',
-      credits_blocked_message: 'Your AI credits are exhausted. Add your own OpenAI API key or upgrade to keep using smart features.',
+      credits_blocked_message: 'You’ve used up your AI credits for this cycle. Upgrade your plan or wait for the next monthly cycle, when your credits renew.',
       credits_plan_not_included: 'Your plan doesn’t include Quantro AI credits. Upgrade to Pro to use smart features.',
       add_own_api_key: 'Add my API key',
       credits_pricing_hint: 'Quantro forces gpt-4o-mini when using your credits · input $0.15/1M · output $0.60/1M tokens.',
@@ -2200,8 +2198,6 @@ export const translations = {
         name: 'OpenAI / LLM Provider',
         description:
           'Powers AI classification, drafting, and auto-execution across your workflows.',
-        helper:
-          'This workspace is currently powered by the Emergent Universal Key. Add your own key to override it per workspace.',
         api_key: 'API Key',
         default_model: 'Default Model',
       },

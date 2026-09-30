@@ -36,6 +36,7 @@ import {
   getOpenAIUsageLimit,
   getCreditsState,
   formatUsd,
+  OWN_OPENAI_KEY_ENABLED,
 } from '../lib/billing';
 
 /**
@@ -441,9 +442,11 @@ export default function PlanAndUsage() {
                   </p>
                   <div className="flex gap-2">
                     {/* Flow can't read a user's own OpenAI key yet
-                        (ai_billing.get_user_api_key is a stub), so a plan
-                        without included credits only gets the upgrade path. */}
-                    {credits.reason !== 'plan_no_credits' && (
+                        (ai_billing.get_user_api_key is a stub), so while
+                        OWN_OPENAI_KEY_ENABLED is false every blocked user
+                        only gets the upgrade path (or waits for the next
+                        monthly cycle, per credits_blocked_message). */}
+                    {OWN_OPENAI_KEY_ENABLED && credits.reason !== 'plan_no_credits' && (
                       <Button
                         data-testid="credits-add-key-btn"
                         size="sm"
