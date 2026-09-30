@@ -152,9 +152,11 @@ def test_coupon_on_essential_keeps_coupon_reason():
     assert state.reason == "coupon_no_user_key"
 
 
-def test_essential_with_own_key_flag_routes_to_user_api_not_quantro():
+def test_essential_with_workspace_own_key_routes_to_user_api_not_quantro():
     # Before the change the $5 fallback made this "quantro" (Quantro-paid).
-    state = resolve_credits_state(profile=_profile(plan="essential", has_user_api_key=True))
+    # The own key is now the workspace's (integrations_config), not a
+    # profile flag — see tests/test_own_openai_key.py.
+    state = resolve_credits_state(profile=_profile(plan="essential"), own_key_active=True)
     assert state.blocked is False
     assert state.source == "user_api"
 
@@ -174,8 +176,9 @@ def test_plan_no_credits_message_does_not_claim_used_up_or_amount(language):
     lowered = msg.lower()
     for forbidden in ("$5", "5 usd", "used up", "exhausted", "se acabaron"):
         assert forbidden not in lowered
-    # Flow can't use a user's own OpenAI key yet; don't promise it here.
-    assert "api key" not in lowered
+    # The workspace's own OpenAI key works now (2026-09-30): point to it.
+    assert "openai" in lowered
+    assert ("Settings → Integrations" if language == "en" else "Configuración → Integraciones") in msg
 
 
 def test_plan_no_credits_message_language():
