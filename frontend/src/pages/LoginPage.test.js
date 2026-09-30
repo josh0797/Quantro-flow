@@ -50,6 +50,7 @@ async function fillSignup() {
   await type('login-full-name-input', 'Ana Pérez');
   await type('login-email-input', 'ana@example.com');
   await type('login-password-input', 'supersecret1');
+  await click(byTestId('login-accept-terms')); // required since the legal-consent checkbox
 }
 
 beforeEach(() => {
