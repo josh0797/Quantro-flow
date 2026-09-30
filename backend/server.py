@@ -5525,7 +5525,11 @@ async def update_integration(provider: str, req: IntegrationUpdate, workspace_id
             raise _own_key_bad_request("model_not_allowed", language)
 
     merged_config = {**existing_config, **integration_secrets.encrypt_config_secrets(incoming_config)}
-    key_changed = any(f in incoming_config for f in integration_secrets.SECRET_FIELD_NAMES)
+    # A new secret — or, for OpenAI, a different model — invalidates the
+    # last connection test (it checked the old key/model pair).
+    credentials_changed = any(f in incoming_config for f in integration_secrets.SECRET_FIELD_NAMES) or (
+        is_openai and "model" in incoming_config and incoming_config.get("model") != existing_config.get("model")
+    )
 
     if req.status == "disconnected":
         # Disconnect = forget the credentials, not just flip a flag.
@@ -5542,7 +5546,7 @@ async def update_integration(provider: str, req: IntegrationUpdate, workspace_id
 
     if req.status == "connected":
         update_data["last_sync_at"] = now_iso()
-    if req.status == "disconnected" or key_changed:
+    if req.status == "disconnected" or credentials_changed:
         # A previous test result says nothing about a new (or no) key.
         for f in _LAST_TEST_FIELDS:
             update_data[f] = None

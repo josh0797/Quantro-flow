@@ -632,3 +632,30 @@ async def test_ai_endpoint_runs_on_the_workspace_key(app, monkeypatch):
         assert r.status_code == 402, r.text
         assert r.json()["detail"]["reason"] == "own_key_invalid"
         assert [i.api_key for i in FakeOpenAI.instances[before:]] == [KEY_A]
+
+
+def test_error_text_scrubs_openai_keys_including_the_masked_echo():
+    text = f"AuthenticationError: Incorrect API key provided: {KEY_A[:8]}****{KEY_A[-4:]}. Raw {KEY_B} sk-abcd1234"
+    scrubbed = integration_secrets.redact_error_text(text)
+    assert "sk-" not in scrubbed
+    assert KEY_A[-4:] not in scrubbed and KEY_B not in scrubbed
+    assert "[redacted-key]" in scrubbed
+
+
+async def test_changing_the_model_invalidates_the_last_test(app):
+    fake, server, _ = app
+    async with await _client(app) as http:
+        c = Client(server, http)
+        await c.call("u-leader", "PUT", "/api/integrations/openai",
+                     json={"status": "connected", "config": {"api_key": KEY_A, "model": "gpt-4o"}})
+        await c.call("u-leader", "POST", "/api/integrations/openai/test")
+        assert _row(fake, WS)["extra"]["last_test_ok"] is True
+        # Same model, blank key → the passing test still applies.
+        await c.call("u-leader", "PUT", "/api/integrations/openai",
+                     json={"status": "connected", "config": {"api_key": "", "model": "gpt-4o"}})
+        assert _row(fake, WS)["extra"]["last_test_ok"] is True
+        # Another model → the old result no longer says anything.
+        await c.call("u-leader", "PUT", "/api/integrations/openai",
+                     json={"status": "connected", "config": {"api_key": "", "model": "gpt-4.1-mini"}})
+        assert _row(fake, WS)["extra"]["last_test_ok"] is None
+        assert (await ai_billing.get_user_api_key(WS)).api_key == KEY_A
