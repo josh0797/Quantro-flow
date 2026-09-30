@@ -108,10 +108,13 @@ describe.each(['es', 'en'])('OpenAI own-key card copy (%s)', (lang) => {
 });
 
 it('uses the exact ES copy requested by the owner', () => {
-  expect(translations.es.integrations.openai.helper).toBe(
-    'Usa tu propia clave de OpenAI: las funciones de IA de este espacio de trabajo usarán tu clave y OpenAI te cobrará directamente; no se consumen créditos de Quantro.',
+  expect(translations.es.integrations.openai.helper).toMatch(
+    /^Usa tu propia clave de OpenAI: las funciones de IA de este espacio de trabajo usarán tu clave y OpenAI te cobrará directamente; no se consumen créditos de Quantro\./,
   );
   expect(translations.en.integrations.openai.helper).toMatch(/OpenAI will bill you directly; no Quantro credits are used/);
+  // Google Limited Use: Gmail/Calendar data reaches OpenAI on the customer's key, so saving it commits to data sharing off.
+  expect(translations.es.integrations.openai.helper).toMatch(/mantener desactivado el uso compartido de datos con OpenAI/);
+  expect(translations.en.integrations.openai.helper).toMatch(/keep data sharing with OpenAI turned off/);
 });
 
 it('offers exactly the backend model allowlist, gpt-4o-mini by default', () => {

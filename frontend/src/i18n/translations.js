@@ -831,7 +831,7 @@ export const translations = {
         description:
           'Potencia la clasificación IA, redacción y auto-ejecución en todos tus flujos.',
         helper:
-          'Usa tu propia clave de OpenAI: las funciones de IA de este espacio de trabajo usarán tu clave y OpenAI te cobrará directamente; no se consumen créditos de Quantro.',
+          'Usa tu propia clave de OpenAI: las funciones de IA de este espacio de trabajo usarán tu clave y OpenAI te cobrará directamente; no se consumen créditos de Quantro. Al guardarla te comprometes a mantener desactivado el uso compartido de datos con OpenAI en tu organización: los datos de Gmail y Calendar no pueden usarse para entrenar modelos.',
         api_key: 'Clave de API de OpenAI',
         default_model: 'Modelo',
         api_key_saved_placeholder: 'Clave guardada · pega una nueva para reemplazarla',
@@ -2228,7 +2228,7 @@ export const translations = {
         description:
           'Powers AI classification, drafting, and auto-execution across your workflows.',
         helper:
-          'Use your own OpenAI key: this workspace’s AI features will run on your key and OpenAI will bill you directly; no Quantro credits are used.',
+          'Use your own OpenAI key: this workspace’s AI features will run on your key and OpenAI will bill you directly; no Quantro credits are used. By saving it you agree to keep data sharing with OpenAI turned off in your organization: Gmail and Calendar data must not be used to train models.',
         api_key: 'OpenAI API key',
         default_model: 'Model',
         api_key_saved_placeholder: 'Key saved · paste a new one to replace it',
