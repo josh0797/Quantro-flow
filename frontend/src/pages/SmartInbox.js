@@ -20,7 +20,8 @@ import {
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   getInbox, analyzeInboxItem, approveInboxAction, declineInboxAction,
-  batchAnalyzeInbox, batchApproveInbox, updateInboxDetails, approveWithOverrides
+  batchAnalyzeInbox, batchApproveInbox, updateInboxDetails, approveWithOverrides,
+  reclassifyInbox
 } from '../lib/api';
 import { toast } from 'sonner';
 import { format, parseISO } from 'date-fns';
@@ -29,6 +30,9 @@ import { getEntityLabel } from '../config/industryConfig';
 import { useLanguage } from '../context/LanguageContext';
 import LiveEmptyState from '../components/LiveEmptyState';
 import DataModeBanner from '../components/DataModeBanner';
+import {
+  useInboxCategories, InboxCategoryChip, InboxCategoryFilter, IndustryCategoryHint
+} from '../components/inbox/InboxCategories';
 
 // Human-friendly intent labels (no AI jargon)
 const intentConfig = {
@@ -76,9 +80,13 @@ function getConfidenceLabel(confidence) {
 
 export default function SmartInbox() {
   const { profile } = useBusinessProfile();
-  const { t } = useLanguage();
+  const { t, lang } = useLanguage();
   const industry = profile?.industry || 'other';
   const customLabels = profile?.entity_labels || {};
+  // The workspace's own inbox categories (from its industry).
+  const { catalog } = useInboxCategories(industry);
+  const [categoryFilter, setCategoryFilter] = useState('all');
+  const [reclassifying, setReclassifying] = useState(false);
   
   const [items, setItems] = useState([]);
   const [selectedItem, setSelectedItem] = useState(null);
@@ -115,6 +123,36 @@ export default function SmartInbox() {
     return () => clearInterval(interval);
   }, [fetchInbox, profile?.simulation_mode]);
 
+  // A filter from the previous industry's list no longer applies.
+  useEffect(() => {
+    if (categoryFilter !== 'all' && catalog && !catalog.categories.some(c => c.key === categoryFilter)) {
+      setCategoryFilter('all');
+    }
+  }, [catalog, categoryFilter]);
+
+  const visibleItems = categoryFilter === 'all' ? items : items.filter(i => i.ai_category === categoryFilter);
+  const categoryCounts = items.reduce((acc, i) => {
+    if (i.ai_category) acc[i.ai_category] = (acc[i.ai_category] || 0) + 1;
+    return acc;
+  }, {});
+
+  const handleReclassify = async () => {
+    setReclassifying(true);
+    try {
+      const result = await reclassifyInbox({});
+      if (result.reclassified > 0) {
+        toast.success(t('inbox_categories.toast_done', { count: result.reclassified }));
+      } else {
+        toast.info(t('inbox_categories.toast_up_to_date'));
+      }
+      fetchInbox();
+    } catch (err) {
+      toast.error(t('inbox_categories.toast_failed'), { description: err.response?.data?.detail?.message || err.message });
+    } finally {
+      setReclassifying(false);
+    }
+  };
+
   // Selection helpers
   const toggleSelect = (id) => {
     setSelectedIds(prev => {
@@ -126,7 +164,7 @@ export default function SmartInbox() {
   };
 
   const selectAll = () => {
-    const eligible = items.filter(i => i.status === 'new' || i.status === 'processed');
+    const eligible = visibleItems.filter(i => i.status === 'new' || i.status === 'processed');
     if (selectedIds.size === eligible.length) {
       setSelectedIds(new Set());
     } else {
@@ -242,14 +280,14 @@ export default function SmartInbox() {
       email: entities.email || item.from_email || '',
       phone: entities.phone || '',
       date_time: entities.date_time || '',
-      property: entities.property || '',
+      property: entities.property || entities.asset || '',
       action_type: action.type || '',
       action_description: action.description || '',
       // For schedule overrides
       title: `Meeting - ${item.from_name}`,
       start_time: '',
       end_time: '',
-      location: entities.property || '',
+      location: entities.property || entities.asset || '',
     });
     setEditDialogOpen(true);
   };
@@ -370,7 +408,7 @@ export default function SmartInbox() {
       <div data-testid="smart-inbox-filter" className="flex items-center gap-2 mb-4">
         <div className="flex items-center gap-2 mr-4">
           <Checkbox
-            checked={selectedIds.size > 0 && selectedIds.size === items.filter(i => i.status === 'new' || i.status === 'processed').length}
+            checked={selectedIds.size > 0 && selectedIds.size === visibleItems.filter(i => i.status === 'new' || i.status === 'processed').length}
             onCheckedChange={selectAll}
           />
           <span className="text-xs text-muted-foreground">Select all</span>
@@ -388,10 +426,26 @@ export default function SmartInbox() {
         ))}
       </div>
 
+      {/* Categories for this workspace's line of business */}
+      <IndustryCategoryHint catalog={catalog} t={t} />
+      <InboxCategoryFilter
+        catalog={catalog}
+        value={categoryFilter}
+        onChange={(key) => { setCategoryFilter(key); setSelectedIds(new Set()); }}
+        counts={categoryCounts}
+        lang={lang}
+        t={t}
+        onReclassify={handleReclassify}
+        reclassifying={reclassifying}
+      />
+
       {/* Main Layout */}
       {view === 'triage' ? (
         <TriageView
-          items={items}
+          items={visibleItems}
+          filteredOut={visibleItems.length === 0 && items.length > 0}
+          catalog={catalog}
+          lang={lang}
           loading={loading}
           selectedIds={selectedIds}
           toggleSelect={toggleSelect}
@@ -403,7 +457,9 @@ export default function SmartInbox() {
         />
       ) : (
         <ReviewView
-          items={items}
+          items={visibleItems}
+          catalog={catalog}
+          lang={lang}
           loading={loading}
           selectedItem={selectedItem}
           setSelectedItem={setSelectedItem}
@@ -486,7 +542,7 @@ export default function SmartInbox() {
 }
 
 // ─── Triage View ─────────────────────────────────────────────────────
-function TriageView({ items, loading, selectedIds, toggleSelect, selectedItem, setSelectedItem, analyzing, handleAnalyze, batchProcessing }) {
+function TriageView({ items, filteredOut, catalog, lang, loading, selectedIds, toggleSelect, selectedItem, setSelectedItem, analyzing, handleAnalyze, batchProcessing }) {
   const { profile } = useBusinessProfile();
   const { t } = useLanguage();
   if (loading) {
@@ -498,6 +554,16 @@ function TriageView({ items, loading, selectedIds, toggleSelect, selectedItem, s
   }
 
   if (items.length === 0) {
+    // Only the category filter hides everything: say so (not "connect").
+    if (filteredOut) {
+      return (
+        <Card className="py-12" data-testid="inbox-category-empty">
+          <CardContent className="text-center">
+            <p className="text-sm text-muted-foreground">{t('inbox_categories.empty_filtered')}</p>
+          </CardContent>
+        </Card>
+      );
+    }
     // Live Mode with no real data → guide the user. Simulation Mode
     // fallback keeps the original "all caught up" empty card.
     if (!profile?.simulation_mode) {
@@ -564,7 +630,10 @@ function TriageView({ items, loading, selectedIds, toggleSelect, selectedItem, s
                       {statusInfo.label}
                     </Badge>
                   </div>
-                  <p className="text-sm truncate">{item.subject}</p>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <p className="text-sm truncate">{item.subject}</p>
+                    <InboxCategoryChip catalog={catalog} categoryKey={item.ai_category} lang={lang} className="text-[10px] px-2 shrink-0" />
+                  </div>
                   <p className="text-xs text-muted-foreground line-clamp-1 mt-0.5">{item.body}</p>
 
                   {/* AI Classification Row */}
@@ -641,7 +710,7 @@ function TriageView({ items, loading, selectedIds, toggleSelect, selectedItem, s
 }
 
 // ─── Review & Control View (Manual Override UI) ──────────────────────
-function ReviewView({ items, loading, selectedItem, setSelectedItem, approving, handleApproveWithOverrides, handleDecline, openEditDialog }) {
+function ReviewView({ items, catalog, lang, loading, selectedItem, setSelectedItem, approving, handleApproveWithOverrides, handleDecline, openEditDialog }) {
   // Only show items that have been classified or need action
   const reviewableItems = items.filter(i => i.status === 'processed' || i.status === 'new');
 
@@ -700,9 +769,12 @@ function ReviewView({ items, loading, selectedItem, setSelectedItem, approving, 
                             )}
                           </div>
                           <p className="text-xs truncate">{item.subject}</p>
-                          {intentInfo && (
-                            <p className="text-[10px] text-muted-foreground mt-1">{intentInfo.label}</p>
-                          )}
+                          <div className="flex items-center gap-2 mt-1">
+                            <InboxCategoryChip catalog={catalog} categoryKey={item.ai_category} lang={lang} className="text-[10px] px-2" />
+                            {intentInfo && (
+                              <p className="text-[10px] text-muted-foreground">{intentInfo.label}</p>
+                            )}
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -719,6 +791,8 @@ function ReviewView({ items, loading, selectedItem, setSelectedItem, approving, 
         {selectedItem ? (
           <ReviewDetailPanel
             item={selectedItem}
+            catalog={catalog}
+            lang={lang}
             approving={approving}
             handleApproveWithOverrides={handleApproveWithOverrides}
             handleDecline={handleDecline}
@@ -739,7 +813,7 @@ function ReviewView({ items, loading, selectedItem, setSelectedItem, approving, 
 }
 
 // ─── Review Detail Panel ─────────────────────────────────────────────
-function ReviewDetailPanel({ item, approving, handleApproveWithOverrides, handleDecline, openEditDialog }) {
+function ReviewDetailPanel({ item, catalog, lang, approving, handleApproveWithOverrides, handleDecline, openEditDialog }) {
   const intentInfo = item.ai_intent ? intentConfig[item.ai_intent.intent] : null;
   const confidence = item.ai_intent ? getConfidenceLabel(item.ai_intent.confidence) : null;
   const entities = item.ai_intent?.entities || {};
@@ -754,6 +828,7 @@ function ReviewDetailPanel({ item, approving, handleApproveWithOverrides, handle
           <div className="flex items-center gap-2 mb-3">
             <Mail size={14} className="text-muted-foreground" />
             <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Original Request</span>
+            <InboxCategoryChip catalog={catalog} categoryKey={item.ai_category} lang={lang} className="ml-auto" />
           </div>
           <div className="flex items-start justify-between mb-2">
             <div>
@@ -927,10 +1002,10 @@ function ReviewDetailPanel({ item, approving, handleApproveWithOverrides, handle
                       <span className="text-xs">{entities.date_time}</span>
                     </div>
                   )}
-                  {entities.property && (
+                  {(entities.property || entities.asset) && (
                     <div className="flex items-center gap-2 p-2 rounded-md bg-[hsl(var(--surface-1))] col-span-2">
                       <MapPin size={12} className="text-muted-foreground" />
-                      <span className="text-xs">{entities.property}</span>
+                      <span className="text-xs">{entities.property || entities.asset}</span>
                     </div>
                   )}
                 </div>

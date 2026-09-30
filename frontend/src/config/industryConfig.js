@@ -1,10 +1,18 @@
 // Industry-specific configurations for dynamic dashboard and UI
 
+// Values are stored on the business profile; the backend maps each one to
+// its inbox category list (backend/inbox_categories.py — unknown → generic).
+// Translated labels live in translations.js → onboarding_lite.industries.
 export const INDUSTRIES = [
   { value: 'real_estate', label: 'Real Estate' },
-  { value: 'healthcare', label: 'Healthcare' },
-  { value: 'consulting', label: 'Consulting' },
   { value: 'ecommerce', label: 'E-commerce' },
+  { value: 'retail', label: 'Retail' },
+  { value: 'hospitality', label: 'Hospitality / Restaurants' },
+  { value: 'consulting', label: 'Consulting' },
+  { value: 'healthcare', label: 'Healthcare' },
+  { value: 'education', label: 'Education' },
+  { value: 'manufacturing', label: 'Manufacturing' },
+  { value: 'technology', label: 'Technology / Software' },
   { value: 'other', label: 'Other' }
 ];
 

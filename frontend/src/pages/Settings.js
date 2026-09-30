@@ -70,8 +70,10 @@ export default function Settings() {
   const saveBusinessProfile = async () => {
     try {
       setSavingProfile(true);
-      await updateProfile(profileForm);
+      const saved = await updateProfile(profileForm);
       toast.success(t('settings.profile.saved_toast'));
+      // New line of business → the backend re-categorizes recent inbox mail.
+      if (saved?.inbox_reclassify_queued) toast.info(t('inbox_categories.settings_reclassifying'));
       refetch();
     } catch (error) {
       toast.error(t('settings.profile.save_failed_toast'));
@@ -180,9 +182,13 @@ export default function Settings() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {INDUSTRIES.map(ind => (
-                        <SelectItem key={ind.value} value={ind.value}>{ind.label}</SelectItem>
-                      ))}
+                      {INDUSTRIES.map(ind => {
+                        const key = `onboarding_lite.industries.${ind.value}`;
+                        const label = t(key);
+                        return (
+                          <SelectItem key={ind.value} value={ind.value}>{label === key ? ind.label : label}</SelectItem>
+                        );
+                      })}
                     </SelectContent>
                   </Select>
                   <p className="text-xs text-muted-foreground mt-1">
