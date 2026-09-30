@@ -8,6 +8,7 @@ jest.mock('../context/LanguageContext', () => {
   const lang = { t: (k) => k, lang: 'es' };
   return { useLanguage: () => lang };
 });
+jest.mock('../lib/supabaseClient', () => ({ supabase: { auth: { resetPasswordForEmail: jest.fn() } } }));
 jest.mock('../components/LanguageSwitcher', () => function LanguageSwitcherStub() { return null; });
 jest.mock('sonner', () => ({
   toast: { success: jest.fn(), error: jest.fn(), warning: jest.fn(), info: jest.fn() },

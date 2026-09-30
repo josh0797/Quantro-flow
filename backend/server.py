@@ -1855,6 +1855,13 @@ PERIODIC_SYNC_INTERVAL_SECS = int(
     os.environ.get("PERIODIC_SYNC_INTERVAL_SECS") or 15 * 60
 )
 
+# Provider SDK calls are synchronous (googleapiclient/httplib2, MSAL,
+# httpx.Client) and one Gmail sync is ~50 sequential HTTPS round-trips.
+# The API runs a single uvicorn worker, so every such call made from
+# async code goes through asyncio.to_thread — otherwise one workspace's
+# sync freezes every request, /api/health included (Fly's check times
+# out at 5 s). tests/test_provider_calls_off_event_loop.py enforces it.
+
 
 async def _perform_google_sync_for_workspace(workspace_id: str) -> Dict[str, Any]:
     """Run the same sync logic as POST /api/integrations/google/sync but
@@ -1870,7 +1877,7 @@ async def _perform_google_sync_for_workspace(workspace_id: str) -> Dict[str, Any
     counts = {"emails": 0, "events": 0}
     now = datetime.now(timezone.utc)
     try:
-        emails = goog.fetch_recent_gmail(creds, limit=50)
+        emails = await asyncio.to_thread(goog.fetch_recent_gmail, creds, limit=50)
         for m in emails:
             await inbox_col.update_one(
                 {"workspace_id": workspace_id, "gmail_id": m["gmail_id"]},
@@ -1888,7 +1895,7 @@ async def _perform_google_sync_for_workspace(workspace_id: str) -> Dict[str, Any
                 upsert=True,
             )
             counts["emails"] += 1
-        events = goog.fetch_upcoming_calendar(creds, days=30)
+        events = await asyncio.to_thread(goog.fetch_upcoming_calendar, creds, days=30)
         for ev in events:
             event_id = str(uuid.uuid4())
             canonical = canonical_calendar_write(
@@ -5874,8 +5881,12 @@ async def google_oauth_start(
     return_to: Optional[str] = None,
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
 ):
     """Kick off the Authorization Code Flow.
+
+    Leader+ only: the connection is the whole workspace's mailbox (same
+    rule as DELETE /api/connect/providers/{provider}).
 
     The frontend hits this with a Bearer token (so we know the
     workspace+user) and then sends the user's browser to ``auth_url``.
@@ -6088,8 +6099,9 @@ async def google_oauth_callback(
     return_to = return_path
 
     try:
-        creds, profile = goog.exchange_code_for_tokens(
-            code, redirect_uri, code_verifier=state_doc.get("code_verifier")
+        creds, profile = await asyncio.to_thread(
+            goog.exchange_code_for_tokens,
+            code, redirect_uri, code_verifier=state_doc.get("code_verifier"),
         )
     except Exception as exc:  # noqa: BLE001
         # Log the real exception server-side only — never put exception
@@ -6205,7 +6217,7 @@ async def _load_google_credentials(workspace_id: str):
         expires_at=doc.get("expires_at"),
         scopes=doc.get("scopes"),
     )
-    if goog.maybe_refresh(creds):
+    if await asyncio.to_thread(goog.maybe_refresh, creds):
         # Persist the rotated access token + new expiry. Refresh tokens
         # rarely change but we still re-encrypt to be safe.
         new_expiry = creds.expiry
@@ -6252,7 +6264,7 @@ async def google_oauth_sync(
     counts = {"emails": 0, "events": 0}
 
     try:
-        emails = goog.fetch_recent_gmail(creds, limit=50)
+        emails = await asyncio.to_thread(goog.fetch_recent_gmail, creds, limit=50)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Gmail fetch failed: {exc}") from exc
 
@@ -6290,7 +6302,7 @@ async def google_oauth_sync(
         counts["emails"] += 1
 
     try:
-        events = goog.fetch_upcoming_calendar(creds, days=30)
+        events = await asyncio.to_thread(goog.fetch_upcoming_calendar, creds, days=30)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Calendar fetch failed: {exc}") from exc
 
@@ -6384,9 +6396,9 @@ async def _disconnect_google_workspace(workspace_id: str, user_id: Optional[str]
     refresh = goog.decrypt_token(doc.get("refresh_token"))
     access = goog.decrypt_token(doc.get("access_token"))
     if refresh:
-        goog.revoke_token(refresh)
+        await asyncio.to_thread(goog.revoke_token, refresh)
     elif access:
-        goog.revoke_token(access)
+        await asyncio.to_thread(goog.revoke_token, access)
 
     await secrets_store.delete_connection(
         provider="google", workspace_id=workspace_id, mongo_col=google_integrations_col,
@@ -6429,6 +6441,7 @@ async def _disconnect_google_workspace(workspace_id: str, user_id: Optional[str]
 async def google_oauth_disconnect(
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
 ):
     return await _disconnect_google_workspace(workspace_id, user.user_id)
 
@@ -6473,6 +6486,7 @@ async def microsoft_oauth_start(
     return_to: Optional[str] = None,
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
 ):
     if not msoa.is_oauth_configured():
         raise HTTPException(
@@ -6493,7 +6507,7 @@ async def microsoft_oauth_start(
         created_at=datetime.now(timezone.utc),
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
     )
-    auth_url = msoa.build_authorization_url(state=state, redirect_uri=redirect_uri)
+    auth_url = await asyncio.to_thread(msoa.build_authorization_url, state=state, redirect_uri=redirect_uri)
     return {"auth_url": auth_url, "state": state}
 
 
@@ -6548,8 +6562,8 @@ async def microsoft_oauth_callback(
 
     try:
         requested_scopes = state_doc.get("requested_scopes") or None
-        token_payload, profile = msoa.exchange_code_for_tokens(
-            code, redirect_uri, scopes=requested_scopes,
+        token_payload, profile = await asyncio.to_thread(
+            msoa.exchange_code_for_tokens, code, redirect_uri, scopes=requested_scopes,
         )
     except Exception as exc:  # noqa: BLE001
         print(f"[microsoft_oauth_callback] token exchange failed for workspace={workspace_id}: {exc}")
@@ -6642,7 +6656,8 @@ async def _load_microsoft_credentials(workspace_id: str) -> Tuple[Optional[str],
         try:
             # Preserve incremental Action scopes (Mail.Send / Calendars.ReadWrite)
             # — refreshing with base _graph_scopes() alone drops writes after ~1h.
-            fresh = msoa.refresh_access_token(
+            fresh = await asyncio.to_thread(
+                msoa.refresh_access_token,
                 refresh_plain,
                 scopes=msoa.normalize_refresh_scopes(doc.get("scopes")),
             )
@@ -6684,7 +6699,7 @@ async def _perform_microsoft_sync_for_workspace(workspace_id: str) -> Dict[str, 
     counts = {"emails": 0, "events": 0}
     now = datetime.now(timezone.utc)
     try:
-        emails = msoa.fetch_recent_outlook(access, limit=50)
+        emails = await asyncio.to_thread(msoa.fetch_recent_outlook, access, limit=50)
         for m in emails:
             await inbox_col.update_one(
                 {"workspace_id": workspace_id, "ms_id": m["ms_id"]},
@@ -6702,7 +6717,7 @@ async def _perform_microsoft_sync_for_workspace(workspace_id: str) -> Dict[str, 
                 upsert=True,
             )
             counts["emails"] += 1
-        events = msoa.fetch_upcoming_outlook_events(access)  # env window + pagination
+        events = await asyncio.to_thread(msoa.fetch_upcoming_outlook_events, access)  # env window + pagination
         cal_metrics = {
             "inserted": 0, "updated": 0, "unchanged": 0,
             "cancelled": 0, "possible_duplicates": 0, "events": 0,
@@ -6860,6 +6875,7 @@ async def _disconnect_microsoft_workspace(workspace_id: str, user_id: Optional[s
 async def microsoft_oauth_disconnect(
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
 ):
     return await _disconnect_microsoft_workspace(workspace_id, user.user_id)
 
@@ -6885,6 +6901,7 @@ async def toggle_auto_sync(
     req: AutoSyncToggleRequest,
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
 ):
     """Pause or resume the periodic sync for a connected integration.
 
@@ -7231,6 +7248,7 @@ async def connect_google_request_permission(
     return_to: Optional[str] = None,
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
 ):
     """Incremental Google authorization for one Action's write scope —
     the "Grant permission" flow. Reuses the exact same state-doc +
@@ -7272,6 +7290,7 @@ async def connect_microsoft_request_permission(
     return_to: Optional[str] = None,
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
 ):
     """Incremental Microsoft consent for Action write scopes (Mail.Send /
     Calendars.ReadWrite). Connected Limited → Grant → OAuth → Connected.
@@ -7289,8 +7308,9 @@ async def connect_microsoft_request_permission(
     redirect_uri = msoa.resolve_redirect_uri(base_url)
     state = uuid.uuid4().hex
     requested_scopes = msoa.scopes_for_incremental([scope])
-    auth_url = msoa.build_incremental_authorization_url(
-        state=state, redirect_uri=redirect_uri, additional_scopes=[scope]
+    auth_url = await asyncio.to_thread(
+        msoa.build_incremental_authorization_url,
+        state=state, redirect_uri=redirect_uri, additional_scopes=[scope],
     )
     await secrets_store.put_oauth_state(
         provider="microsoft",

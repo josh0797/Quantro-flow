@@ -10,6 +10,8 @@ import { Navigate } from 'react-router-dom';
 import LanguageSwitcher from '../components/LanguageSwitcher';
 import LegalLinks from '../components/LegalLinks';
 import { LEGAL_URLS, buildConsentMetadata } from '../lib/legal';
+import ForgotPasswordScreen from '../components/ForgotPasswordScreen';
+import { isExistingAccountSignup } from '../lib/passwordRecovery';
 
 /**
  * Validates that a full name contains at least two whitespace-separated
@@ -37,17 +39,22 @@ export function isValidFullName(value) {
  * Signup also requires accepting the Terms and the Privacy Notice (the
  * shared Quantro pages, src/lib/legal.js); the accepted versions and the
  * acceptance time go into ``user_metadata`` next to ``full_name``.
+ *
+ * One Quantro account works in Quantro OS and Flow: signing up with an
+ * email that already has an account switches to sign-in (Supabase sends
+ * no email in that case), and "forgot password" opens ForgotPasswordScreen.
  */
 export default function LoginPage() {
   const { t } = useLanguage();
   const { user, loading, signIn, signUp } = useAuth();
-  const [mode, setMode] = useState('signin'); // 'signin' | 'signup'
+  const [mode, setMode] = useState('signin'); // 'signin' | 'signup' | 'forgot'
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
+  const [notice, setNotice] = useState(null);
 
   if (loading) {
     return (
@@ -64,9 +71,14 @@ export default function LoginPage() {
     return <Navigate to="/" replace />;
   }
 
+  if (mode === 'forgot') {
+    return <ForgotPasswordScreen initialEmail={email} onBack={() => setMode('signin')} />;
+  }
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setFormError('');
+    setNotice(null);
 
     if (!email || !password) {
       setFormError(t('auth.missing_fields'));
@@ -99,7 +111,14 @@ export default function LoginPage() {
           needs_onboarding: true,
           ...buildConsentMetadata(),
         });
-        if (result?.session) {
+        if (isExistingAccountSignup(result)) {
+          setMode('signin');
+          setPassword('');
+          setNotice({
+            title: t('auth_help.existing_account_title'),
+            desc: t('auth_help.existing_account_desc'),
+          });
+        } else if (result?.session) {
           toast.success(t('auth.account_confirmed'));
         } else {
           toast.success(t('auth.signup_success_title'), {
@@ -289,6 +308,16 @@ export default function LoginPage() {
             )}
           </div>
 
+          {notice && (
+            <div
+              data-testid="login-notice"
+              className="text-sm border border-[hsl(var(--primary)/0.25)] bg-[hsl(var(--primary)/0.06)] rounded-md px-3 py-2 space-y-0.5"
+            >
+              <p className="font-medium text-foreground">{notice.title}</p>
+              <p className="text-muted-foreground">{notice.desc}</p>
+            </div>
+          )}
+
           {formError && (
             <div
               data-testid="login-error"
@@ -321,11 +350,26 @@ export default function LoginPage() {
               onClick={() => {
                 setMode(mode === 'signin' ? 'signup' : 'signin');
                 setFormError('');
+                setNotice(null);
               }}
               className="text-[hsl(var(--primary))] hover:underline"
             >
               {mode === 'signin' ? t('auth.toggle_to_signup') : t('auth.toggle_to_signin')}
             </button>
+            {mode === 'signin' && (
+              <button
+                type="button"
+                data-testid="login-forgot-password"
+                onClick={() => {
+                  setMode('forgot');
+                  setFormError('');
+                  setNotice(null);
+                }}
+                className="text-muted-foreground hover:text-foreground hover:underline"
+              >
+                {t('auth.forgot_password')}
+              </button>
+            )}
           </div>
 
           <div className="flex items-center gap-2 text-xs text-muted-foreground pt-2 border-t border-[hsl(var(--border))]">
