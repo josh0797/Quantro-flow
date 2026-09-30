@@ -15,6 +15,7 @@ import {
   Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription,
 } from '@/components/ui/sheet';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../contexts/AuthContext';
 import {
   getConnectProviders, testConnection, syncConnection, disconnectProvider,
   requestGooglePermission, requestMicrosoftPermission, getActions, getActionExecutions,
@@ -38,6 +39,26 @@ import {
 export const CONNECT_OAUTH_RETURN_PATH = '/settings';
 
 const OAUTH_PROVIDERS = new Set(['google', 'microsoft']);
+
+const ROLE_RANK = { viewer: 1, member: 2, accountant: 3, leader: 4, owner: 5 };
+
+/**
+ * Connecting, reconnecting, testing, syncing, granting permissions and
+ * disconnecting are leader+ on the backend (require_role("leader")), so
+ * lower roles don't get those buttons. An unknown role (workspaces not
+ * loaded yet) keeps them — the backend still enforces the rule.
+ */
+export function canManageConnections(role) {
+  if (!role) return true;
+  return (ROLE_RANK[role] || 0) >= ROLE_RANK.leader;
+}
+
+// 403 {error: 'rbac_forbidden'} → the leader-only explanation.
+function errorDescription(err, t) {
+  const detail = err?.response?.data?.detail;
+  if (err?.response?.status === 403 && detail?.error === 'rbac_forbidden') return t('connect.toasts.leader_only');
+  return typeof detail === 'string' ? detail : undefined;
+}
 
 const CATEGORY_ORDER = ['all', 'productivity', 'fiscal', 'ai', 'automation', 'internal'];
 
@@ -111,7 +132,7 @@ function ProviderCard({ provider, onOpen, t }) {
   );
 }
 
-function ProviderDrawer({ provider, open, onClose, onChanged, t }) {
+function ProviderDrawer({ provider, open, onClose, onChanged, canManage, t }) {
   const [tab, setTab] = useState('overview');
   const [busy, setBusy] = useState(false);
   const [providerActions, setProviderActions] = useState([]);
@@ -159,8 +180,9 @@ function ProviderDrawer({ provider, open, onClose, onChanged, t }) {
       toast.success(t('connect.toasts.disconnected', { provider: provider.name }));
       onChanged();
       onClose();
-    } catch {
-      toast.error(t('connect.toasts.action_failed'));
+    } catch (err) {
+      const description = errorDescription(err, t);
+      toast.error(t('connect.toasts.action_failed'), description ? { description } : undefined);
     } finally {
       setBusy(false);
     }
@@ -176,8 +198,8 @@ function ProviderDrawer({ provider, open, onClose, onChanged, t }) {
       if (!auth_url) throw new Error('no auth_url returned');
       window.location.href = auth_url;
     } catch (err) {
-      const detail = err?.response?.data?.detail;
-      toast.error(t('connect.toasts.action_failed'), typeof detail === 'string' ? { description: detail } : undefined);
+      const description = errorDescription(err, t);
+      toast.error(t('connect.toasts.action_failed'), description ? { description } : undefined);
       setBusy(false);
     }
   };
@@ -231,6 +253,12 @@ function ProviderDrawer({ provider, open, onClose, onChanged, t }) {
                 <span className="text-foreground">{provider.last_sync_at ? new Date(provider.last_sync_at).toLocaleString() : t('connect.card.never_synced')}</span>
               </div>
             )}
+            {!canManage && (
+              <p data-testid="drawer-leader-only" className="text-xs text-muted-foreground pt-2">
+                {t('connect.drawer.leader_only')}
+              </p>
+            )}
+            {canManage && (
             <div className="flex flex-wrap gap-2 pt-2">
               {provider.status === 'disconnected' && isOAuthProvider && (
                 <Button size="sm" onClick={() => handleOAuth(provider.provider_id)} disabled={busy} data-testid="drawer-connect-button">
@@ -268,6 +296,7 @@ function ProviderDrawer({ provider, open, onClose, onChanged, t }) {
                 </Button>
               )}
             </div>
+            )}
           </TabsContent>
 
           <TabsContent value="permissions" className="space-y-3 mt-4">
@@ -288,7 +317,7 @@ function ProviderDrawer({ provider, open, onClose, onChanged, t }) {
                   return (
                     <div key={scope} className="flex items-center justify-between gap-2 rounded-lg border border-[hsl(var(--warning)/0.3)] bg-[hsl(var(--warning)/0.06)] px-3 py-2">
                       <span className="text-xs font-mono text-foreground truncate">{scope}</span>
-                      {(provider.provider_id === 'google' || provider.provider_id === 'microsoft') && actionForScope && (
+                      {canManage && (provider.provider_id === 'google' || provider.provider_id === 'microsoft') && actionForScope && (
                         <Button size="sm" variant="outline" onClick={() => handleGrantPermission(provider.provider_id, actionForScope.action_id)} disabled={busy} data-testid="drawer-grant-permission-button">
                           <Lock size={12} className="mr-1.5" />{t('connect.drawer.grant_permission')}
                         </Button>
@@ -338,6 +367,10 @@ function ProviderDrawer({ provider, open, onClose, onChanged, t }) {
 
 export default function ConnectPanel() {
   const { t } = useLanguage();
+  const { workspaces, currentWorkspaceId } = useAuth();
+  const currentWorkspace = (workspaces || []).find((w) => w.is_current)
+    || (workspaces || []).find((w) => w.workspace_id === currentWorkspaceId);
+  const canManage = canManageConnections(currentWorkspace?.role);
   const [params, setParams] = useSearchParams();
   const [providers, setProviders] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -455,6 +488,7 @@ export default function ConnectPanel() {
         open={!!selected}
         onClose={() => setSelected(null)}
         onChanged={load}
+        canManage={canManage}
         t={t}
       />
     </section>

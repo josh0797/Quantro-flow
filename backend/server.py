@@ -5881,8 +5881,12 @@ async def google_oauth_start(
     return_to: Optional[str] = None,
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
 ):
     """Kick off the Authorization Code Flow.
+
+    Leader+ only: the connection is the whole workspace's mailbox (same
+    rule as DELETE /api/connect/providers/{provider}).
 
     The frontend hits this with a Bearer token (so we know the
     workspace+user) and then sends the user's browser to ``auth_url``.
@@ -6437,6 +6441,7 @@ async def _disconnect_google_workspace(workspace_id: str, user_id: Optional[str]
 async def google_oauth_disconnect(
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
 ):
     return await _disconnect_google_workspace(workspace_id, user.user_id)
 
@@ -6481,6 +6486,7 @@ async def microsoft_oauth_start(
     return_to: Optional[str] = None,
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
 ):
     if not msoa.is_oauth_configured():
         raise HTTPException(
@@ -6869,6 +6875,7 @@ async def _disconnect_microsoft_workspace(workspace_id: str, user_id: Optional[s
 async def microsoft_oauth_disconnect(
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
 ):
     return await _disconnect_microsoft_workspace(workspace_id, user.user_id)
 
@@ -6894,6 +6901,7 @@ async def toggle_auto_sync(
     req: AutoSyncToggleRequest,
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
 ):
     """Pause or resume the periodic sync for a connected integration.
 
@@ -7240,6 +7248,7 @@ async def connect_google_request_permission(
     return_to: Optional[str] = None,
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
 ):
     """Incremental Google authorization for one Action's write scope —
     the "Grant permission" flow. Reuses the exact same state-doc +
@@ -7281,6 +7290,7 @@ async def connect_microsoft_request_permission(
     return_to: Optional[str] = None,
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
 ):
     """Incremental Microsoft consent for Action write scopes (Mail.Send /
     Calendars.ReadWrite). Connected Limited → Grant → OAuth → Connected.

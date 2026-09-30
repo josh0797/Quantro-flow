@@ -882,6 +882,7 @@ export const translations = {
         activity_none: 'Sin actividad reciente.',
         permission_required: 'Permiso requerido',
         reconnect: 'Reconectar',
+        leader_only: 'Solo un líder o el propietario del espacio puede conectar, sincronizar o desconectar integraciones.',
       },
       facturapi_modal: {
         title: 'Conectar Facturapi',
@@ -902,6 +903,7 @@ export const translations = {
         action_failed: 'La operación falló',
         connect_failed: 'No se pudo conectar {{provider}}',
         permission_missing: '{{provider}} quedó conectado con permisos incompletos. Revisa la pestaña Permisos.',
+        leader_only: 'Necesitas el rol de líder o propietario del espacio para hacer esto.',
       },
     },
 
@@ -2207,6 +2209,7 @@ export const translations = {
         activity_none: 'No recent activity.',
         permission_required: 'Permission required',
         reconnect: 'Reconnect',
+        leader_only: 'Only a workspace leader or owner can connect, sync or disconnect integrations.',
       },
       facturapi_modal: {
         title: 'Connect Facturapi',
@@ -2227,6 +2230,7 @@ export const translations = {
         action_failed: 'The operation failed',
         connect_failed: 'Could not connect {{provider}}',
         permission_missing: '{{provider}} is connected with missing permissions. Check the Permissions tab.',
+        leader_only: 'You need the workspace leader or owner role to do this.',
       },
     },
 
