@@ -11,6 +11,9 @@ jest.mock('../lib/api', () => ({
   startMicrosoftOAuth: jest.fn(),
 }));
 jest.mock('sonner', () => ({ toast: { success: jest.fn(), warning: jest.fn(), error: jest.fn() } }));
+// The active workspace's role decides which drawer buttons show (leader+).
+const mockAuth = { workspaces: [], currentWorkspaceId: 'ws_a' };
+jest.mock('../contexts/AuthContext', () => ({ useAuth: () => mockAuth }));
 // Stable `t`, like the real memoized one (components key effects on it).
 jest.mock('../context/LanguageContext', () => {
   const lang = { t: (k) => k, lang: 'es' };
@@ -18,10 +21,10 @@ jest.mock('../context/LanguageContext', () => {
 });
 
 /* eslint-disable import/first */
-import React from 'react';
+import React, { act } from 'react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { toast } from 'sonner';
-import ConnectPanel, { CONNECT_OAUTH_RETURN_PATH } from './ConnectPanel';
+import ConnectPanel, { CONNECT_OAUTH_RETURN_PATH, canManageConnections } from './ConnectPanel';
 import {
   getConnectProviders, getActions, getActionExecutions, startGoogleOAuth, syncConnection,
 } from '../lib/api';
@@ -56,8 +59,21 @@ async function mount(path) {
   await flush();
 }
 
+// Radix Tabs switch on mousedown (primary button), not click.
+const openTab = async (testId) => {
+  await act(async () => {
+    byTestId(testId).dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+  });
+  await flush();
+};
+
+const asRole = (role) => {
+  mockAuth.workspaces = [{ workspace_id: 'ws_a', name: 'A', role, is_current: true }];
+};
+
 beforeEach(() => {
   jest.clearAllMocks();
+  asRole('owner');
   getActions.mockResolvedValue([]);
   getActionExecutions.mockResolvedValue([]);
 });
@@ -127,4 +143,70 @@ it('keeps sync, disconnect and adds reconnect for an existing Google connection'
   await click(byTestId('drawer-sync-button'));
   await flush();
   expect(syncConnection).toHaveBeenCalledWith('google');
+});
+
+it('only leader and owner manage connections (unknown role defers to the backend)', () => {
+  expect(canManageConnections('owner')).toBe(true);
+  expect(canManageConnections('leader')).toBe(true);
+  expect(canManageConnections('accountant')).toBe(false);
+  expect(canManageConnections('member')).toBe(false);
+  expect(canManageConnections('viewer')).toBe(false);
+  expect(canManageConnections('mystery')).toBe(false);
+  expect(canManageConnections(undefined)).toBe(true);
+});
+
+it.each(['viewer', 'member', 'accountant'])(
+  'hides connect / sync / disconnect / grant for a %s and explains why',
+  async (role) => {
+    asRole(role);
+    getActions.mockResolvedValue([{ action_id: 'google.gmail.send', required_scopes: ['gmail.send'] }]);
+    getConnectProviders.mockResolvedValue([
+      provider('google', 'connected_limited', { missing_scopes: ['gmail.send'] }),
+      provider('microsoft', 'disconnected'),
+    ]);
+    await mount('/settings/integrations');
+
+    await click(byTestId('connect-provider-card-google'));
+    await flush();
+    expect(byTestId('drawer-leader-only')).not.toBeNull();
+    for (const id of ['drawer-reconnect-button', 'drawer-test-button', 'drawer-sync-button',
+      'drawer-disconnect-button']) {
+      expect(byTestId(id)).toBeNull();
+    }
+    await openTab('drawer-tab-permissions');
+    expect(document.body.textContent).toContain('gmail.send');
+    expect(byTestId('drawer-grant-permission-button')).toBeNull();
+  },
+);
+
+it('a leader gets every management button, grant permission included', async () => {
+  asRole('leader');
+  getActions.mockResolvedValue([{ action_id: 'google.gmail.send', required_scopes: ['gmail.send'] }]);
+  getConnectProviders.mockResolvedValue([provider('google', 'connected_limited', { missing_scopes: ['gmail.send'] })]);
+  await mount('/settings/integrations');
+
+  await click(byTestId('connect-provider-card-google'));
+  await flush();
+  expect(byTestId('drawer-leader-only')).toBeNull();
+  for (const id of ['drawer-reconnect-button', 'drawer-test-button', 'drawer-sync-button', 'drawer-disconnect-button']) {
+    expect(byTestId(id)).not.toBeNull();
+  }
+  await openTab('drawer-tab-permissions');
+  expect(byTestId('drawer-grant-permission-button')).not.toBeNull();
+});
+
+it('shows the leader-only explanation when the backend answers rbac_forbidden', async () => {
+  asRole(undefined);   // role unknown → buttons shown, backend decides
+  getConnectProviders.mockResolvedValue([provider('google', 'disconnected')]);
+  startGoogleOAuth.mockRejectedValue({
+    response: { status: 403, data: { detail: { error: 'rbac_forbidden', required_role: 'leader', your_role: 'viewer' } } },
+  });
+  await mount('/settings/integrations');
+
+  await click(byTestId('connect-provider-card-google'));
+  await flush();
+  expect(byTestId('drawer-leader-only')).toBeNull();
+  await click(byTestId('drawer-connect-button'));
+  await flush();
+  expect(toast.error).toHaveBeenCalledWith('connect.toasts.action_failed', { description: 'connect.toasts.leader_only' });
 });

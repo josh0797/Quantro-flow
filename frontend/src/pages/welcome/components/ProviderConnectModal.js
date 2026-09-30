@@ -80,10 +80,10 @@ export default function ProviderConnectModal({
       // the modal will be unmounted by the route change.
     } catch (err) {
       const detail = err?.response?.data?.detail;
-      const desc =
-        typeof detail === 'string'
-          ? detail
-          : t(`welcome.connect_modal.${provider}_unavailable_desc`);
+      let desc = t(`welcome.connect_modal.${provider}_unavailable_desc`);
+      if (typeof detail === 'string') desc = detail;
+      // Invited below leader: only a leader/owner can connect the mailbox.
+      else if (detail?.error === 'rbac_forbidden') desc = t('connect.toasts.leader_only');
       toast.error(t(`welcome.connect_modal.${provider}_failed_title`), { description: desc });
       setRedirecting(null);
       onProviderError?.(provider, err);
