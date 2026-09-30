@@ -27,6 +27,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
 import { supabase } from '../lib/supabaseClient';
+import { authFetch } from '../lib/authFetch';
 import PlanSelectorDialog from '../components/PlanSelectorDialog';
 import {
   PLAN_LIMITS,
@@ -36,6 +37,7 @@ import {
   getOpenAIUsageLimit,
   getCreditsState,
   formatUsd,
+  resolveOwnKeyModel,
 } from '../lib/billing';
 
 /**
@@ -71,6 +73,29 @@ const MODULE_META = {
   content: { key: 'content', testid: 'content' },
 };
 
+const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
+
+/**
+ * The active workspace's own OpenAI key, from GET /api/integrations/openai
+ * (secrets redacted to config.has_api_key). Returns { model } when a key is
+ * connected — AI then runs on it and no Quantro credits are used — else
+ * null. Any failure reads as "no own key" (display only; the backend
+ * decides per request).
+ */
+async function fetchWorkspaceOwnKey() {
+  try {
+    const res = await authFetch(`${backendUrl}/api/integrations/openai`);
+    if (!res.ok) return null;
+    const row = await res.json();
+    if (row?.status === 'connected' && row?.config?.has_api_key) {
+      return { model: row.config.model || null };
+    }
+  } catch (_) {
+    /* display-only */
+  }
+  return null;
+}
+
 function currentMonthKey() {
   const d = new Date();
   const y = d.getUTCFullYear();
@@ -96,9 +121,21 @@ export default function PlanAndUsage() {
   const [errorMsg, setErrorMsg] = useState(null);
   const [portalLoading, setPortalLoading] = useState(false);
   const [selectorOpen, setSelectorOpen] = useState(false);
+  const [ownKey, setOwnKey] = useState(null);
 
   const loading = loadingProfile || loadingUsage;
   const currentWs = workspaces?.find((w) => w.is_current);
+  const currentWsId = currentWs?.workspace_id;
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchWorkspaceOwnKey().then((key) => {
+      if (!cancelled) setOwnKey(key);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentWsId]);
 
   const fetchProfile = useCallback(async () => {
     if (!user?.user_id) return;
@@ -365,7 +402,7 @@ export default function PlanAndUsage() {
 
       {/* 2. Cr\u00e9ditos IA (USD-based) */}
       {(() => {
-        const credits = getCreditsState({ email: user?.email, profile });
+        const credits = getCreditsState({ email: user?.email, profile, workspaceOwnKey: !!ownKey });
         return (
           <Card data-testid="credits-card" className="bg-[hsl(var(--surface-1))] border-[hsl(var(--border))]">
             <CardHeader className="flex flex-row items-center justify-between gap-3 pb-3">
@@ -427,9 +464,20 @@ export default function PlanAndUsage() {
                 </div>
               )}
               {credits.source === 'user_api' && (
-                <div data-testid="credits-fallback" className="flex items-center gap-2 text-xs text-[hsl(var(--success))] bg-[hsl(var(--success)/0.08)] border border-[hsl(var(--success)/0.2)] rounded-md px-3 py-2">
+                <div data-testid="credits-fallback" className="flex flex-wrap items-center gap-2 text-xs text-[hsl(var(--success))] bg-[hsl(var(--success)/0.08)] border border-[hsl(var(--success)/0.2)] rounded-md px-3 py-2">
                   <Key size={12} />
-                  <span>{t('plan_usage.credits_fallback_user_key')}</span>
+                  <span className="flex-1 min-w-0">
+                    {t('plan_usage.credits_fallback_user_key', { model: resolveOwnKeyModel(ownKey?.model) })}
+                  </span>
+                  <Button
+                    data-testid="credits-manage-key-btn"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => navigate('/settings/integrations')}
+                    className="border-[hsl(var(--border))] h-7 text-xs"
+                  >
+                    {t('plan_usage.manage_own_api_key')}
+                  </Button>
                 </div>
               )}
               {credits.source === 'blocked' && (
@@ -440,21 +488,18 @@ export default function PlanAndUsage() {
                       : t('plan_usage.credits_blocked_message')}
                   </p>
                   <div className="flex gap-2">
-                    {/* Flow can't read a user's own OpenAI key yet
-                        (ai_billing.get_user_api_key is a stub), so a plan
-                        without included credits only gets the upgrade path. */}
-                    {credits.reason !== 'plan_no_credits' && (
-                      <Button
-                        data-testid="credits-add-key-btn"
-                        size="sm"
-                        variant="outline"
-                        onClick={() => navigate('/settings')}
-                        className="border-[hsl(var(--border))] h-8 text-xs"
-                      >
-                        <Key size={12} className="mr-1.5" />
-                        {t('plan_usage.add_own_api_key')}
-                      </Button>
-                    )}
+                    {/* The workspace's own OpenAI key (Settings → Integrations)
+                        unblocks AI on any plan: OpenAI bills the customer. */}
+                    <Button
+                      data-testid="credits-add-key-btn"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => navigate('/settings/integrations')}
+                      className="border-[hsl(var(--border))] h-8 text-xs"
+                    >
+                      <Key size={12} className="mr-1.5" />
+                      {t('plan_usage.add_own_api_key')}
+                    </Button>
                     <Button
                       data-testid="credits-upgrade-btn"
                       size="sm"
