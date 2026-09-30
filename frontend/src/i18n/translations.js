@@ -710,6 +710,23 @@ export const translations = {
       repair_toast_multi: 'El sistema reparó {{count}} integraciones faltantes automáticamente',
     },
 
+    // Legal: consentimiento al crear la cuenta + enlaces (src/lib/legal.js)
+    legal: {
+      accept_prefix: 'Acepto los',
+      terms_link: 'Términos',
+      accept_middle: 'y el',
+      privacy_link: 'Aviso de Privacidad',
+      terms_required: 'Para crear tu cuenta debes aceptar los Términos y el Aviso de Privacidad.',
+      docs_language_note: '',
+      privacy: 'Privacidad',
+      terms: 'Términos',
+      settings_heading: 'Privacidad y legal',
+      settings_description: 'Quantro Flow usa la misma cuenta que Quantro, así que aplican los mismos documentos.',
+      settings_terms: 'Términos de Servicio',
+      settings_privacy: 'Aviso de Privacidad',
+      settings_dpa: 'Acuerdo de Procesamiento de Datos',
+      settings_contact: 'Para ejercer tus derechos ARCO o pedir que eliminemos tu cuenta, escríbenos a',
+    },
     settings: {
       title: 'Configuración',
       subtitle: 'Configura tu Business OS',
@@ -2037,6 +2054,23 @@ export const translations = {
       repair_toast_multi: 'System repaired {{count}} missing integrations automatically',
     },
 
+    // Legal: signup consent + links (src/lib/legal.js)
+    legal: {
+      accept_prefix: 'I accept the',
+      terms_link: 'Terms',
+      accept_middle: 'and the',
+      privacy_link: 'Privacy Notice',
+      terms_required: 'To create your account you must accept the Terms and the Privacy Notice.',
+      docs_language_note: 'These documents are available in Spanish.',
+      privacy: 'Privacy',
+      terms: 'Terms',
+      settings_heading: 'Privacy & legal',
+      settings_description: 'Quantro Flow uses the same account as Quantro, so the same documents apply.',
+      settings_terms: 'Terms of Service',
+      settings_privacy: 'Privacy Notice',
+      settings_dpa: 'Data Processing Agreement',
+      settings_contact: 'To exercise your data rights or ask us to delete your account, email',
+    },
     settings: {
       title: 'Settings',
       subtitle: 'Configure your Business OS',

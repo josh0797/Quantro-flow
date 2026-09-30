@@ -8,6 +8,8 @@ import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../contexts/AuthContext';
 import { Navigate } from 'react-router-dom';
 import LanguageSwitcher from '../components/LanguageSwitcher';
+import LegalLinks from '../components/LegalLinks';
+import { LEGAL_URLS, buildConsentMetadata } from '../lib/legal';
 
 /**
  * Validates that a full name contains at least two whitespace-separated
@@ -31,6 +33,10 @@ export function isValidFullName(value) {
  * which is stored in ``user_metadata.full_name`` and later upserted into
  * `profiles.full_name`. Right after signup the user is sent through the
  * `/onboarding-lite` step to capture country, industry and company name.
+ *
+ * Signup also requires accepting the Terms and the Privacy Notice (the
+ * shared Quantro pages, src/lib/legal.js); the accepted versions and the
+ * acceptance time go into ``user_metadata`` next to ``full_name``.
  */
 export default function LoginPage() {
   const { t } = useLanguage();
@@ -39,6 +45,7 @@ export default function LoginPage() {
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
 
@@ -74,6 +81,10 @@ export default function LoginPage() {
         setFormError(t('auth.password_min'));
         return;
       }
+      if (!acceptedTerms) {
+        setFormError(t('legal.terms_required'));
+        return;
+      }
     }
 
     setSubmitting(true);
@@ -86,6 +97,7 @@ export default function LoginPage() {
           full_name: cleanName,
           name: cleanName,
           needs_onboarding: true,
+          ...buildConsentMetadata(),
         });
         if (result?.session) {
           toast.success(t('auth.account_confirmed'));
@@ -230,6 +242,51 @@ export default function LoginPage() {
                 />
               </div>
             </div>
+
+            {mode === 'signup' && (
+              <div className="space-y-1">
+                <label
+                  htmlFor="accept_terms"
+                  className="flex items-start gap-2 text-xs text-muted-foreground leading-relaxed cursor-pointer"
+                >
+                  <input
+                    id="accept_terms"
+                    data-testid="login-accept-terms"
+                    type="checkbox"
+                    checked={acceptedTerms}
+                    onChange={(e) => setAcceptedTerms(e.target.checked)}
+                    disabled={submitting}
+                    required
+                    className="mt-0.5 h-4 w-4 shrink-0 accent-[hsl(var(--primary))]"
+                  />
+                  <span>
+                    {t('legal.accept_prefix')}{' '}
+                    <a
+                      href={LEGAL_URLS.terms}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      data-testid="login-terms-link"
+                      className="text-[hsl(var(--primary))] hover:underline"
+                    >
+                      {t('legal.terms_link')}
+                    </a>{' '}
+                    {t('legal.accept_middle')}{' '}
+                    <a
+                      href={LEGAL_URLS.privacy}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      data-testid="login-privacy-link"
+                      className="text-[hsl(var(--primary))] hover:underline"
+                    >
+                      {t('legal.privacy_link')}
+                    </a>
+                  </span>
+                </label>
+                {t('legal.docs_language_note') && (
+                  <p className="pl-6 text-[11px] text-muted-foreground">{t('legal.docs_language_note')}</p>
+                )}
+              </div>
+            )}
           </div>
 
           {formError && (
@@ -275,6 +332,7 @@ export default function LoginPage() {
             <ShieldCheck size={14} className="text-[hsl(var(--success))]" />
             <span>{t('auth.secure_session')} · {t('auth.secured_by')}</span>
           </div>
+          <LegalLinks className="justify-center -mt-3" />
         </form>
       </div>
     </div>

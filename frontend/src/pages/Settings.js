@@ -15,6 +15,7 @@ import { toast } from 'sonner';
 import IntegrationsPanel from '../components/IntegrationsPanel';
 import ConnectPanel from '../components/ConnectPanel';
 import LanguageSwitcher from '../components/LanguageSwitcher';
+import LegalSettingsCard from '../components/LegalSettingsCard';
 // SimulationModeToggle removed from Settings (UI cleanup — no longer surfaced)
 import { useLanguage } from '../context/LanguageContext';
 
@@ -343,6 +344,8 @@ export default function Settings() {
                 </div>
               </div>
             </Card>
+
+            <LegalSettingsCard />
           </TabsContent>
         </Tabs>
       </div>
