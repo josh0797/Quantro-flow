@@ -30,6 +30,7 @@ import { getEntityLabel } from '../config/industryConfig';
 import { useLanguage } from '../context/LanguageContext';
 import LiveEmptyState from '../components/LiveEmptyState';
 import DataModeBanner from '../components/DataModeBanner';
+import { apiErrorMessage } from '../lib/apiError';
 import {
   useInboxCategories, InboxCategoryChip, InboxCategoryFilter, IndustryCategoryHint
 } from '../components/inbox/InboxCategories';
@@ -197,7 +198,7 @@ export default function SmartInbox() {
       setSelectedIds(new Set());
       fetchInbox();
     } catch (err) {
-      toast.error(t('smart_inbox.toasts.batch_failed'), { description: err.message });
+      toast.error(t('smart_inbox.toasts.batch_failed'), { description: apiErrorMessage(err) });
       fetchInbox();
     } finally {
       setBatchProcessing(false);
@@ -237,7 +238,7 @@ export default function SmartInbox() {
       if (selectedItem?.inbox_id === inboxId) setSelectedItem(result);
       toast.success(t('smart_inbox.toasts.analyzed'), { description: `${intentConfig[result.ai_intent?.intent]?.label || result.ai_intent?.intent}` });
     } catch (err) {
-      toast.error(t('smart_inbox.toasts.analyze_failed'));
+      toast.error(t('smart_inbox.toasts.analyze_failed'), { description: apiErrorMessage(err) });
       fetchInbox();
     } finally {
       setAnalyzing(null);

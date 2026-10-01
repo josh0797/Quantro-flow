@@ -25,6 +25,7 @@ from fastapi.responses import StreamingResponse, RedirectResponse, PlainTextResp
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Tuple
+import ai_billing
 from ai_billing import run_ai_request
 import inbox_categories
 import supabase_admin
@@ -74,7 +75,8 @@ from product_domain_store import (
 # and only connects if a storage flag still routes a domain to Mongo.
 # AI Billing — every AI request flows through ai_billing.run_ai_request.
 # Emergent LLM (EMERGENT_LLM_KEY / emergentintegrations) removed in Phase 0.
-# Quantro uses OPENAI_API_KEY (credits) or the user's own key. See ai_billing.py.
+# Quantro uses OPENAI_API_KEY (credits) or, when the workspace connected its
+# own OpenAI key in Settings → Integrations, that key. See ai_billing.py.
 
 # ─── Supabase Auth (shared project with the Quantro landing) ──────────
 # The frontend signs users in through Supabase Auth; we simply verify the
@@ -154,6 +156,8 @@ templates_col = wrap_content_templates_col(db["content_templates"])
 business_profile_col = _doc_col("business_profile")
 # Phase 4: integrations catalog (QUANTRO_INTEGRATIONS_CONFIG_PRIMARY).
 integrations_config_col = connect_store.IntegrationsConfigCollection(db["integrations_config"])
+# The workspace-own OpenAI key lookup reads the same facade as /api/integrations.
+ai_billing.register_integrations_store(integrations_config_col)
 system_health_col = _doc_col("system_health_events")
 # Phase 7a — Auth + multi-tenant
 users_col = _doc_col("users")
@@ -4371,6 +4375,7 @@ async def analyze_inbox_item(inbox_id: str, workspace_id: str = Depends(get_curr
 
     ai_response = await run_ai_request(
         user_id=user.user_id,
+        workspace_id=workspace_id,
         email=user.email,
         access_token=user.access_token,
         system_prompt=intent_prompt,
@@ -4587,6 +4592,7 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
             message_text = _inbox_message_text(item)
             ai_response = await run_ai_request(
                 user_id=user.user_id,
+                workspace_id=workspace_id,
                 email=user.email,
                 access_token=user.access_token,
                 system_prompt=intent_prompt,
@@ -5100,6 +5106,7 @@ async def generate_content(req: ContentGenerateRequest, workspace_id: str = Depe
 
     ai_response = await run_ai_request(
         user_id=user.user_id,
+        workspace_id=workspace_id,
         email=user.email,
         access_token=user.access_token,
         system_prompt=content_prompt,
@@ -5434,6 +5441,7 @@ async def generate_from_template(template_id: str, req: GenerateFromTemplateRequ
 
     ai_response = await run_ai_request(
         user_id=user.user_id,
+        workspace_id=workspace_id,
         email=user.email,
         access_token=user.access_token,
         system_prompt=template_prompt,
@@ -5633,6 +5641,24 @@ async def get_integration(provider: str, workspace_id: str = Depends(get_current
 
 OAUTH_ONLY_PROVIDERS = {"gmail", "google_calendar"}
 
+# Fields describing the last "Probar conexión" run. Stored on the
+# integrations_config row (Supabase keeps them in `extra`) and cleared
+# whenever the key changes or the integration is disconnected.
+_LAST_TEST_FIELDS = ("last_test_at", "last_test_ok", "last_test_reason")
+_OPENAI_KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-]{16,400}")
+
+
+def _looks_like_openai_key(value: str) -> bool:
+    return bool(_OPENAI_KEY_RE.fullmatch(value or ""))
+
+
+def _own_key_bad_request(reason: str, language: str) -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail={"error": reason, "message": ai_billing.own_key_message(reason, language)},
+    )
+
+
 @app.put("/api/integrations/{provider}")
 async def update_integration(provider: str, req: IntegrationUpdate, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("leader"))):
     """Update an integration configuration.
@@ -5642,6 +5668,13 @@ async def update_integration(provider: str, req: IntegrationUpdate, workspace_id
     the Phase 0 audit note in integrations/secrets.py's module
     docstring for why this matters (this endpoint used to persist and
     return API keys in plaintext).
+
+    Disconnecting (status "disconnected") DELETES every stored secret of
+    the integration (the encrypted OpenAI key included) instead of
+    merging an empty config over it. Saving a new secret replaces the old
+    ciphertext. For 'openai' the key is the workspace's own key used by
+    ai_billing.run_ai_request, so it is validated here (format, model
+    allowlist) before it is stored.
     """
     if provider in OAUTH_ONLY_PROVIDERS and req.status == "connected":
         raise HTTPException(
@@ -5661,9 +5694,38 @@ async def update_integration(provider: str, req: IntegrationUpdate, workspace_id
     existing_config = (existing_doc or {}).get("config") or {}
     incoming_config = dict(req.config)
     for secret_field in integration_secrets.SECRET_FIELD_NAMES:
-        if secret_field in incoming_config and not incoming_config[secret_field]:
+        value = incoming_config.get(secret_field)
+        if isinstance(value, str):
+            value = value.strip()
+            incoming_config[secret_field] = value
+        if secret_field in incoming_config and not value:
             incoming_config.pop(secret_field)
+
+    is_openai = provider == ai_billing.OPENAI_PROVIDER
+    if is_openai and req.status == "connected":
+        language = await _workspace_language(workspace_id)
+        new_key = incoming_config.get("api_key")
+        if new_key is not None and (not isinstance(new_key, str) or not _looks_like_openai_key(new_key)):
+            raise _own_key_bad_request("invalid_openai_key_format", language)
+        if not new_key and not existing_config.get("api_key"):
+            raise _own_key_bad_request("openai_key_required", language)
+        model = incoming_config.get("model")
+        if model not in (None, "") and model not in ai_billing.OWN_KEY_ALLOWED_MODELS:
+            raise _own_key_bad_request("model_not_allowed", language)
+
     merged_config = {**existing_config, **integration_secrets.encrypt_config_secrets(incoming_config)}
+    # A new secret — or, for OpenAI, a different model — invalidates the
+    # last connection test (it checked the old key/model pair).
+    credentials_changed = any(f in incoming_config for f in integration_secrets.SECRET_FIELD_NAMES) or (
+        is_openai and "model" in incoming_config and incoming_config.get("model") != existing_config.get("model")
+    )
+
+    if req.status == "disconnected":
+        # Disconnect = forget the credentials, not just flip a flag.
+        merged_config = {
+            k: v for k, v in merged_config.items()
+            if k not in integration_secrets.SECRET_FIELD_NAMES
+        }
 
     update_data = {
         "status": req.status,
@@ -5673,6 +5735,10 @@ async def update_integration(provider: str, req: IntegrationUpdate, workspace_id
 
     if req.status == "connected":
         update_data["last_sync_at"] = now_iso()
+    if req.status == "disconnected" or credentials_changed:
+        # A previous test result says nothing about a new (or no) key.
+        for f in _LAST_TEST_FIELDS:
+            update_data[f] = None
 
     result = await connect_store.update_integrations_config(
         workspace_id=workspace_id,
@@ -5697,9 +5763,58 @@ async def update_integration(provider: str, req: IntegrationUpdate, workspace_id
     doc["config"] = integration_secrets.redact_config(doc.get("config"))
     return doc
 
+
+async def _test_openai_integration(workspace_id: str) -> Dict[str, Any]:
+    """Real check of the workspace's own OpenAI key (retrieves the chosen
+    model with a short timeout). Persists the outcome as last_test_* on the
+    row so the Settings card can show it. Never echoes the key."""
+    language = await _workspace_language(workspace_id)
+    try:
+        own_key = await ai_billing.get_user_api_key(workspace_id, integrations_col=integrations_config_col)
+    except ai_billing.OwnKeyStoreUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "ai_unavailable", "message": ai_billing.own_key_message("store_unavailable", language)},
+        )
+    model = own_key.model if own_key else ai_billing.OWN_KEY_DEFAULT_MODEL
+    if own_key is None:
+        ok, reason = False, "not_connected"
+    elif not own_key.api_key:
+        ok, reason = False, "own_key_unreadable"
+    else:
+        ok, reason = await ai_billing.check_openai_key(own_key.api_key, own_key.model)
+
+    tested_at = datetime.now(timezone.utc).isoformat()
+    if own_key is not None:
+        await connect_store.update_integrations_config(
+            workspace_id=workspace_id,
+            provider=ai_billing.OPENAI_PROVIDER,
+            mongo_col=integrations_config_col,
+            fields={"last_test_at": tested_at, "last_test_ok": ok, "last_test_reason": reason},
+        )
+        await log_audit(
+            "integration.tested",
+            f"openai -> {'ok' if ok else reason}",
+            workspace_id=workspace_id,
+            metadata={"provider": ai_billing.OPENAI_PROVIDER, "ok": ok, "reason": reason, "model": model},
+        )
+    return {
+        "success": ok,
+        "status": "ok" if ok else "failed",
+        "reason": reason,
+        "model": model,
+        "tested_at": tested_at,
+        "message": ai_billing.own_key_message("ok" if ok else reason, language, model),
+    }
+
+
 @app.post("/api/integrations/{provider}/test")
 async def test_integration(provider: str, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("leader"))):
-    """Test an integration connection (simulated)."""
+    """Test an integration connection.
+
+    'openai' runs a real check against OpenAI with the workspace's saved
+    key; the other providers keep the simulated status check.
+    """
     integration = await connect_store.get_integrations_config(
         workspace_id=workspace_id,
         provider=provider,
@@ -5708,7 +5823,10 @@ async def test_integration(provider: str, workspace_id: str = Depends(get_curren
     )
     if not integration:
         raise HTTPException(status_code=404, detail="Integration not found")
-    
+
+    if provider == ai_billing.OPENAI_PROVIDER:
+        return await _test_openai_integration(workspace_id)
+
     # Simulate connection test
     if integration.get("status") == "connected":
         return {"success": True, "message": f"{provider.title()} connection is healthy"}

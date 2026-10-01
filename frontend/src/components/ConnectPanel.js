@@ -16,6 +16,7 @@ import {
 } from '@/components/ui/sheet';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../contexts/AuthContext';
+import { canManageConnections } from '../lib/roles';
 import {
   getConnectProviders, testConnection, syncConnection, disconnectProvider,
   requestGooglePermission, requestMicrosoftPermission, getActions, getActionExecutions,
@@ -40,18 +41,8 @@ export const CONNECT_OAUTH_RETURN_PATH = '/settings';
 
 const OAUTH_PROVIDERS = new Set(['google', 'microsoft']);
 
-const ROLE_RANK = { viewer: 1, member: 2, accountant: 3, leader: 4, owner: 5 };
-
-/**
- * Connecting, reconnecting, testing, syncing, granting permissions and
- * disconnecting are leader+ on the backend (require_role("leader")), so
- * lower roles don't get those buttons. An unknown role (workspaces not
- * loaded yet) keeps them — the backend still enforces the rule.
- */
-export function canManageConnections(role) {
-  if (!role) return true;
-  return (ROLE_RANK[role] || 0) >= ROLE_RANK.leader;
-}
+// Leader+ gate for connection controls (shared with IntegrationsPanel).
+export { canManageConnections };
 
 // 403 {error: 'rbac_forbidden'} → the leader-only explanation.
 function errorDescription(err, t) {
