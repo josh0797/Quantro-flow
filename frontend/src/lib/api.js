@@ -173,6 +173,10 @@ export const batchAnalyzeInbox = (inbox_ids) => api.post('/inbox/batch-analyze',
 export const batchApproveInbox = (inbox_ids) => api.post('/inbox/batch-approve', { inbox_ids }).then(r => r.data);
 export const updateInboxDetails = (id, data) => api.put(`/inbox/${id}/details`, data).then(r => r.data);
 export const approveWithOverrides = (id, data) => api.post(`/inbox/${id}/approve-with-overrides`, data).then(r => r.data);
+// Industry-aware categories: the workspace's own list (from its business
+// profile industry) and "Reclasificar" (re-categorize recent analyzed items).
+export const getInboxCategories = () => api.get('/inbox/categories').then(r => r.data);
+export const reclassifyInbox = (payload = {}) => api.post('/inbox/reclassify', payload).then(r => r.data);
 
 // Calendar
 export const getCalendarEvents = () => api.get('/calendar').then(r => r.data);
