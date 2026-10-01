@@ -239,7 +239,10 @@ async def test_quantro_invoicing_query_and_prepare_reply(monkeypatch):
     monkeypatch.setenv("QUANTRO_OS_API_URL", "https://os.example.test")
     monkeypatch.setenv("QUANTRO_OS_SERVICE_TOKEN", "svc-secret-token")
 
-    adapter = QuantroInvoicingAdapter()
+    async def resolve_org(workspace_id):
+        return "4e7d2f20-1b6c-4c1a-9a55-2f0c0d5e8a11" if workspace_id == "ws1" else None
+
+    adapter = QuantroInvoicingAdapter(resolve_org_id=resolve_org)
     st = await adapter.get_status("ws1")
     assert st.status == ConnectionStatus.CONNECTED
     assert adapter.name == "Facturación"
@@ -260,11 +263,19 @@ async def test_quantro_invoicing_query_and_prepare_reply(monkeypatch):
         assert method == "GET"
         assert path == "/service-invoices"
         assert params["workspace_id"] == "ws1"
+        # Tenant scope travels with every call — OS filters on it.
+        assert params["organization_id"] == "4e7d2f20-1b6c-4c1a-9a55-2f0c0d5e8a11"
         return {"invoices": invoices}
 
     monkeypatch.setattr(adapter, "_request", fake_request)
     q = await adapter.query_invoices("ws1", q="Acme")
     assert q["invoices"][0]["folio"] == "A-100"
+
+    # An unlinked workspace never reaches OS (fails closed, no global read).
+    from errors import QuantroError
+    with pytest.raises(QuantroError) as unlinked:
+        await adapter.query_invoices("ws-unlinked", q="Acme")
+    assert unlinked.value.code == "configuration_missing"
 
     reply = await adapter.prepare_reply_payload(
         "ws1", invoice_id="inv-1", channel="gmail", to="billing@acme.test",

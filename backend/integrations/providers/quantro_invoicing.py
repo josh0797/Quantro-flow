@@ -13,7 +13,7 @@ Env (server-side only — never exposed to the browser):
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import httpx
 
@@ -55,6 +55,26 @@ class QuantroInvoicingAdapter(ProviderAdapter):
     supports_webhooks = False
     supports_test_mode = False
     configuration_schema = {}  # service-to-service; no browser secrets
+
+    def __init__(
+        self,
+        resolve_org_id: Optional[Callable[[str], Awaitable[Optional[str]]]] = None,
+    ):
+        # Flow workspaces are Mongo ids; Quantro OS invoices belong to a
+        # Supabase organization. OS refuses any lookup that does not name an
+        # organization (the service token is not a tenant), so the resolver
+        # (server.workspace_to_org_id) is mandatory for real calls.
+        self._resolve_org_id = resolve_org_id
+
+    async def _organization_id(self, workspace_id: str) -> str:
+        org_id = await self._resolve_org_id(workspace_id) if self._resolve_org_id else None
+        if not org_id:
+            raise QuantroError(
+                "configuration_missing",
+                "This workspace is not linked to a Quantro OS organization, so invoices cannot be looked up.",
+                extra={"workspace_id": workspace_id},
+            )
+        return str(org_id)
 
     async def get_status(self, workspace_id: str) -> ProviderStatus:
         if not is_os_invoicing_configured():
@@ -144,9 +164,14 @@ class QuantroInvoicingAdapter(ProviderAdapter):
         limit: int = 10,
         invoice_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Locate invoices Quantro OS already processed — metadata/docs only."""
+        """Locate invoices Quantro OS already processed — metadata/docs only.
+
+        Always tenant-scoped: OS filters by ``organization_id`` and rejects
+        the call otherwise, so an unlinked workspace fails here, closed.
+        """
         params: Dict[str, Any] = {
-            "workspace_id": workspace_id,
+            "organization_id": await self._organization_id(workspace_id),
+            "workspace_id": workspace_id,  # informational only (OS logs); not a scope
             "limit": max(1, min(int(limit or 10), 50)),
         }
         if q:
