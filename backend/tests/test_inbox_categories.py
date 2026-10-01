@@ -423,6 +423,8 @@ async def test_reclassify_recategorizes_stale_items_only_and_touches_nothing_els
         ["Devolución de la orden 881", "Pedido entregado"]
     assert all(_mentions(c["system_prompt"], "pedido_entregado") and not _mentions(c["system_prompt"], "agendar_visita")
                for c in ai.calls)
+    # Same AI-credit path as analyze: the workspace's own OpenAI key, when it has one.
+    assert all(c.get("workspace_id") == WS for c in ai.calls)
 
     old = await _stored(server, "i-old")
     assert (old["ai_category"], old["ai_category_set"]) == ("devolucion_reembolso", "retail")
