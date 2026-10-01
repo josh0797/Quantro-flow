@@ -323,13 +323,13 @@ def test_legacy_connect_page_redirects_to_settings_integrations():
     assert "search: location.search" in redirects
 
 
-def test_connect_translations_no_facturapi_in_status_labels():
+def test_translations_have_no_facturapi_connect_strings():
     from pathlib import Path
     root = Path(__file__).resolve().parents[2]
-    # Visible Connect status / provider strings should not push Facturapi branding.
-    # Historical migration docs may still mention it; this asserts UI source.
-    connect = (root / CONNECT_PANEL).read_text()
-    assert "Facturapi" not in connect
+    # The "connect your own Facturapi key" dialog was retired (2026-09-30);
+    # its ES/EN strings must not linger in the UI dictionaries.
+    translations = (root / "frontend/src/i18n/translations.js").read_text()
+    assert "facturapi" not in translations.lower()
 
 
 # ── Google OAuth start context: www.quantroflow.cloud CORS + return ───
@@ -352,7 +352,7 @@ def test_frontend_canonical_www_for_cloud():
     assert normalize("https://www.quantroflow.cloud") == "https://www.quantroflow.cloud"
 
 
-# ── Actions bootstrap registers invoicing not Facturapi creates ───────
+# ── Actions bootstrap registers invoicing, never CFDI creation ────────
 
 def test_bootstrap_registers_quantro_invoicing_not_cfdi_create():
     from actions.registry import clear_registry, list_actions
@@ -363,4 +363,19 @@ def test_bootstrap_registers_quantro_invoicing_not_cfdi_create():
     ids = {a.action_id for a in list_actions()}
     assert "quantro_invoicing.invoice.query" in ids
     assert "quantro_invoicing.invoice.prepare_reply" in ids
-    assert "facturapi.invoice.create" not in ids
+    assert not any(a.provider == "facturapi" or a.action_id.startswith("facturapi.") for a in list_actions())
+
+
+def test_flow_holds_no_customer_facturapi_integration():
+    """Quantro OS is the only fiscal system (2026-09-30): Flow keeps no
+    Facturapi adapter, handlers, routes or vault provider."""
+    import importlib.util
+    from pathlib import Path
+
+    import provider_secrets_store
+
+    assert importlib.util.find_spec("integrations.providers.facturapi") is None
+    assert importlib.util.find_spec("actions.handlers.facturapi") is None
+    assert "facturapi" not in provider_secrets_store.VALID_PROVIDERS
+    server_src = (Path(__file__).resolve().parents[1] / "server.py").read_text()
+    assert "facturapi" not in server_src.lower()

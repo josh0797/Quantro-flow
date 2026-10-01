@@ -12,8 +12,7 @@ Backend runs at least:
 - `test_phase1_identity_sot.py`
 - `test_phase2_oauth_secrets.py`
 - `test_phase3_actions_postgres.py`
-- `test_phase4_facturapi_connect.py`
 - `test_phase6_inbox_items.py`
-- `backend/tests/` (product domains, calendar canonical, adapters, CORS helpers, Facturapi, etc.)
+- `backend/tests/` (product domains, calendar canonical, adapters, CORS helpers, Quantro OS invoicing, etc.)
 
 Do not hide build errors with blanket `CI=false` on install.

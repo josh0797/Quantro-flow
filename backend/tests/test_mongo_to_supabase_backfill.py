@@ -96,6 +96,7 @@ def mongo_fixture() -> Dict[str, List[Dict[str, Any]]]:
         "google_integrations": [{"_id": oid(20), "workspace_id": "ws_a", "access_token": TOKEN, "refresh_token": TOKEN,
                                  "account_email": "boss@co.com", "scopes": ["a"], "connected": True,
                                  "last_calendar_sync_metrics": {"inserted": 1}}],
+        # Retired 2026-09-30 (customer-owned Facturapi): reported, never copied.
         "facturapi_webhook_events": [{"_id": oid(21), "event_id": "evt_1", "workspace_id": "ws_a", "connection_id": "c",
                                       "event_type": "invoice.status_updated", "signature_valid": True,
                                       "received_at": T0, "payload_summary": {"id": "inv_1"}}],
@@ -136,6 +137,8 @@ async def test_dry_run_writes_nothing(env):
     assert by(report, "integrations_config")["notes"]["mongo_duplicates"] == 1
     assert "mystery_collection" in report["unknown_collections"]
     assert "google_oauth_state" in report["not_migrated"]
+    assert "facturapi_webhook_events" in report["not_migrated"]
+    assert "facturapi_webhook_events" not in report["unknown_collections"]
     assert not [m for m, path in fake.calls if m != "GET"]
 
 
@@ -197,7 +200,9 @@ async def test_what_lands_in_supabase(env):
     # Provider connection: ciphertext columns + non-secret extras in meta.
     (pc,) = fake.rows["provider_connections"]
     assert pc["access_token_enc"] == TOKEN and pc["meta"]["last_calendar_sync_metrics"] == {"inserted": 1}
-    assert fake.rows["webhook_events"][0]["event_id"] == "evt_1"
+    # Retired Facturapi webhook receipts are not copied anywhere.
+    assert not fake.rows["webhook_events"]
+    assert "facturapi_webhook_events" not in [d["dataset"] for d in report["datasets"]]
 
 
 @pytest.mark.asyncio

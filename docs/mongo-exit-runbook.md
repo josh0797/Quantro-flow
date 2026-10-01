@@ -255,8 +255,7 @@ they changed. The script therefore refuses `--apply` with exit 2 for any
 dataset of such a domain. Never pass `--allow-stale-mongo` during the cutover.
 
 Before applying, compare the `insert:` ids of `google_integrations`,
-`microsoft_integrations`, `facturapi_connections`, `workspace_members` and
-`workspace_invites` with any `STORE_DRIFT` lines in `fly logs`: an insert that
+`microsoft_integrations`, `workspace_members` and `workspace_invites` with any `STORE_DRIFT` lines in `fly logs`: an insert that
 matches a failed mirror delete is a row a user removed — do not let it back
 (delete it again right after the apply, or narrow the run with `--only`).
 
@@ -508,9 +507,9 @@ once), disconnect/reconnect on a test workspace; System health card.
 | contacts, content_items, content_templates | same names | (ws, app id); a content item generated from a template whose own `workspace_id` is missing/`default`/`__unattributed__` takes its template's workspace (template gone: `__unattributed__` if it had none, else it stays) | contacts/content |
 | activity_events | same name | (ws, event_id), else event_id alone (a row `fix_activity_workspace` moved to another workspace is never inserted again under the Mongo copy's workspace) | activity |
 | action_executions / automation_policies / action_policies | same names | execution_id / policy_id / (ws, action_id) | actions |
-| google_integrations, microsoft_integrations, facturapi_connections | `provider_connections` | (ws, provider) | secrets (token-less rows repaired) |
-| facturapi_webhook_events | `webhook_events` | (provider, event_id) | insert only |
+| google_integrations, microsoft_integrations | `provider_connections` | (ws, provider) | secrets (token-less rows repaired) |
 | google/microsoft_oauth_state, sync_locks, user_sessions | — | not copied (short-lived / unused) | — |
+| facturapi_connections, facturapi_webhook_events | — | not copied (customer-owned Facturapi retired 2026-09-30) | — |
 
 Report columns: `mongo insert update same skip error sb_only`; per-dataset
 lines list up to 20 ids for `insert:`, `skipped:`, `errors:` and

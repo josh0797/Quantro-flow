@@ -44,39 +44,39 @@ async def test_simulation_mode_always_wins_even_for_low_risk(fake_collection):
 
 async def test_high_risk_requires_approval_by_default(fake_collection):
     gate = make_gate(fake_collection)
-    decision = await gate.evaluate("ws1", make_action(RiskLevel.HIGH, "facturapi.invoice.create"), actor_role="leader")
+    decision = await gate.evaluate("ws1", make_action(RiskLevel.HIGH, "test.high_risk.run"), actor_role="leader")
     assert decision.outcome == "pending_approval"
 
 
 async def test_high_risk_with_explicit_override_auto_executes(fake_collection):
     await fake_collection.insert_one({
-        "workspace_id": "ws1", "action_id": "facturapi.invoice.create", "auto_approve": True,
+        "workspace_id": "ws1", "action_id": "test.high_risk.run", "auto_approve": True,
     })
     gate = make_gate(fake_collection)
-    decision = await gate.evaluate("ws1", make_action(RiskLevel.HIGH, "facturapi.invoice.create"), actor_role="leader")
+    decision = await gate.evaluate("ws1", make_action(RiskLevel.HIGH, "test.high_risk.run"), actor_role="leader")
     assert decision.outcome == "execute"
 
 
 async def test_high_risk_override_does_not_leak_to_other_workspaces(fake_collection):
     await fake_collection.insert_one({
-        "workspace_id": "ws1", "action_id": "facturapi.invoice.create", "auto_approve": True,
+        "workspace_id": "ws1", "action_id": "test.high_risk.run", "auto_approve": True,
     })
     gate = make_gate(fake_collection)
-    decision = await gate.evaluate("ws2", make_action(RiskLevel.HIGH, "facturapi.invoice.create"), actor_role="leader")
+    decision = await gate.evaluate("ws2", make_action(RiskLevel.HIGH, "test.high_risk.run"), actor_role="leader")
     assert decision.outcome == "pending_approval"
 
 
 async def test_daily_limit_falls_back_to_approval_once_reached(fake_collection):
     await fake_collection.insert_one({
-        "workspace_id": "ws1", "action_id": "facturapi.invoice.create", "auto_approve": True, "daily_limit": 1,
+        "workspace_id": "ws1", "action_id": "test.high_risk.run", "auto_approve": True, "daily_limit": 1,
     })
     from datetime import datetime, timezone
     await fake_collection.insert_one({
-        "workspace_id": "ws1", "action_id": "facturapi.invoice.create", "status": "succeeded",
+        "workspace_id": "ws1", "action_id": "test.high_risk.run", "status": "succeeded",
         "started_at": datetime.now(timezone.utc),
     })
     gate = make_gate(fake_collection)
-    decision = await gate.evaluate("ws1", make_action(RiskLevel.HIGH, "facturapi.invoice.create"), actor_role="leader")
+    decision = await gate.evaluate("ws1", make_action(RiskLevel.HIGH, "test.high_risk.run"), actor_role="leader")
     assert decision.outcome == "pending_approval"
     assert "Daily limit" in decision.reason
 

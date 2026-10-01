@@ -107,7 +107,7 @@ async def test_execution_insert_dual_writes_to_supabase(fake_mongo):
         doc = {
             "execution_id": "e1",
             "workspace_id": "ws1",
-            "action_id": "facturapi.invoice.create",
+            "action_id": "google.gmail.send",
             "status": "running",
             "idempotency_key": "k1",
             "input": {"x": 1},
@@ -161,7 +161,7 @@ async def test_policy_read_primary_supabase(fake_mongo):
             "workspace_id": "ws1",
             "enabled": True,
             "scope": "action",
-            "action_id": "facturapi.invoice.create",
+            "action_id": "google.gmail.send",
             "mode": "auto_run",
             "extra": {},
         }])
@@ -171,7 +171,7 @@ async def test_policy_read_primary_supabase(fake_mongo):
             "workspace_id": "ws1",
             "enabled": True,
             "scope": "action",
-            "action_id": "facturapi.invoice.create",
+            "action_id": "google.gmail.send",
         })
     assert doc["mode"] == "auto_run"
     assert doc["policy_id"] == "p1"
@@ -202,7 +202,7 @@ async def test_concurrent_idempotency_via_store_mongo_primary(fake_mongo):
         return ActionResult(status="succeeded", result_metadata={"n": len(calls)})
 
     registry.register_action(ActionDefinition(
-        action_id="facturapi.invoice.create", provider="facturapi", name="T",
+        action_id="test.high_risk.run", provider="test", name="T",
         description="", input_schema={"value": {"type": "string", "required": True}},
         risk_level=RiskLevel.HIGH, handler=handler, idempotent=True, minimum_role="leader",
     ))
@@ -228,7 +228,7 @@ async def test_concurrent_idempotency_via_store_mongo_primary(fake_mongo):
     with patch.object(store, "_sb_request", side_effect=fake_request):
         async def one():
             return await executor.execute(
-                workspace_id="ws1", action_id="facturapi.invoice.create",
+                workspace_id="ws1", action_id="test.high_risk.run",
                 input={"value": "inv"}, idempotency_key="same-key",
                 skip_policy_gate=True, actor_role="leader",
             )
@@ -260,7 +260,7 @@ async def test_approve_same_id_via_store(fake_mongo):
         return ActionResult(status="succeeded")
 
     registry.register_action(ActionDefinition(
-        action_id="facturapi.invoice.create", provider="facturapi", name="T",
+        action_id="test.high_risk.run", provider="test", name="T",
         description="", input_schema={"value": {"type": "string", "required": True}},
         risk_level=RiskLevel.HIGH, handler=handler, idempotent=True, minimum_role="leader",
     ))
@@ -281,7 +281,7 @@ async def test_approve_same_id_via_store(fake_mongo):
 
     with patch.object(store, "_sb_request", side_effect=fake_request):
         pending = await executor.execute(
-            workspace_id="ws1", action_id="facturapi.invoice.create",
+            workspace_id="ws1", action_id="test.high_risk.run",
             input={"value": "x"}, actor_role="leader",
         )
         assert pending["status"] == "pending_approval"

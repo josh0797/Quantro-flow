@@ -16,7 +16,7 @@
 | Sync locks | `sync_locks` | `flow_sync_locks` | docs |
 | Provider OAuth secrets | `google_integrations`, `microsoft_integrations` | `provider_connections` | `QUANTRO_SECRETS_PRIMARY` |
 | OAuth CSRF state | `google_oauth_state`, `microsoft_oauth_state` | `oauth_states` | secrets |
-| Facturapi Connect | `facturapi_connections`, `facturapi_webhook_events` | `provider_connections`, `webhook_events` | secrets |
+| Facturapi Connect (retired 2026-09-30, no longer copied) | `facturapi_connections`, `facturapi_webhook_events` | `provider_connections`, `webhook_events` | secrets |
 | Integrations catalog | `integrations_config` | `integrations_config` (+ `secrets_enc` ciphertext) | `QUANTRO_INTEGRATIONS_CONFIG_PRIMARY` |
 | Actions | `action_executions`, `automation_policies`, `action_policies` | same names | `QUANTRO_ACTIONS_PRIMARY` |
 | Inbox | `inbox_items` | `inbox_items` | `QUANTRO_INBOX_PRIMARY` |

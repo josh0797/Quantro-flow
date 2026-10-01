@@ -234,7 +234,6 @@ export const getConnectProvider = (provider) => api.get(`/connect/providers/${pr
 export const testConnection = (provider) => api.post(`/connect/providers/${provider}/test`).then(r => r.data);
 export const syncConnection = (provider) => api.post(`/connect/providers/${provider}/sync`).then(r => r.data);
 export const disconnectProvider = (provider) => api.delete(`/connect/providers/${provider}`).then(r => r.data);
-// Facturapi connect removed — fiscal SoT is Quantro OS (Connect → Facturación).
 export const requestGooglePermission = (action_id, return_to) =>
   api.get('/connect/providers/google/request-permission', { params: { action_id, return_to } }).then(r => r.data);
 export const requestMicrosoftPermission = (action_id, return_to) =>

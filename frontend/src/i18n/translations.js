@@ -952,14 +952,6 @@ export const translations = {
         reconnect: 'Reconectar',
         leader_only: 'Solo un líder o el propietario del espacio puede conectar, sincronizar o desconectar integraciones.',
       },
-      facturapi_modal: {
-        title: 'Conectar Facturapi',
-        description: 'Ingresa tu Secret Key de Facturapi (Test o Live). Nunca se muestra de nuevo después de guardarla.',
-        secret_key_label: 'Secret Key',
-        secret_key_placeholder: 'sk_test_... o sk_live_...',
-        connect_button: 'Conectar',
-        connecting: 'Conectando…',
-      },
       toasts: {
         connected: '{{provider}} conectado',
         disconnected: '{{provider}} desconectado',
@@ -2363,14 +2355,6 @@ export const translations = {
         permission_required: 'Permission required',
         reconnect: 'Reconnect',
         leader_only: 'Only a workspace leader or owner can connect, sync or disconnect integrations.',
-      },
-      facturapi_modal: {
-        title: 'Connect Facturapi',
-        description: 'Enter your Facturapi Secret Key (Test or Live). It is never shown again after saving.',
-        secret_key_label: 'Secret Key',
-        secret_key_placeholder: 'sk_test_... or sk_live_...',
-        connect_button: 'Connect',
-        connecting: 'Connecting…',
       },
       toasts: {
         connected: '{{provider}} connected',

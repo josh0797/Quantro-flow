@@ -2,10 +2,10 @@
 Quantro Connect — provider adapter contract.
 
 A ProviderAdapter describes ONE external system (Google, Microsoft,
-Facturapi, the internal Quantro provider, and — in the future — any
-other system) in a shape the rest of the platform (Connect UI, Actions
-registry, System Health) can reason about without knowing anything
-provider-specific.
+Quantro OS invoicing, the internal Quantro provider, and — in the
+future — any other system) in a shape the rest of the platform
+(Connect UI, Actions registry, System Health) can reason about without
+knowing anything provider-specific.
 
 Design rules (do not violate these when adding a provider):
   * No UI logic here. No HTML/JSX/copy strings beyond short machine
@@ -17,8 +17,8 @@ Design rules (do not violate these when adding a provider):
     with server.py.
   * Adapters never raise raw provider exceptions up to the caller —
     they catch and translate into the ProviderError vocabulary
-    (see errors.py) so the UI never has to parse Facturapi/Google/
-    Microsoft-specific error shapes.
+    (see errors.py) so the UI never has to parse Google/Microsoft/
+    Quantro OS-specific error shapes.
 """
 from __future__ import annotations
 

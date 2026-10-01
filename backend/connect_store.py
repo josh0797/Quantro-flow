@@ -1,15 +1,16 @@
-"""Phase 4 — Facturapi Connect + webhook inbox + integrations_config dual-write.
+"""Phase 4 — integrations_config dual-write (Connect UI catalog).
 
 Reuses Phase 2 vault flags / HTTP helpers from ``provider_secrets_store``
-for Facturapi secrets (``provider_connections``). Adds thin dual-write for:
+for the ``integrations_config`` table (Connect UI catalog — non-secret).
 
-* ``webhook_events`` (append-only receipts)
-* ``integrations_config`` (Connect UI catalog — non-secret)
+The customer-owned Facturapi connection and its ``webhook_events`` inbox
+that also lived here were retired on 2026-09-30: Flow no longer holds any
+fiscal (PAC) credentials. Invoices come from Quantro OS through the
+``quantro_invoicing`` provider (see docs/phase4-facturapi-connect.md).
 
 Flags
 -----
-``QUANTRO_SECRETS_PRIMARY`` / ``QUANTRO_MONGO_MIRROR`` — Facturapi secrets
-and webhook receipts (same as Phase 2 OAuth vault).
+``QUANTRO_MONGO_MIRROR`` — shared with the Phase 2 OAuth vault.
 
 ``QUANTRO_INTEGRATIONS_CONFIG_PRIMARY`` (default ``supabase`` since the
 Mongo exit) — independent flip for the UI catalog. Dual-write whenever
@@ -28,7 +29,6 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -79,215 +79,6 @@ def _iso(value: Any) -> Optional[str]:
 
 def _parse_dt(value: Any) -> Any:
     return secrets_store._parse_dt(value)
-
-
-# ── Facturapi connection (delegates to Phase 2 vault) ─────────────────
-async def get_facturapi_connection(
-    *,
-    workspace_id: Optional[str] = None,
-    connection_id: Optional[str] = None,
-    mongo_col,
-    projection: Optional[Dict[str, int]] = None,
-) -> Optional[Dict[str, Any]]:
-    if connection_id:
-        return await secrets_store.get_connection_by_connection_id(
-            provider="facturapi",
-            connection_id=connection_id,
-            mongo_col=mongo_col,
-            projection=projection,
-        )
-    if not workspace_id:
-        return None
-    return await secrets_store.get_connection(
-        provider="facturapi",
-        workspace_id=workspace_id,
-        mongo_col=mongo_col,
-        projection=projection,
-    )
-
-
-async def upsert_facturapi_connection(
-    *,
-    workspace_id: str,
-    mongo_col,
-    fields: Dict[str, Any],
-) -> None:
-    await secrets_store.upsert_connection(
-        provider="facturapi",
-        workspace_id=workspace_id,
-        mongo_col=mongo_col,
-        fields=fields,
-    )
-
-
-async def patch_facturapi_connection(
-    *,
-    workspace_id: str,
-    mongo_col,
-    fields: Dict[str, Any],
-) -> None:
-    await secrets_store.patch_connection(
-        provider="facturapi",
-        workspace_id=workspace_id,
-        mongo_col=mongo_col,
-        fields=fields,
-    )
-
-
-async def delete_facturapi_connection(
-    *,
-    workspace_id: str,
-    mongo_col,
-) -> None:
-    await secrets_store.delete_connection(
-        provider="facturapi",
-        workspace_id=workspace_id,
-        mongo_col=mongo_col,
-    )
-
-
-# ── webhook_events ────────────────────────────────────────────────────
-async def _sb_get_webhook_by_event_id(
-    provider: str, event_id: str,
-) -> Any:
-    resp = await secrets_store._sb_request(
-        "GET",
-        "/rest/v1/webhook_events",
-        params={
-            "provider": f"eq.{provider}",
-            "event_id": f"eq.{event_id}",
-            "select": "*",
-            "limit": "1",
-        },
-    )
-    if resp is None or resp.status_code != 200:
-        return _UNREAD
-    rows = resp.json() or []
-    return rows[0] if rows else None
-
-
-_UNREAD = object()
-
-
-def _webhook_row_to_mongo(row: Dict[str, Any]) -> Dict[str, Any]:
-    headers_meta = row.get("headers_meta") or {}
-    return {
-        "event_id": row.get("event_id"),
-        "workspace_id": row.get("workspace_id"),
-        "connection_id": row.get("connection_id"),
-        "event_type": row.get("event_type"),
-        "received_at": _parse_dt(row.get("received_at")),
-        "payload_summary": (row.get("payload") or {}).get("summary"),
-        "livemode": headers_meta.get("livemode"),
-        "signature_valid": headers_meta.get("signature_valid"),
-        "status": row.get("status"),
-    }
-
-
-async def find_webhook_event(
-    *,
-    provider: str,
-    event_id: str,
-    mongo_col,
-) -> Optional[Dict[str, Any]]:
-    """Idempotent dedup lookup."""
-    if secrets_store.is_secrets_supabase_primary():
-        row = await _sb_get_webhook_by_event_id(provider, event_id)
-        if row is not _UNREAD and row:
-            return _webhook_row_to_mongo(row)
-        if secrets_store._mongo_fallback_ok(mongo_col):
-            return await mongo_col.find_one({"event_id": event_id})
-        if row is _UNREAD:
-            raise SupabaseStoreError("webhook_events read failed", table="webhook_events")
-        return None
-
-    return await mongo_col.find_one({"event_id": event_id})
-
-
-def webhook_doc_to_row(provider: str, doc: Dict[str, Any]) -> Dict[str, Any]:
-    payload_summary = doc.get("payload_summary") or {}
-    headers_meta = {
-        k: doc.get(k)
-        for k in ("livemode", "signature_valid")
-        if k in doc
-    }
-    return {
-        "workspace_id": doc.get("workspace_id"),
-        "provider": provider,
-        "connection_id": doc.get("connection_id"),
-        "event_id": doc.get("event_id"),
-        "event_type": doc.get("event_type"),
-        "payload": {"summary": mc.to_json(payload_summary)},
-        "headers_meta": headers_meta,
-        "received_at": _iso(doc.get("received_at")) or _iso(datetime.now(timezone.utc)),
-        "status": doc.get("status") or "received",
-    }
-
-
-def _is_duplicate(resp: Any) -> bool:
-    text = (getattr(resp, "text", "") or "").lower()
-    return resp.status_code in (409, 23505) or "duplicate" in text or "23505" in text
-
-
-async def insert_webhook_event(
-    *,
-    provider: str,
-    mongo_col,
-    doc: Dict[str, Any],
-) -> None:
-    """Append one webhook receipt (dual-write). Never logs payload bodies."""
-    if secrets_store.is_secrets_mongo_write_enabled():
-        await mongo_col.insert_one(dict(doc))
-
-    if secrets_store.is_secrets_dual_write_enabled():
-        resp = await secrets_store._sb_request(
-            "POST",
-            "/rest/v1/webhook_events",
-            json=webhook_doc_to_row(provider, doc),
-            prefer="return=minimal",
-        )
-        if resp is not None and resp.status_code >= 400:
-            # Unique violation on (provider, event_id) → treat as duplicate OK.
-            if _is_duplicate(resp):
-                logger.info(
-                    "connect_store webhook_events duplicate event_id (ok)"
-                )
-                return
-            logger.warning(
-                "connect_store insert webhook_events %s: %s",
-                resp.status_code, (resp.text or "")[:200],
-            )
-        if (resp is None or resp.status_code >= 400) and secrets_store.is_secrets_supabase_primary():
-            raise SupabaseStoreError("webhook_events insert failed", table="webhook_events")
-
-
-async def count_unverified_webhooks(
-    *,
-    workspace_id: str,
-    since: datetime,
-    mongo_col,
-) -> int:
-    """Webhook receipts with a failed signature check since ``since``."""
-    if secrets_store.is_secrets_supabase_primary():
-        resp = await secrets_store._sb_request(
-            "GET",
-            "/rest/v1/webhook_events",
-            params={
-                "workspace_id": f"eq.{workspace_id}",
-                "received_at": f"gte.{_iso(since)}",
-                "headers_meta->>signature_valid": "eq.false",
-                "select": "id",
-                "limit": "1000",
-            },
-        )
-        if resp is not None and resp.status_code == 200:
-            return len(resp.json() or [])
-        if not secrets_store._mongo_fallback_ok(mongo_col):
-            raise SupabaseStoreError("webhook_events count failed", table="webhook_events")
-    return await mongo_col.count_documents({
-        "workspace_id": workspace_id, "signature_valid": False,
-        "received_at": {"$gte": since},
-    })
 
 
 # ── integrations_config (UI catalog) ──────────────────────────────────

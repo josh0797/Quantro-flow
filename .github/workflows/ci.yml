@@ -38,13 +38,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt pytest pytest-asyncio httpx
 
-      - name: Phase 1–4 + 6 identity / OAuth / actions / Facturapi / inbox
+      - name: Phase 1–3 + 6 identity / OAuth / actions / inbox
         run: |
           PYTHONPATH=backend pytest \
             test_phase1_identity_sot.py \
             test_phase2_oauth_secrets.py \
             test_phase3_actions_postgres.py \
-            test_phase4_facturapi_connect.py \
             test_phase6_inbox_items.py \
             -q
 

@@ -138,7 +138,6 @@ PATH_VALUES = {
     "invite_id": "inv-1", "member_user_id": "u-test", "target_user_id": "u-other", "step_key": "first_login",
     "event_id": "ev-1", "contact_id": "c-1", "task_id": "t-1", "content_id": "ct-1", "policy_id": "p-1",
     "rule_id": "r-1", "template_id": "tpl-1", "execution_id": "e-1", "action_id": "quantro.review.flag",
-    "connection_id": "conn-1", "webhook_token": "wh-1",
 }
 
 
