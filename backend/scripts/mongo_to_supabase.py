@@ -120,6 +120,8 @@ NOT_MIGRATED = {
     "microsoft_oauth_state": "short-lived OAuth CSRF state (10 min)",
     "sync_locks": "autosync leases; recreated in flow_sync_locks",
     "user_sessions": "frozen/unused since Phase 1 (Supabase JWT auth)",
+    "facturapi_connections": "retired 2026-09-30: Flow no longer stores customer-owned Facturapi keys",
+    "facturapi_webhook_events": "retired 2026-09-30 with the customer-owned Facturapi connection",
 }
 
 # Datasets whose rows grant access. A row that exists only in Supabase is
@@ -127,7 +129,7 @@ NOT_MIGRATED = {
 # (e.g. a removed member whose shadow delete failed) and fails --verify.
 ACCESS_DATASETS = frozenset({
     "workspace_members", "workspace_invites",
-    "google_integrations", "microsoft_integrations", "facturapi_connections",
+    "google_integrations", "microsoft_integrations",
 })
 
 Requester = Callable[..., Awaitable[Any]]
@@ -431,8 +433,7 @@ REQUIRED_SCHEMA: Dict[str, Sequence[str]] = {
     "automation_policies": tuple(sorted(actions_store.POLICY_COLUMNS | {"id"})),
     "action_policies": tuple(sorted(actions_store.ACTION_POLICY_COLUMNS | {"id"})),
     "provider_connections": ("id", "workspace_id", "provider", "access_token_enc", "refresh_token_enc",
-                             "api_key_enc", "meta", "updated_at", "connection_id"),
-    "webhook_events": ("id", "workspace_id", "provider", "event_id", "payload", "headers_meta", "received_at"),
+                             "meta", "updated_at"),
     "oauth_states": ("state", "provider", "code_verifier", "requested_scopes"),
 }
 
@@ -1049,12 +1050,11 @@ def typed_specs() -> List[TypedSpec]:
 _TOKEN_COLS = {
     "google": ("access_token_enc", "refresh_token_enc"),
     "microsoft": ("access_token_enc", "refresh_token_enc"),
-    "facturapi": ("api_key_enc",),
 }
 
 
 async def backfill_provider_connections(sb: Supabase, source: Any, provider: str, mongo_name: str) -> Stats:
-    """google/microsoft/facturapi docs → provider_connections (tokens stay ciphertext).
+    """google/microsoft docs → provider_connections (tokens stay ciphertext).
 
     One document per workspace, so the collection is small; it is still read
     through the batched cursor."""
@@ -1120,58 +1120,11 @@ async def backfill_provider_connections(sb: Supabase, source: Any, provider: str
     return st
 
 
-async def backfill_webhook_events(sb: Supabase, source: Any) -> Stats:
-    st = Stats("facturapi_webhook_events", "webhook_events", "insert_only")
-    current = await sb.index("webhook_events", ("id", "event_id", "workspace_id", "connection_id", "received_at"),
-                             {"provider": "eq.facturapi"})
-    seen_ids = {r.get("event_id") for r in current if r.get("event_id")}
-    seen_composite = {
-        (r.get("workspace_id"), r.get("connection_id"), same_key(r.get("received_at")))
-        for r in current if not r.get("event_id")
-    }
-    del current
-    async for batch in _batches(source, "facturapi_webhook_events"):
-        for raw in batch:
-            st.mongo += 1
-            doc = dict(raw)
-            if not doc.get("workspace_id"):
-                st.skipped(_mongo_id(raw), "missing_workspace_id")
-                continue
-            row = connect_store.webhook_doc_to_row("facturapi", doc)
-            eid = row.get("event_id")
-            if eid and eid in seen_ids:
-                st.same += 1
-                continue
-            comp = (row.get("workspace_id"), row.get("connection_id"), same_key(row.get("received_at")))
-            if not eid and comp in seen_composite:
-                st.same += 1
-                continue
-            err = await sb.insert("webhook_events", row)
-            if err == "conflict":
-                st.same += 1
-                continue
-            if err:
-                st.failed(eid or _mongo_id(raw), err)
-                continue
-            st.inserted(eid or _mongo_id(raw))
-            if eid:
-                seen_ids.add(eid)
-            else:
-                seen_composite.add(comp)
-    return st
-
-
-def same_key(value: Any) -> Any:
-    c = _canon(value)
-    return c.isoformat() if isinstance(c, datetime) else c
-
-
 # ── orchestration ──────────────────────────────────────────────────────
 
 PROVIDER_COLLECTIONS = (
     ("google", "google_integrations"),
     ("microsoft", "microsoft_integrations"),
-    ("facturapi", "facturapi_connections"),
 )
 
 
@@ -1179,7 +1132,6 @@ def dataset_names() -> List[str]:
     names = list(doc_store.DOC_COLLECTIONS)
     names += [s.dataset for s in typed_specs()]
     names += [m for _, m in PROVIDER_COLLECTIONS]
-    names.append("facturapi_webhook_events")
     return names
 
 
@@ -1188,7 +1140,6 @@ def dataset_domains() -> Dict[str, str]:
     out = {c: doc_store.DOMAIN for c in doc_store.DOC_COLLECTIONS}
     out.update({s.dataset: s.domain for s in typed_specs()})
     out.update({m: "secrets" for _, m in PROVIDER_COLLECTIONS})
-    out["facturapi_webhook_events"] = "secrets"
     return out
 
 
@@ -1261,11 +1212,6 @@ async def run(source: Any, requester: Requester, *, apply: bool, only: Optional[
                 lambda m=mongo_name: Stats(m, "provider_connections", _policy("secrets")),
                 backfill_provider_connections(sb, source, provider, mongo_name),
             ))
-    if wanted("facturapi_webhook_events"):
-        report["datasets"].append(await _guarded(
-            lambda: Stats("facturapi_webhook_events", "webhook_events", "insert_only"),
-            backfill_webhook_events(sb, source),
-        ))
     return report
 
 

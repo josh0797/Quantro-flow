@@ -37,6 +37,11 @@ def make_executor(fake_collection, is_simulation=False, deps=None):
     return ActionExecutor(fake_collection, PolicyGate(engine), None, deps=deps or {})
 
 
+# No registered Flow action is high-risk any more (Flow never issues CFDI),
+# so approval/idempotency behaviour is exercised with a synthetic one.
+HIGH_RISK_ACTION = "test.high_risk.run"
+
+
 def register(action_id, risk, handler, minimum_role=None, provider="test"):
     definition = ActionDefinition(
         action_id=action_id, provider=provider, name="T", description="",
@@ -104,7 +109,7 @@ async def test_internal_live_mode_is_simulation_false(fake_collection):
 async def test_external_handlers_respect_dry_run(fake_collection):
     from actions.handlers import google as google_handlers
     from actions.handlers import microsoft as microsoft_handlers
-    from actions.handlers import facturapi as facturapi_handlers
+    from actions.handlers import quantro_invoicing as invoicing_handlers
 
     # dry_run short-circuits before any provider deps are touched
     ctx = ActionContext(workspace_id="ws1", requested_by="u", source="manual", dry_run=True, deps={})
@@ -116,8 +121,10 @@ async def test_external_handlers_respect_dry_run(fake_collection):
     assert m.status == "simulated"
     mc = await microsoft_handlers.calendar_event_create(ctx, {"title": "t", "start_time": "1", "end_time": "2"})
     assert mc.status == "simulated"
-    f = await facturapi_handlers.invoice_create(ctx, {"customer": {}, "items": [], "payment_form": "01", "use": "G03"})
-    assert f.status == "simulated"
+    q = await invoicing_handlers.invoice_query(ctx, {"q": "F-1"})
+    assert q.status == "simulated"
+    r = await invoicing_handlers.invoice_prepare_reply(ctx, {"invoice_id": "x", "to": "a@b.com"})
+    assert r.status == "simulated"
 
 
 # ─── Concurrent idempotency ───────────────────────────────────────────
@@ -130,12 +137,12 @@ async def test_concurrent_idempotency_handler_runs_once(fake_collection, monkeyp
         calls.append(1)
         return ActionResult(status="succeeded", result_metadata={"n": len(calls)})
 
-    register("facturapi.invoice.create", RiskLevel.HIGH, handler, minimum_role="leader", provider="facturapi")
+    register(HIGH_RISK_ACTION, RiskLevel.HIGH, handler, minimum_role="leader")
     executor = make_executor(fake_collection)
 
     async def one():
         return await executor.execute(
-            workspace_id="ws1", action_id="facturapi.invoice.create", input={"value": "inv"},
+            workspace_id="ws1", action_id=HIGH_RISK_ACTION, input={"value": "inv"},
             idempotency_key="same-key", skip_policy_gate=True, actor_role="leader",
         )
 
@@ -174,10 +181,10 @@ async def test_approve_keeps_same_execution_id(fake_collection):
         calls.append(1)
         return ActionResult(status="succeeded")
 
-    register("facturapi.invoice.create", RiskLevel.HIGH, handler, minimum_role="leader", provider="facturapi")
+    register(HIGH_RISK_ACTION, RiskLevel.HIGH, handler, minimum_role="leader")
     executor = make_executor(fake_collection)
     pending = await executor.execute(
-        workspace_id="ws1", action_id="facturapi.invoice.create", input={"value": "x"}, actor_role="leader",
+        workspace_id="ws1", action_id=HIGH_RISK_ACTION, input={"value": "x"}, actor_role="leader",
     )
     assert pending["status"] == "pending_approval"
     approved = await executor.approve("ws1", pending["execution_id"], "leader-1")
@@ -193,10 +200,10 @@ async def test_double_approve_does_not_rerun_handler(fake_collection):
         calls.append(1)
         return ActionResult(status="succeeded")
 
-    register("facturapi.invoice.create", RiskLevel.HIGH, handler, minimum_role="leader", provider="facturapi")
+    register(HIGH_RISK_ACTION, RiskLevel.HIGH, handler, minimum_role="leader")
     executor = make_executor(fake_collection)
     pending = await executor.execute(
-        workspace_id="ws1", action_id="facturapi.invoice.create", input={"value": "x"}, actor_role="leader",
+        workspace_id="ws1", action_id=HIGH_RISK_ACTION, input={"value": "x"}, actor_role="leader",
     )
     await executor.approve("ws1", pending["execution_id"], "u1")
     again = await executor.approve("ws1", pending["execution_id"], "u2")
@@ -212,10 +219,10 @@ async def test_concurrent_approve_handler_once(fake_collection):
         calls.append(1)
         return ActionResult(status="succeeded")
 
-    register("facturapi.invoice.create", RiskLevel.HIGH, handler, minimum_role="leader", provider="facturapi")
+    register(HIGH_RISK_ACTION, RiskLevel.HIGH, handler, minimum_role="leader")
     executor = make_executor(fake_collection)
     pending = await executor.execute(
-        workspace_id="ws1", action_id="facturapi.invoice.create", input={"value": "x"}, actor_role="leader",
+        workspace_id="ws1", action_id=HIGH_RISK_ACTION, input={"value": "x"}, actor_role="leader",
     )
 
     async def appr():
@@ -229,10 +236,10 @@ async def test_cancelled_cannot_be_approved(fake_collection):
     async def handler(ctx, input):
         return ActionResult(status="succeeded")
 
-    register("facturapi.invoice.create", RiskLevel.HIGH, handler, minimum_role="leader", provider="facturapi")
+    register(HIGH_RISK_ACTION, RiskLevel.HIGH, handler, minimum_role="leader")
     executor = make_executor(fake_collection)
     pending = await executor.execute(
-        workspace_id="ws1", action_id="facturapi.invoice.create", input={"value": "x"}, actor_role="leader",
+        workspace_id="ws1", action_id=HIGH_RISK_ACTION, input={"value": "x"}, actor_role="leader",
     )
     await executor.cancel("ws1", pending["execution_id"])
     with pytest.raises(QuantroError):
@@ -247,7 +254,7 @@ async def test_simulation_between_pending_and_approve_forces_simulated(fake_coll
         calls.append(ctx.dry_run)
         return ActionResult(status="simulated" if ctx.dry_run else "succeeded")
 
-    register("facturapi.invoice.create", RiskLevel.HIGH, handler, minimum_role="leader", provider="facturapi")
+    register(HIGH_RISK_ACTION, RiskLevel.HIGH, handler, minimum_role="leader")
 
     async def is_simulation_mode(workspace_id):
         return sim_flag["on"]
@@ -261,7 +268,7 @@ async def test_simulation_between_pending_and_approve_forces_simulated(fake_coll
     executor = ActionExecutor(fake_collection, PolicyGate(engine), None, deps={})
 
     pending = await executor.execute(
-        workspace_id="ws1", action_id="facturapi.invoice.create", input={"value": "x"}, actor_role="leader",
+        workspace_id="ws1", action_id=HIGH_RISK_ACTION, input={"value": "x"}, actor_role="leader",
     )
     assert pending["status"] == "pending_approval"
     sim_flag["on"] = True

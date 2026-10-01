@@ -86,8 +86,7 @@ def supabase_only(monkeypatch: pytest.MonkeyPatch, *, mirror: bool = False) -> F
         ("actions.handlers.google", "provider_secrets_store"),
         ("actions.handlers.microsoft", "provider_secrets_store"),
     ])
-    connect_all = _variants(connect_store, [("server", "connect_store"),
-                                            ("integrations.providers.facturapi", "connect_store")])
+    connect_all = _variants(connect_store, [("server", "connect_store")])
 
     # Modules that snapshot flags/config at import.
     for mod in (inbox_store, pds, actions_store, *pss_all):

@@ -1,9 +1,8 @@
 """Phase 2/4 — Provider secrets dual-write (Mongo ↔ Supabase).
 
-Central persistence for Google/Microsoft OAuth docs, Facturapi Connect
-secrets (Phase 4), and short-lived OAuth CSRF state. Ciphertext only
-(Fernet); this module never encrypts/decrypts and never logs token or
-API-key values.
+Central persistence for Google/Microsoft OAuth docs and short-lived OAuth
+CSRF state. Ciphertext only (Fernet); this module never encrypts/decrypts
+and never logs token or API-key values.
 
 Flags
 -----
@@ -44,7 +43,7 @@ SECRETS_PRIMARY = storage_flags.parse_primary("QUANTRO_SECRETS_PRIMARY")
 # Shared mirror flag. Unset → off.
 MONGO_MIRROR = storage_flags.parse_mirror(None)
 
-VALID_PROVIDERS = frozenset({"google", "microsoft", "facturapi"})
+VALID_PROVIDERS = frozenset({"google", "microsoft"})
 OAUTH_PROVIDERS = frozenset({"google", "microsoft"})  # CSRF state providers
 
 def _is_sb_configured() -> bool:
@@ -193,17 +192,6 @@ def _connection_mongo_to_sb(provider: str, workspace_id: str, fields: Dict[str, 
         elif mongo_key in {"google_user_id", "ms_user_id"}:
             if value is not None:
                 out["provider_user_id"] = value
-        elif mongo_key == "secret_key_encrypted":
-            out["api_key_enc"] = value
-        elif mongo_key == "webhook_token_encrypted":
-            out["webhook_token_enc"] = value
-        elif mongo_key == "webhook_signing_secret_encrypted":
-            out["webhook_secret_enc"] = value
-        elif mongo_key in {
-            "connection_id", "environment", "organization_id", "legal_name",
-            "is_production_ready", "timezone", "webhook_id",
-        }:
-            out[mongo_key] = value
         elif mongo_key == "last_error":
             meta = dict(out.get("meta") or {})
             meta["last_error"] = value
@@ -240,9 +228,6 @@ def _connection_mongo_to_sb(provider: str, workspace_id: str, fields: Dict[str, 
             meta = dict(out.get("meta") or {})
             meta[str(mongo_key)] = mc.to_json(value)
             out["meta"] = meta
-    # Facturapi: derive connected from status when not explicit.
-    if provider == "facturapi" and "connected" not in out and "status" in out:
-        out["connected"] = out.get("status") == "connected"
     return out
 
 
@@ -272,17 +257,6 @@ def _connection_sb_to_mongo(row: Dict[str, Any]) -> Dict[str, Any]:
         "last_sync_error": row.get("last_sync_error"),
         "updated_at": _parse_dt(row.get("updated_at")),
         "provider_user_id": row.get("provider_user_id"),
-        # Phase 4 Facturapi fields
-        "secret_key_encrypted": row.get("api_key_enc"),
-        "connection_id": row.get("connection_id"),
-        "environment": row.get("environment"),
-        "organization_id": row.get("organization_id"),
-        "legal_name": row.get("legal_name"),
-        "is_production_ready": row.get("is_production_ready"),
-        "timezone": row.get("timezone"),
-        "webhook_id": row.get("webhook_id"),
-        "webhook_token_encrypted": row.get("webhook_token_enc"),
-        "webhook_signing_secret_encrypted": row.get("webhook_secret_enc"),
     }
     meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
     if meta.get("last_error") is not None:
@@ -566,44 +540,6 @@ async def list_autosync_workspace_ids(
             out.append(wid)
     return out
 
-
-
-async def _sb_get_connection_by_connection_id(
-    provider: str, connection_id: str,
-) -> Optional[Dict[str, Any]]:
-    row = await _sb_get_connection_row({
-        "provider": f"eq.{provider}",
-        "connection_id": f"eq.{connection_id}",
-    })
-    return None if row is _UNREAD else row
-
-
-async def get_connection_by_connection_id(
-    *,
-    provider: str,
-    connection_id: str,
-    mongo_col,
-    projection: Optional[Dict[str, int]] = None,
-) -> Optional[Dict[str, Any]]:
-    """Lookup by provider connection_id (Facturapi webhook path)."""
-    if provider not in VALID_PROVIDERS:
-        raise ValueError(f"unknown provider: {provider}")
-
-    if is_secrets_supabase_primary():
-        row = await _sb_get_connection_row({
-            "provider": f"eq.{provider}",
-            "connection_id": f"eq.{connection_id}",
-        })
-        if row is not _UNREAD and row:
-            return _apply_projection(_connection_sb_to_mongo(row), projection)
-        if _mongo_fallback_ok(mongo_col):
-            return await mongo_col.find_one({"connection_id": connection_id}, projection)
-        if row is _UNREAD:
-            raise SupabaseStoreError("provider_connections read failed", table="provider_connections")
-        return None
-
-    doc = await mongo_col.find_one({"connection_id": connection_id}, projection)
-    return doc
 
 
 # ── OAuth state ───────────────────────────────────────────────────────

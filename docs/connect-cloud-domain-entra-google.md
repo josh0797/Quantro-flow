@@ -23,6 +23,11 @@ QUANTRO_OS_API_URL=https://<quantro-os-host>
 QUANTRO_OS_SERVICE_TOKEN=<server-only-service-token>
 ```
 
+Facturación (`quantro_invoicing`) also needs the workspace linked to its Quantro OS
+organization — the workspace's `org_id`, or `QUANTRO_DEFAULT_ORG_ID` for the default
+workspace. Until then it shows "No conectado" and never calls Quantro OS (OS requires
+`organization_id`).
+
 ## Why Microsoft shows “Configuración pendiente”
 Root cause is deploy config, not a workspace flag: `MicrosoftAdapter.get_status`
 returns `configuration_missing` when `MS_CLIENT_ID` / `MS_CLIENT_SECRET` /

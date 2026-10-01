@@ -15,7 +15,7 @@ Key resolution order:
   2. GOOGLE_TOKENS_ENCRYPTION_KEY — the key google_oauth.py/
      microsoft_oauth.py already use. Falling back to it means a
      deployment that only ever set up Google OAuth still gets secret
-     encryption for Facturapi/etc. for free, but production should set
+     encryption for generic integrations for free, but production should set
      its own INTEGRATIONS_ENCRYPTION_KEY (a single shared key across
      unrelated secret domains is a compatibility bridge, not the
      target state).

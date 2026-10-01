@@ -47,7 +47,6 @@ from integrations.registry import register_provider, get_provider as get_connect
 from integrations.service import ConnectService
 from integrations.providers.google import GoogleAdapter
 from integrations.providers.microsoft import MicrosoftAdapter
-from integrations.providers.facturapi import FacturapiAdapter
 from integrations.providers.quantro_invoicing import QuantroInvoicingAdapter
 from integrations.providers.quantro_internal import QuantroInternalAdapter
 from actions.executor import ActionExecutor
@@ -126,8 +125,6 @@ _MONGO_DOMAINS = {
     "google_oauth_state": "secrets",
     "microsoft_integrations": "secrets",
     "microsoft_oauth_state": "secrets",
-    "facturapi_connections": "secrets",
-    "facturapi_webhook_events": "secrets",
     "sync_locks": "docs",
     "user_sessions": "docs",
     **{name: "docs" for name in doc_store.DOC_COLLECTIONS},
@@ -180,9 +177,6 @@ google_integrations_col = db["google_integrations"]
 google_oauth_state_col = db["google_oauth_state"]
 microsoft_integrations_col = db["microsoft_integrations"]
 microsoft_oauth_state_col = db["microsoft_oauth_state"]
-# Quantro Connect — Facturapi (CFDI México), via connect_store.
-facturapi_connections_col = db["facturapi_connections"]
-facturapi_webhook_events_col = db["facturapi_webhook_events"]
 # Quantro Actions — Phase 3 (QUANTRO_ACTIONS_PRIMARY).
 action_executions_col = wrap_executions_col(db["action_executions"])
 action_policies_col = wrap_action_policies_col(db["action_policies"])  # legacy auto-approve overrides
@@ -4018,10 +4012,10 @@ async def _quantro_connect_health_checks(workspace_id: str) -> List[Dict[str, An
     """Quantro Connect + Actions checks, additive to the pre-existing
     System Health checks above. Deliberately does NOT feed into
     `overall` (healthy/degraded/repaired) — an unconfigured *optional*
-    provider (e.g. Microsoft OAuth not set up in this deployment, or no
-    Facturapi connection yet) is informational, not a platform failure;
-    per the task spec, a provider with insufficient scope is "limited",
-    not a system failure either."""
+    provider (e.g. Microsoft OAuth not set up in this deployment, or
+    Quantro OS invoicing not configured) is informational, not a
+    platform failure; per the task spec, a provider with insufficient
+    scope is "limited", not a system failure either."""
     checks: List[Dict[str, Any]] = []
 
     providers = list_connect_providers()
@@ -4055,21 +4049,6 @@ async def _quantro_connect_health_checks(workspace_id: str) -> List[Dict[str, An
         "detail": f"Google: {'configured' if goog.is_oauth_configured() else 'not configured'} · Microsoft: {'configured' if msoa.is_oauth_configured() else 'not configured'}",
     })
 
-    facturapi_doc = await connect_store.get_facturapi_connection(
-        workspace_id=workspace_id,
-        mongo_col=facturapi_connections_col,
-        projection={"_id": 0, "status": 1, "last_error": 1, "environment": 1},
-    )
-    checks.append({
-        "id": "facturapi_connectivity", "label": "Facturapi connectivity",
-        "ok": not facturapi_doc or facturapi_doc.get("status") != "error",
-        "detail": (
-            "Not connected for this workspace" if not facturapi_doc
-            else f"Connected ({facturapi_doc.get('environment')})" if facturapi_doc.get("status") != "error"
-            else f"Last check failed: {facturapi_doc.get('last_error') or 'unknown error'}"
-        ),
-    })
-
     limited: List[str] = []
     stale: List[str] = []
     for adapter in providers:
@@ -4100,17 +4079,6 @@ async def _quantro_connect_health_checks(workspace_id: str) -> List[Dict[str, An
         "id": "stale_connections", "label": "No stale connections",
         "ok": len(stale) == 0,
         "detail": "All syncs are recent" if not stale else f"No sync in 7+ days: {', '.join(stale)}",
-    })
-
-    recent_failed_webhooks = await connect_store.count_unverified_webhooks(
-        workspace_id=workspace_id,
-        since=datetime.now(timezone.utc) - timedelta(hours=24),
-        mongo_col=facturapi_webhook_events_col,
-    )
-    checks.append({
-        "id": "webhook_failures", "label": "No recent webhook signature failures",
-        "ok": recent_failed_webhooks == 0,
-        "detail": "No failures in the last 24h" if recent_failed_webhooks == 0 else f"{recent_failed_webhooks} unverified webhook event(s) in the last 24h",
     })
 
     return checks
@@ -7403,10 +7371,6 @@ async def complete_welcome_onboarding(
 # at CALL time, not at function-definition time, so the forward
 # reference here is safe.
 
-def _backend_public_url() -> Optional[str]:
-    return (os.environ.get("BACKEND_PUBLIC_URL") or "").strip() or None
-
-
 google_adapter = GoogleAdapter(
     google_integrations_col, goog, _perform_google_sync_for_workspace, _disconnect_google_workspace,
     secrets_store=secrets_store,
@@ -7415,10 +7379,8 @@ microsoft_adapter = MicrosoftAdapter(
     microsoft_integrations_col, msoa, _perform_microsoft_sync_for_workspace, _disconnect_microsoft_workspace,
     secrets_store=secrets_store,
 )
-# Keep Facturapi adapter for legacy webhook + vault compatibility only —
-# it is NOT registered in Connect (replaced by Quantro OS "Facturación").
-facturapi_adapter = FacturapiAdapter(facturapi_connections_col, facturapi_webhook_events_col, _backend_public_url, log_audit_fn=log_audit)
-quantro_invoicing_adapter = QuantroInvoicingAdapter()
+# Flow workspace → Quantro OS organization (OS requires organization_id).
+quantro_invoicing_adapter = QuantroInvoicingAdapter(org_resolver=workspace_to_org_id)
 quantro_internal_adapter = QuantroInternalAdapter()
 
 register_provider(google_adapter)
@@ -7454,7 +7416,6 @@ action_executor = ActionExecutor(
         "load_microsoft_credentials": _load_microsoft_credentials,
         "goog_module": goog,
         "msoa_module": msoa,
-        "facturapi_adapter": facturapi_adapter,
         "quantro_invoicing_adapter": quantro_invoicing_adapter,
     },
 )
@@ -7520,34 +7481,6 @@ async def connect_disconnect_provider(
     _m: dict = Depends(require_role("leader")),
 ):
     return await connect_service.disconnect(workspace_id, provider)
-
-
-class FacturapiConnectRequest(BaseModel):
-    secret_key: str
-
-
-@app.post("/api/connect/providers/facturapi/connect")
-async def connect_facturapi(
-    req: FacturapiConnectRequest,
-    workspace_id: str = Depends(get_current_workspace_id),
-    _m: dict = Depends(require_role("leader")),
-):
-    """Deprecated — fiscal SoT is Quantro OS (Connect provider: Facturación).
-
-    Kept so older clients get a clear 410 instead of silently writing a
-    Facturapi secret into Flow. Historical migrations / webhook routes
-    remain for data compatibility.
-    """
-    raise HTTPException(
-        status_code=410,
-        detail={
-            "error": "deprecated",
-            "message": (
-                "Facturapi connect was removed from Quantro Flow. "
-                "Use Connect → Facturación (Quantro OS service credentials)."
-            ),
-        },
-    )
 
 
 @app.get("/api/connect/providers/google/request-permission")
@@ -7634,28 +7567,6 @@ async def connect_microsoft_request_permission(
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
     )
     return {"auth_url": auth_url, "state": state}
-
-
-# ─── Facturapi webhook receiver ────────────────────────────────────────
-
-@app.post("/api/webhooks/facturapi/{connection_id}/{webhook_token}")
-async def facturapi_webhook_receiver(connection_id: str, webhook_token: str, request: Request):
-    """No @app-level auth dependency — Facturapi calls this directly.
-    Authenticity comes from the high-entropy webhook_token embedded in
-    the URL path (generated per-connection, see
-    FacturapiAdapter._register_webhook) plus, when available, the
-    Facturapi-Signature header verified against Facturapi's own
-    validate-signature endpoint. Unknown connection / bad token get a
-    plain 404 (don't help an attacker distinguish "wrong token" from
-    "no such endpoint"); everything else — including malformed/
-    duplicate events, which ARE legitimate Facturapi traffic — gets a
-    2xx so Facturapi doesn't retry-storm us."""
-    raw_body = await request.body()
-    signature = request.headers.get("Facturapi-Signature")
-    result = await facturapi_adapter.handle_webhook(connection_id, webhook_token, raw_body, signature)
-    if result.get("reason") in ("unknown_connection", "invalid_token"):
-        raise HTTPException(status_code=404, detail="Not found")
-    return result
 
 
 # ─── Quantro Actions API ────────────────────────────────────────────────
