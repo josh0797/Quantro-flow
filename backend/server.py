@@ -4255,6 +4255,8 @@ async def _reclassify_recent_inbox(
             system_prompt=intent_prompt,
             user_prompt=_inbox_message_text(item),
             language=language,
+            # Without it a workspace with its own OpenAI key is billed to Quantro credits.
+            workspace_id=workspace_id,
         )
         ai_result = await parse_ai_json(ai_response["text"])
         if not isinstance(ai_result, dict):
