@@ -1112,6 +1112,24 @@ export const translations = {
       },
     },
 
+    // Categorías de la bandeja según el giro de la empresa
+    inbox_categories: {
+      filter_label: 'Categoría',
+      filter_all: 'Todas',
+      set_label: 'Categorías para {{industry}}',
+      reclassify: 'Reclasificar',
+      reclassifying: 'Reclasificando…',
+      reclassify_hint: 'Vuelve a categorizar tus últimos 50 correos analizados según el giro de tu empresa.',
+      toast_done: '{{count}} correo(s) reclasificado(s)',
+      toast_up_to_date: 'Tus correos recientes ya están categorizados para tu giro.',
+      toast_failed: 'No se pudo reclasificar',
+      hint_title: 'Categorías según tu giro',
+      hint_body: 'Indica el giro de tu empresa para que Quantro Flow categorice tus correos según tu negocio (por ejemplo, visitas a propiedades o devoluciones de pedidos).',
+      hint_cta: 'Configurar giro',
+      settings_reclassifying: 'Reclasificando tus correos recientes con las categorías de tu nuevo giro.',
+      empty_filtered: 'No hay correos en esta categoría.',
+    },
+
     crm: {
       title: 'CRM',
       subtitle: 'Contactos y relaciones',
@@ -2504,6 +2522,24 @@ export const translations = {
         mark_failed: 'Failed to mark item',
         escalated: 'Item escalated',
       },
+    },
+
+    // Inbox categories by line of business
+    inbox_categories: {
+      filter_label: 'Category',
+      filter_all: 'All',
+      set_label: 'Categories for {{industry}}',
+      reclassify: 'Reclassify',
+      reclassifying: 'Reclassifying…',
+      reclassify_hint: 'Re-categorize your latest 50 analyzed emails for your line of business.',
+      toast_done: '{{count}} email(s) reclassified',
+      toast_up_to_date: 'Your recent emails are already categorized for your line of business.',
+      toast_failed: 'Could not reclassify',
+      hint_title: 'Categories for your line of business',
+      hint_body: 'Set your company\'s line of business so Quantro Flow categorizes your emails for it (for example, property viewings or order returns).',
+      hint_cta: 'Set line of business',
+      settings_reclassifying: 'Reclassifying your recent emails with your new line of business categories.',
+      empty_filtered: 'No emails in this category.',
     },
 
     crm: {

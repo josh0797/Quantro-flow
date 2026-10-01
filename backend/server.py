@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Tuple
 import ai_billing
 from ai_billing import run_ai_request
+import inbox_categories
 import supabase_admin
 import provider_secrets_store as secrets_store
 import connect_store
@@ -640,34 +641,40 @@ async def _workspace_language(workspace_id: str) -> str:
     except Exception:
         return "es"
 
+async def _business_profile_for_prompts(workspace_id: str) -> dict:
+    """The workspace's business profile, or the seeded defaults."""
+    profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
+    return profile if profile else {"industry": "other", "entity_labels": {}}
+
+
 async def build_intent_prompt(business_profile=None, *, workspace_id: str):
-    """Build intent detection prompt with business profile context."""
+    """Build the inbox triage prompt with business profile context.
+
+    Besides the intent, the model assigns one of the workspace's own inbox
+    categories (inbox_categories.py): only the list for this workspace's
+    industry is sent, so a store never sees real-estate categories.
+    """
     if not business_profile:
-        profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
-        business_profile = profile if profile else {"industry": "other", "entity_labels": {}}
-    
+        business_profile = await _business_profile_for_prompts(workspace_id)
+
     industry = business_profile.get("industry", "other")
-    labels = business_profile.get("entity_labels", {})
+    labels = business_profile.get("entity_labels") or {}
     language = business_profile.get("language", "es")
-    
-    industry_context = {
-        "real_estate": "real estate operations",
-        "healthcare": "healthcare and patient management",
-        "consulting": "consulting and client services",
-        "ecommerce": "e-commerce and customer operations",
-        "other": "business operations"
-    }.get(industry, "business operations")
-    
-    entity_name = labels.get("services", "property")
-    
+    category_set = inbox_categories.get_category_set(industry)
+
+    entity_name = labels.get("services") or category_set["asset_hint"]
+
     return f"""You are an AI assistant for Quantro Flow, a Business Operating System.
-The business operates in: {industry_context}.
+The business operates in: {category_set["business_context"]}.
 {_lang_directive(language)}
 
 Analyze incoming messages and detect intent.
+{inbox_categories.build_prompt_block(industry)}
 
 Respond with ONLY valid JSON (no markdown fences):
 {{
+  "category": "<{inbox_categories.category_json_hint(industry)}>",
+  "category_confidence": <float 0.0-1.0>,
   "intent": "<booking|onboarding|follow_up|inquiry|escalation|spam|needs_review>",
   "confidence": <float 0.0-1.0>,
   "summary": "<1-sentence summary>",
@@ -4175,6 +4182,175 @@ async def get_inbox(status: Optional[str] = None, workspace_id: str = Depends(ge
     items = await inbox_col.find(merge_query(query, mode_filter)).sort("received_at", -1).to_list(100)
     return [serialize_doc(item) for item in items]
 
+# ─── Inbox categories (industry-aware) ────────────────────────────────
+# Each workspace's mail is categorized against its own industry's list
+# (inbox_categories.py). These routes are declared before
+# /api/inbox/{inbox_id} so "categories" is never read as an inbox id.
+INBOX_RECLASSIFY_MAX = 50
+_INBOX_RECLASSIFY_CONCURRENCY = 4
+# Background re-categorization after an industry change, one per workspace.
+# Kept referenced here so the tasks are not garbage-collected mid-run.
+_inbox_reclassify_tasks: Dict[str, "asyncio.Task[Any]"] = {}
+_reclassify_logger = logging.getLogger("quantro.inbox.reclassify")
+
+
+class InboxReclassifyRequest(BaseModel):
+    limit: int = Field(INBOX_RECLASSIFY_MAX, ge=1, le=INBOX_RECLASSIFY_MAX)
+    # Also re-run items already categorized for the current industry.
+    force: bool = False
+
+
+def _inbox_message_text(item: dict) -> str:
+    """The user prompt the triage model sees for an (``_inbox_view``) item."""
+    return f"From: {item['from_name']} ({item['from_email']})\nSubject: {item['subject']}\n\n{item['body']}"
+
+
+@app.get("/api/inbox/categories")
+async def get_inbox_categories(workspace_id: str = Depends(get_current_workspace_id)):
+    """This workspace's inbox categories, from its business-profile industry.
+
+    Only the workspace's own list (ES/EN labels) — the UI builds its chips
+    and the category filter from it.
+    """
+    profile = await _business_profile_for_prompts(workspace_id)
+    return inbox_categories.public_payload(profile.get("industry"))
+
+
+async def _reclassify_recent_inbox(
+    workspace_id: str,
+    user: User,
+    *,
+    limit: int = INBOX_RECLASSIFY_MAX,
+    force: bool = False,
+) -> dict:
+    """Re-run categorization for the workspace's most recent analyzed items.
+
+    Same prompt, model and AI-credit path as analyze (one run_ai_request per
+    item, charged to ``user``); nothing extra per email. Only the
+    ``ai_category*`` fields are rewritten: intent, suggested action, status,
+    policy and execution trail stay untouched, so no action is re-run.
+    Items already categorized for the current industry are skipped unless
+    ``force``. The first billing / provider HTTPException (402 / 502 / 503)
+    stops the run and is re-raised, like batch-analyze.
+    """
+    limit = max(1, min(int(limit or INBOX_RECLASSIFY_MAX), INBOX_RECLASSIFY_MAX))
+    profile = await _business_profile_for_prompts(workspace_id)
+    industry = profile.get("industry")
+    set_key = inbox_categories.resolve_category_set(industry)
+    intent_prompt = await build_intent_prompt(profile, workspace_id=workspace_id)
+    language = (profile.get("language") or "es").lower()
+
+    mode_filter = await get_mode_filter(workspace_id)
+    recent = await inbox_col.find(
+        merge_query({"ai_intent": {"$ne": None}}, mode_filter)
+    ).sort("received_at", -1).to_list(limit)
+    targets = [i for i in recent if force or i.get("ai_category_set") != set_key]
+
+    async def recategorize(raw: dict) -> bool:
+        item = _inbox_view(raw)
+        ai_response = await run_ai_request(
+            user_id=user.user_id,
+            email=user.email,
+            access_token=user.access_token,
+            system_prompt=intent_prompt,
+            user_prompt=_inbox_message_text(item),
+            language=language,
+        )
+        ai_result = await parse_ai_json(ai_response["text"])
+        if not isinstance(ai_result, dict):
+            return False  # keep the previous category rather than overwrite it with "otro"
+        await inbox_col.update_one(
+            {"workspace_id": workspace_id, "inbox_id": item["inbox_id"]},
+            {"$set": inbox_categories.category_fields(ai_result, industry)},
+        )
+        return True
+
+    reclassified = failed = 0
+    try:
+        for start in range(0, len(targets), _INBOX_RECLASSIFY_CONCURRENCY):
+            chunk = targets[start:start + _INBOX_RECLASSIFY_CONCURRENCY]
+            outcomes = await asyncio.gather(*(recategorize(i) for i in chunk), return_exceptions=True)
+            blocked: Optional[HTTPException] = None
+            for outcome in outcomes:
+                if isinstance(outcome, HTTPException):
+                    blocked = blocked or outcome
+                elif isinstance(outcome, BaseException) or outcome is False:
+                    failed += 1
+                else:
+                    reclassified += 1
+            if blocked is not None:
+                raise blocked
+    finally:
+        if reclassified:
+            await log_activity(
+                "ai", "Inbox recategorized",
+                f"{reclassified} message(s) recategorized for {inbox_categories.CATEGORY_SETS[set_key]['label_en']}",
+                None, "inbox", workspace_id=workspace_id,
+            )
+
+    return {
+        "success": True,
+        "category_set": set_key,
+        "considered": len(recent),
+        "reclassified": reclassified,
+        "skipped_up_to_date": len(recent) - len(targets),
+        "failed": failed,
+    }
+
+
+def _cancel_queued_reclassify(workspace_id: str) -> None:
+    task = _inbox_reclassify_tasks.pop(workspace_id, None)
+    if task is not None and not task.done():
+        task.cancel()
+
+
+async def _run_queued_reclassify(workspace_id: str, user: User) -> None:
+    try:
+        await _reclassify_recent_inbox(workspace_id, user)
+    except asyncio.CancelledError:
+        raise
+    except HTTPException as exc:
+        # Out of AI credits / provider down: the inbox keeps its previous
+        # categories and the user can press "Reclasificar" later.
+        _reclassify_logger.warning("inbox reclassify stopped (workspace=%s, status=%s)", workspace_id, exc.status_code)
+    except Exception:  # noqa: BLE001
+        _reclassify_logger.exception("inbox reclassify failed (workspace=%s)", workspace_id)
+
+
+async def _queue_inbox_reclassify(workspace_id: str, user: User) -> bool:
+    """Re-categorize recent items in the background after an industry change.
+
+    Returns False (nothing queued) when the current mode has no analyzed
+    item. A job still running for the previous industry is cancelled.
+    """
+    mode_filter = await get_mode_filter(workspace_id)
+    if not await inbox_col.count_documents(merge_query({"ai_intent": {"$ne": None}}, mode_filter)):
+        return False
+    _cancel_queued_reclassify(workspace_id)
+    task = asyncio.create_task(_run_queued_reclassify(workspace_id, user))
+    _inbox_reclassify_tasks[workspace_id] = task
+
+    def _forget(done: "asyncio.Task[Any]") -> None:
+        if _inbox_reclassify_tasks.get(workspace_id) is done:
+            _inbox_reclassify_tasks.pop(workspace_id, None)
+
+    task.add_done_callback(_forget)
+    return True
+
+
+@app.post("/api/inbox/reclassify")
+async def reclassify_inbox(
+    req: Optional[InboxReclassifyRequest] = None,
+    workspace_id: str = Depends(get_current_workspace_id),
+    user: User = Depends(get_current_user),
+):
+    """The inbox "Reclasificar" action: re-categorize recent analyzed items (max 50)."""
+    req = req or InboxReclassifyRequest()
+    # This run redoes whatever a background job (industry change) was doing.
+    _cancel_queued_reclassify(workspace_id)
+    return await _reclassify_recent_inbox(workspace_id, user, limit=req.limit, force=req.force)
+
+
 @app.get("/api/inbox/{inbox_id}")
 async def get_inbox_item(inbox_id: str, workspace_id: str = Depends(get_current_workspace_id)):
     mode_filter = await get_mode_filter(workspace_id)
@@ -4191,10 +4367,11 @@ async def analyze_inbox_item(inbox_id: str, workspace_id: str = Depends(get_curr
     ws_id = item.get("workspace_id") or workspace_id
     
     # Get business profile for context-aware prompts
-    intent_prompt = await build_intent_prompt(workspace_id=workspace_id)
+    profile = await _business_profile_for_prompts(workspace_id)
+    intent_prompt = await build_intent_prompt(profile, workspace_id=workspace_id)
     language = await _workspace_language(workspace_id)
 
-    message_text = f"From: {item['from_name']} ({item['from_email']})\nSubject: {item['subject']}\n\n{item['body']}"
+    message_text = _inbox_message_text(item)
 
     ai_response = await run_ai_request(
         user_id=user.user_id,
@@ -4215,6 +4392,7 @@ async def analyze_inbox_item(inbox_id: str, workspace_id: str = Depends(get_curr
         {"$set": {
             "ai_intent": {"intent": ai_result["intent"], "confidence": ai_result["confidence"], "summary": ai_result["summary"], "entities": ai_result.get("entities", {})},
             "ai_suggested_action": ai_result.get("suggested_action"),
+            **inbox_categories.category_fields(ai_result, profile.get("industry")),
             "status": "processed",
             "read": True,
         }}
@@ -4394,7 +4572,8 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
     results = []
     
     # Get business profile once for all items
-    intent_prompt = await build_intent_prompt(workspace_id=workspace_id)
+    profile = await _business_profile_for_prompts(workspace_id)
+    intent_prompt = await build_intent_prompt(profile, workspace_id=workspace_id)
     language = await _workspace_language(workspace_id)
     
     for inbox_id in req.inbox_ids:
@@ -4410,7 +4589,7 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
         )
         
         try:
-            message_text = f"From: {item['from_name']} ({item['from_email']})\nSubject: {item['subject']}\n\n{item['body']}"
+            message_text = _inbox_message_text(item)
             ai_response = await run_ai_request(
                 user_id=user.user_id,
                 workspace_id=workspace_id,
@@ -4430,6 +4609,7 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
                 {"$set": {
                     "ai_intent": {"intent": ai_result["intent"], "confidence": ai_result["confidence"], "summary": ai_result["summary"], "entities": ai_result.get("entities", {})},
                     "ai_suggested_action": ai_result.get("suggested_action"),
+                    **inbox_categories.category_fields(ai_result, profile.get("industry")),
                     "status": "processed",
                     "read": True,
                 }}
@@ -5355,7 +5535,7 @@ async def get_business_profile(workspace_id: str = Depends(get_current_workspace
     return serialize_doc(profile)
 
 @app.put("/api/business-profile")
-async def update_business_profile(req: BusinessProfileUpdate, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("leader"))):
+async def update_business_profile(req: BusinessProfileUpdate, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("leader")), user: User = Depends(get_current_user)):
     """Update the business profile configuration."""
     # Get current profile to check if we need to generate simulation data
     current_profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
@@ -5403,8 +5583,17 @@ async def update_business_profile(req: BusinessProfileUpdate, workspace_id: str 
             await generate_simulation_data(req.industry, workspace_id)
             await log_activity("system", "Simulation data auto-generated", f"Generated {req.industry} data", "simulation", "system", workspace_id=workspace_id)
 
+    # New line of business → new inbox category list: re-categorize the
+    # recent analyzed items in the background (same AI-credit path as
+    # analyze, capped at INBOX_RECLASSIFY_MAX).
+    reclassify_queued = False
+    if inbox_categories.resolve_category_set(req.industry) != inbox_categories.resolve_category_set(old_industry):
+        reclassify_queued = await _queue_inbox_reclassify(workspace_id, user)
+
     updated = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
-    return serialize_doc(updated)
+    out = serialize_doc(updated) or {}
+    out["inbox_reclassify_queued"] = reclassify_queued
+    return out
 
 # ─── Integrations Config ───────────────────────────────────────────────
 class IntegrationUpdate(BaseModel):
