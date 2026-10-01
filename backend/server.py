@@ -7379,7 +7379,8 @@ microsoft_adapter = MicrosoftAdapter(
     microsoft_integrations_col, msoa, _perform_microsoft_sync_for_workspace, _disconnect_microsoft_workspace,
     secrets_store=secrets_store,
 )
-quantro_invoicing_adapter = QuantroInvoicingAdapter()
+# Flow workspace → Quantro OS organization (OS requires organization_id).
+quantro_invoicing_adapter = QuantroInvoicingAdapter(org_resolver=workspace_to_org_id)
 quantro_internal_adapter = QuantroInternalAdapter()
 
 register_provider(google_adapter)

@@ -105,8 +105,11 @@ def register_all_actions() -> None:
     register_action(ActionDefinition(
         action_id="quantro_invoicing.invoice.prepare_reply", provider="quantro_invoicing",
         name="Prepare invoice email reply",
-        description="Build a Gmail/Outlook reply payload from Quantro OS invoice metadata.",
-        input_schema={"invoice_id": _STR, "q": _STR, "to": _STR, "channel": _STR},
+        description=(
+            "Build a Gmail/Outlook reply payload from Quantro OS invoice metadata — "
+            "only for the invoice's own customer email."
+        ),
+        input_schema={"invoice_id": _STR, "q": _STR, "to": _STR_REQ, "channel": _STR},
         risk_level=RiskLevel.LOW, handler=quantro_invoicing_handlers.invoice_prepare_reply,
         idempotent=True, minimum_role="member",
     ))

@@ -231,21 +231,13 @@ async def test_microsoft_adapter_visible_name_outlook():
 
 # ── Quantro OS invoicing (mocked) + reply payload ─────────────────────
 
-@pytest.mark.asyncio
-async def test_quantro_invoicing_query_and_prepare_reply(monkeypatch):
-    from integrations.providers.quantro_invoicing import QuantroInvoicingAdapter
-    from integrations.base import ConnectionStatus
+ORG_ID = "6f0c1a52-8d3e-4b7a-9c21-5e4f3a2b1c0d"
+INVOICE_ID = "0b6f7f44-2c1d-4e9a-8a55-3d2c1b0a9f8e"
 
-    monkeypatch.setenv("QUANTRO_OS_API_URL", "https://os.example.test")
-    monkeypatch.setenv("QUANTRO_OS_SERVICE_TOKEN", "svc-secret-token")
 
-    adapter = QuantroInvoicingAdapter()
-    st = await adapter.get_status("ws1")
-    assert st.status == ConnectionStatus.CONNECTED
-    assert adapter.name == "Facturación"
-
-    invoices = [{
-        "id": "inv-1",
+def _invoice(**over):
+    inv = {
+        "id": INVOICE_ID,
         "folio": "A-100",
         "status": "valid",
         "total": 1160,
@@ -254,28 +246,174 @@ async def test_quantro_invoicing_query_and_prepare_reply(monkeypatch):
         "customer_email": "billing@acme.test",
         "pdf_url": "https://os.example.test/docs/inv-1.pdf",
         "xml_url": "https://os.example.test/docs/inv-1.xml",
-    }]
+        "date": "2026-09-29",
+    }
+    inv.update(over)
+    return inv
+
+
+def _invoicing_adapter(monkeypatch, *, org_by_workspace=None, invoices=None):
+    """Adapter with OS configured, a fake workspace→org resolver and a
+    recording fake transport (no network)."""
+    from integrations.providers.quantro_invoicing import QuantroInvoicingAdapter
+
+    monkeypatch.setenv("QUANTRO_OS_API_URL", "https://os.example.test")
+    monkeypatch.setenv("QUANTRO_OS_SERVICE_TOKEN", "svc-secret-token")
+    mapping = {"ws1": ORG_ID} if org_by_workspace is None else org_by_workspace
+    resolved: List[str] = []
+
+    async def org_resolver(workspace_id):
+        resolved.append(workspace_id)
+        return mapping.get(workspace_id)
+
+    adapter = QuantroInvoicingAdapter(org_resolver=org_resolver)
+    calls: List[Dict[str, Any]] = []
 
     async def fake_request(method, path, *, params=None, json=None):
-        assert method == "GET"
-        assert path == "/service-invoices"
-        assert params["workspace_id"] == "ws1"
-        return {"invoices": invoices}
+        calls.append({"method": method, "path": path, "params": dict(params or {})})
+        return {"invoices": list(invoices if invoices is not None else [_invoice()])}
 
     monkeypatch.setattr(adapter, "_request", fake_request)
+    return adapter, calls, resolved
+
+
+@pytest.mark.asyncio
+async def test_quantro_invoicing_query_and_prepare_reply(monkeypatch):
+    from integrations.base import ConnectionStatus
+
+    adapter, calls, _ = _invoicing_adapter(monkeypatch)
+    st = await adapter.get_status("ws1")
+    assert st.status == ConnectionStatus.CONNECTED
+    assert adapter.name == "Facturación"
+
     q = await adapter.query_invoices("ws1", q="Acme")
     assert q["invoices"][0]["folio"] == "A-100"
+    assert calls[-1]["method"] == "GET" and calls[-1]["path"] == "/service-invoices"
 
     reply = await adapter.prepare_reply_payload(
-        "ws1", invoice_id="inv-1", channel="gmail", to="billing@acme.test",
+        "ws1", invoice_id=INVOICE_ID, channel="gmail", to="billing@acme.test",
     )
+    assert reply["status"] == "ready"
     assert reply["channel"] == "gmail"
+    assert reply["to"] == "billing@acme.test"
     assert reply["suggested_action_id"] == "google.gmail.send"
     assert "A-100" in reply["subject"]
     assert "inv-1.pdf" in reply["body"]
 
-    reply_ms = await adapter.prepare_reply_payload("ws1", q="Acme", channel="outlook")
+    reply_ms = await adapter.prepare_reply_payload("ws1", q="Acme", channel="outlook", to="billing@acme.test")
     assert reply_ms["suggested_action_id"] == "microsoft.mail.send"
+
+
+@pytest.mark.asyncio
+async def test_quantro_invoicing_sends_organization_id_never_workspace_id(monkeypatch):
+    adapter, calls, resolved = _invoicing_adapter(monkeypatch)
+
+    await adapter.query_invoices("ws1", q="Acme", invoice_id=INVOICE_ID.upper(), limit=3)
+
+    (call,) = calls
+    assert call["params"] == {"organization_id": ORG_ID, "q": "Acme", "invoice_id": INVOICE_ID, "limit": 3}
+    assert "workspace_id" not in call["params"]
+    assert resolved == ["ws1"]
+
+
+@pytest.mark.asyncio
+async def test_quantro_invoicing_rejects_non_uuid_invoice_id_without_calling_os(monkeypatch):
+    from errors import QuantroError
+
+    adapter, calls, _ = _invoicing_adapter(monkeypatch)
+    with pytest.raises(QuantroError) as exc:
+        await adapter.query_invoices("ws1", invoice_id="A-100")
+    assert exc.value.code == "invalid_input"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_quantro_invoicing_unmapped_workspace_refused_without_http_call(monkeypatch):
+    from errors import QuantroError
+    from integrations.base import ConnectionStatus
+
+    # ws2 has no OS organization; a non-UUID org id counts as unlinked too.
+    adapter, calls, _ = _invoicing_adapter(monkeypatch, org_by_workspace={"ws1": ORG_ID, "ws3": "default"})
+
+    for ws in ("ws2", "ws3"):
+        with pytest.raises(QuantroError) as exc:
+            await adapter.query_invoices(ws, q="Acme")
+        assert exc.value.code == "provider_not_connected"
+        assert "not linked to a Quantro organization" in exc.value.message
+        assert exc.value.extra.get("reason") == "organization_not_linked"
+
+        with pytest.raises(QuantroError):
+            await adapter.prepare_reply_payload(ws, q="Acme", to="billing@acme.test")
+
+        st = await adapter.get_status(ws)
+        assert st.status != ConnectionStatus.CONNECTED
+        assert st.status == ConnectionStatus.DISCONNECTED
+        assert "not linked" in (st.error or "")
+
+        test = await adapter.test_connection(ws)
+        assert test["success"] is False and "not linked" in test["message"]
+
+    assert calls == [], "an unlinked workspace must never reach Quantro OS"
+
+
+@pytest.mark.asyncio
+async def test_quantro_invoicing_without_resolver_is_never_connected(monkeypatch):
+    from integrations.base import ConnectionStatus
+    from integrations.providers.quantro_invoicing import QuantroInvoicingAdapter
+
+    monkeypatch.setenv("QUANTRO_OS_API_URL", "https://os.example.test")
+    monkeypatch.setenv("QUANTRO_OS_SERVICE_TOKEN", "svc-secret-token")
+    st = await QuantroInvoicingAdapter().get_status("ws1")
+    assert st.status == ConnectionStatus.DISCONNECTED
+
+
+@pytest.mark.asyncio
+async def test_quantro_invoicing_reply_refused_on_recipient_mismatch(monkeypatch):
+    adapter, calls, _ = _invoicing_adapter(monkeypatch)
+
+    for to in ("someone-else@evil.test", "billing@acme.test.evil", "", None):
+        reply = await adapter.prepare_reply_payload("ws1", q="Acme", to=to)
+        assert reply["status"] == "refused"
+        assert reply["reason"] == "recipient_mismatch"
+        # A refusal carries no invoice data and nothing to send.
+        for leaked in ("body", "subject", "invoice", "suggested_action_id"):
+            assert leaked not in reply
+        assert "billing@acme.test" not in str({k: v for k, v in reply.items() if k != "to"})
+    assert all(c["path"] == "/service-invoices" for c in calls)  # read-only, never a send
+
+
+@pytest.mark.asyncio
+async def test_quantro_invoicing_reply_accepts_matching_recipient_case_insensitive(monkeypatch):
+    # A fuzzy search can return another customer's invoice first; only the
+    # recipient's own invoice is ever used.
+    other = _invoice(id="9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d", folio="B-7",
+                     customer_name="Other SA", customer_email="ap@other.test",
+                     pdf_url="https://os.example.test/docs/other.pdf")
+    adapter, _, _ = _invoicing_adapter(monkeypatch, invoices=[other, _invoice(customer_email="Billing@Acme.TEST")])
+
+    reply = await adapter.prepare_reply_payload("ws1", q="factura", to="  BILLING@acme.test ")
+    assert reply["status"] == "ready"
+    assert reply["to"] == "BILLING@acme.test"
+    assert reply["invoice"]["folio"] == "A-100"
+    assert "other.pdf" not in reply["body"] and "B-7" not in reply["subject"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_reply_action_fails_on_refusal(monkeypatch):
+    from actions.base import ActionContext
+    from actions.handlers import quantro_invoicing as invoicing_handlers
+
+    adapter, _, _ = _invoicing_adapter(monkeypatch)
+    ctx = ActionContext(workspace_id="ws1", requested_by="u", source="manual", dry_run=False,
+                        deps={"quantro_invoicing_adapter": adapter})
+
+    refused = await invoicing_handlers.invoice_prepare_reply(ctx, {"q": "Acme", "to": "x@evil.test"})
+    assert refused.status == "failed"
+    assert refused.error_code == "action_blocked"
+    assert refused.result_metadata["reason"] == "recipient_mismatch"
+
+    ok = await invoicing_handlers.invoice_prepare_reply(ctx, {"q": "Acme", "to": "billing@acme.test"})
+    assert ok.status == "succeeded" and ok.result_metadata["to"] == "billing@acme.test"
 
 
 @pytest.mark.asyncio
