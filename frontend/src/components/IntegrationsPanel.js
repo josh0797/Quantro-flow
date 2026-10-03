@@ -9,8 +9,6 @@ import {
   Check,
   Eye,
   EyeOff,
-  Mail,
-  Calendar,
   Users,
   Sparkles,
   Webhook,
@@ -28,40 +26,56 @@ import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { toast } from 'sonner';
-import { useNavigate } from 'react-router-dom';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../contexts/AuthContext';
 import { authFetch } from '../lib/authFetch';
+import { canManageConnections, currentWorkspaceOf } from '../lib/roles';
+import { OPENAI_DEFAULT_MODEL, OPENAI_MODEL_OPTIONS, resolveOwnKeyModel } from '../lib/billing';
 
 /**
  * Static manifest of supported integrations. This is the source of truth
  * for what users see — even if the backend returns an empty list, the
  * cards will still render so the Settings panel is never blank.
  * Backend `status` / `last_sync_at` / `config` values are merged on top.
+ *
+ * 'openai' is the workspace's OWN OpenAI key ("conectar su propia API"):
+ * once saved, every AI request of the workspace runs on it and OpenAI
+ * bills the customer directly (backend/ai_billing.run_ai_request).
  */
-const INTEGRATION_MANIFEST = [
+export const INTEGRATION_MANIFEST = [
   {
     id: 'openai',
     i18nKey: 'integrations.openai',
     group: 'ai',
-    name: 'OpenAI / LLM Provider',
+    name: 'OpenAI · your own key',
     description: 'Powers AI classification, drafting, and auto-execution across your workflows.',
-    helper: 'This workspace is currently powered by the Emergent Universal Key. Add your own key to override it per workspace.',
+    helper: 'Use your own OpenAI key: this workspace’s AI features will run on your key and OpenAI will bill you directly; no Quantro credits are used.',
     icon: Sparkles,
     gradient: 'from-emerald-500 to-teal-500',
     connectLabelKey: 'integrations.actions.save_and_connect',
+    // Connected only once a key is actually stored (config.has_api_key).
+    requiresSecret: 'api_key',
+    realTest: true,
     fields: [
-      { key: 'api_key', labelKey: 'integrations.openai.api_key', placeholder: 'sk-...', secret: true, required: true },
+      {
+        key: 'api_key',
+        labelKey: 'integrations.openai.api_key',
+        placeholder: 'sk-...',
+        savedPlaceholderKey: 'integrations.openai.api_key_saved_placeholder',
+        secret: true,
+        required: true,
+      },
       {
         key: 'model',
         labelKey: 'integrations.openai.default_model',
         type: 'select',
         required: false,
-        options: [
-          { value: 'gpt-4o', label: 'gpt-4o (recommended)' },
-          { value: 'gpt-4o-mini', label: 'gpt-4o-mini (fast, low cost)' },
-          { value: 'gpt-4-turbo', label: 'gpt-4-turbo' },
-        ],
-        default: 'gpt-4o',
+        options: OPENAI_MODEL_OPTIONS,
+        default: OPENAI_DEFAULT_MODEL,
+        // A legacy saved model (e.g. "gpt-4-turbo", offered by the old card)
+        // runs on the default and would be rejected on save — show and send
+        // the model the backend actually uses.
+        normalize: resolveOwnKeyModel,
       },
     ],
   },
@@ -120,9 +134,12 @@ const INTEGRATION_MANIFEST = [
   },
 ];
 
+// Gmail / Outlook (mail + calendar) are no longer a group here: they are
+// Quantro Connect providers, rendered by <ConnectPanel /> (passed in as
+// `children` from Settings → Integrations) with connect / reconnect /
+// sync / disconnect / permissions in one place.
 const GROUPS = [
   { key: 'ai', i18nKey: 'integrations.groups.ai', icon: Sparkles },
-  { key: 'email', i18nKey: 'integrations.groups.email', icon: Mail },
   { key: 'crm', i18nKey: 'integrations.groups.crm', icon: Users },
   { key: 'automation', i18nKey: 'integrations.groups.automation', icon: Webhook },
 ];
@@ -356,46 +373,71 @@ function CopyableEndpoint({ url, testId }) {
   );
 }
 
-function RealConnectCard({ t }) {
-  const navigate = useNavigate();
+// Initial form value of a manifest field from the (redacted) backend config.
+function fieldValue(f, config) {
+  const raw = config[f.key] ?? f.default ?? '';
+  return f.normalize ? f.normalize(raw) : raw;
+}
+
+function formatTime(iso) {
+  try {
+    return new Date(iso).toLocaleString();
+  } catch {
+    return iso;
+  }
+}
+
+/**
+ * Last "Probar conexión" outcome persisted on the integration row
+ * (last_test_at / last_test_ok / last_test_reason). Only real tests
+ * (OpenAI) record it.
+ */
+function LastTestStatus({ manifest, backendState, t }) {
+  if (!backendState?.last_test_at) {
+    return (
+      <p data-testid={`${manifest.id}-last-test`} data-state="never" className="text-[11px] text-muted-foreground">
+        {t(`${manifest.i18nKey}.never_tested`)}
+      </p>
+    );
+  }
+  const ok = backendState.last_test_ok === true;
+  const time = formatTime(backendState.last_test_at);
+  const reasonKey = backendState.last_test_reason
+    ? `${manifest.i18nKey}.reasons.${backendState.last_test_reason}`
+    : null;
+  const reasonText = reasonKey ? t(reasonKey) : '';
   return (
-    <Card
-      data-testid="email-real-connect-card"
-      className="p-6 bg-[hsl(var(--card))] border-[hsl(var(--border))]"
+    <p
+      data-testid={`${manifest.id}-last-test`}
+      data-state={ok ? 'ok' : 'failed'}
+      className={`flex items-center gap-1.5 text-[11px] ${
+        ok ? 'text-[hsl(var(--success))]' : 'text-[hsl(var(--critical))]'
+      }`}
     >
-      <div className="flex items-start gap-4">
-        <div className="w-11 h-11 shrink-0 rounded-lg bg-gradient-to-br from-red-500 to-orange-500 flex items-center justify-center text-white shadow-sm">
-          <Mail size={20} />
-        </div>
-        <div className="flex-1 min-w-0 space-y-3">
-          <div>
-            <h3 className="text-base font-semibold text-foreground">{t('integrations.real_connect.title')}</h3>
-            <p className="text-xs text-muted-foreground mt-0.5">{t('integrations.real_connect.description')}</p>
-          </div>
-          <Button
-            size="sm"
-            onClick={() => navigate('/welcome/inbox')}
-            data-testid="email-real-connect-button"
-          >
-            <ExternalLink size={14} className="mr-2" />
-            {t('integrations.real_connect.cta')}
-          </Button>
-        </div>
-      </div>
-    </Card>
+      {ok ? <CheckCircle2 size={12} /> : <AlertCircle size={12} />}
+      <span>
+        {ok
+          ? t(`${manifest.i18nKey}.last_test_ok`, { time })
+          : t(`${manifest.i18nKey}.last_test_failed`, { time })}
+        {!ok && reasonText && reasonText !== reasonKey ? ` — ${reasonText}` : ''}
+      </span>
+    </p>
   );
 }
 
-function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTest, testingProvider, t }) {
+function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTest, testingProvider, canManage, t }) {
   const Icon = manifest.icon;
   const status = backendState?.status || 'disconnected';
-  const isConnected = status === 'connected';
   const existingConfig = backendState?.config || {};
+  // A key-based provider (OpenAI) is only "connected" once its secret is
+  // actually stored — a legacy row flagged connected without a key isn't.
+  const secretSaved = manifest.requiresSecret ? !!existingConfig[`has_${manifest.requiresSecret}`] : true;
+  const isConnected = status === 'connected' && secretSaved;
 
   const [formValues, setFormValues] = useState(() => {
     const init = {};
     for (const f of manifest.fields || []) {
-      init[f.key] = existingConfig[f.key] ?? f.default ?? '';
+      init[f.key] = fieldValue(f, existingConfig);
     }
     return init;
   });
@@ -404,7 +446,7 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
   useEffect(() => {
     const next = {};
     for (const f of manifest.fields || []) {
-      next[f.key] = (backendState?.config || {})[f.key] ?? f.default ?? '';
+      next[f.key] = fieldValue(f, backendState?.config || {});
     }
     setFormValues(next);
   }, [backendState, manifest]);
@@ -432,6 +474,7 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
   const localConnectLabel = manifest.connectLabelKey
     ? t(manifest.connectLabelKey)
     : manifest.connectLabel;
+  const showForm = canManage && !manifest.comingSoon && manifest.fields && manifest.fields.length > 0;
 
   return (
     <Card
@@ -451,7 +494,7 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
               <h3 className="text-base font-semibold text-foreground">{localName}</h3>
               <p className="text-xs text-muted-foreground mt-0.5">{localDescription}</p>
             </div>
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex items-center gap-2 shrink-0 flex-wrap">
               {manifest.comingSoon ? (
                 <Badge
                   data-testid={`status-badge-${manifest.id}-coming-soon`}
@@ -460,11 +503,19 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
                   {t('integrations.webhook.coming_soon_badge')}
                 </Badge>
               ) : (
-                <StatusBadge status={status} t={t} />
+                <StatusBadge status={isConnected ? 'connected' : 'disconnected'} t={t} />
               )}
-              {backendState?.last_sync_at && (
+              {manifest.requiresSecret && isConnected && (
+                <span
+                  data-testid={`${manifest.id}-key-saved`}
+                  className="inline-flex items-center gap-1 text-[11px] text-muted-foreground"
+                >
+                  <Lock size={11} /> {t(`${manifest.i18nKey}.key_saved`)}
+                </span>
+              )}
+              {backendState?.last_sync_at && !manifest.realTest && (
                 <span className="text-[11px] text-muted-foreground">
-                  {t('integrations.status.last_sync', { time: new Date(backendState.last_sync_at).toLocaleString() })}
+                  {t('integrations.status.last_sync', { time: formatTime(backendState.last_sync_at) })}
                 </span>
               )}
             </div>
@@ -478,10 +529,31 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
           )}
 
           {localHelper && (
-            <div className="flex gap-2 items-start rounded-md border border-[hsl(var(--primary)/0.2)] bg-[hsl(var(--primary)/0.05)] px-3 py-2">
+            <div
+              data-testid={`${manifest.id}-helper`}
+              className="flex gap-2 items-start rounded-md border border-[hsl(var(--primary)/0.2)] bg-[hsl(var(--primary)/0.05)] px-3 py-2"
+            >
               <AlertCircle size={14} className="text-[hsl(var(--primary))] mt-0.5 shrink-0" />
               <p className="text-xs text-muted-foreground leading-relaxed">{localHelper}</p>
             </div>
+          )}
+
+          {manifest.realTest && isConnected && (
+            <div className="space-y-1" data-testid={`${manifest.id}-active`}>
+              <p className="text-xs text-foreground">
+                {t(`${manifest.i18nKey}.active_notice`, { model: resolveOwnKeyModel(existingConfig.model) })}
+              </p>
+              <LastTestStatus manifest={manifest} backendState={backendState} t={t} />
+            </div>
+          )}
+
+          {!canManage && !manifest.comingSoon && (
+            <p
+              data-testid={`${manifest.id}-leader-only`}
+              className="flex items-center gap-1.5 text-[11px] text-muted-foreground"
+            >
+              <ShieldCheck size={12} /> {t('integrations.leader_only')}
+            </p>
           )}
 
           {endpoint && !manifest.comingSoon && (
@@ -493,14 +565,16 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
             </div>
           )}
 
-          {/* Config form */}
-          {!manifest.comingSoon && manifest.fields && manifest.fields.length > 0 && (
+          {/* Config form (leader+ only: the backend rejects lower roles) */}
+          {showForm && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {manifest.fields.map((f) => {
                 const inputId = `${manifest.id}-${f.key}`;
                 const testId = `${manifest.id}-${f.key}-input`;
                 const value = formValues[f.key] ?? '';
                 const localFieldLabel = f.labelKey ? t(f.labelKey) : f.label;
+                const savedSecret = f.secret && existingConfig[`has_${f.key}`];
+                const placeholder = savedSecret && f.savedPlaceholderKey ? t(f.savedPlaceholderKey) : f.placeholder;
                 const commonLabel = (
                   <Label
                     htmlFor={inputId}
@@ -508,7 +582,7 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
                   >
                     {f.secret && <Lock size={11} className="text-muted-foreground" />}
                     {localFieldLabel}
-                    {f.required && <span className="text-[hsl(var(--critical))]">*</span>}
+                    {f.required && !savedSecret && <span className="text-[hsl(var(--critical))]">*</span>}
                   </Label>
                 );
                 return (
@@ -528,12 +602,12 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
                             className="bg-[hsl(var(--background))]"
                             data-testid={testId}
                           >
-                            <SelectValue placeholder="Select..." />
+                            <SelectValue placeholder={t('integrations.select_placeholder')} />
                           </SelectTrigger>
                           <SelectContent>
                             {f.options.map((opt) => (
                               <SelectItem key={opt.value} value={opt.value}>
-                                {opt.label}
+                                {opt.labelKey ? t(opt.labelKey) : opt.label}
                               </SelectItem>
                             ))}
                           </SelectContent>
@@ -542,7 +616,7 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
                         <SecretInput
                           value={value}
                           onChange={(v) => setValue(f.key, v)}
-                          placeholder={f.placeholder}
+                          placeholder={placeholder}
                           testId={testId}
                         />
                       ) : (
@@ -562,73 +636,102 @@ function IntegrationCard({ manifest, backendState, onConnect, onDisconnect, onTe
             </div>
           )}
 
-          <div className="flex flex-wrap gap-2 pt-1">
-            {manifest.comingSoon ? null : isConnected ? (
-              <>
+          {canManage && (
+            <div className="flex flex-wrap gap-2 pt-1">
+              {manifest.comingSoon ? null : isConnected ? (
+                <>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onTest(manifest.id)}
+                    disabled={testingProvider === manifest.id}
+                    data-testid={`test-${manifest.id}-button`}
+                  >
+                    {testingProvider === manifest.id ? (
+                      <Loader2 className="animate-spin" size={14} />
+                    ) : (
+                      <RefreshCw size={14} />
+                    )}
+                    <span className="ml-2">{t('integrations.actions.test_connection')}</span>
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleSubmit}
+                    data-testid={`update-${manifest.id}-button`}
+                  >
+                    {t('integrations.actions.update_config')}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => onDisconnect(manifest.id)}
+                    className="text-[hsl(var(--critical))] hover:text-[hsl(var(--critical))] hover:bg-[hsl(var(--critical)/0.1)]"
+                    data-testid={`disconnect-${manifest.id}-button`}
+                  >
+                    {t('integrations.actions.disconnect')}
+                  </Button>
+                </>
+              ) : (
                 <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => onTest(manifest.id)}
-                  disabled={testingProvider === manifest.id}
-                  data-testid={`test-${manifest.id}-button`}
-                >
-                  {testingProvider === manifest.id ? (
-                    <Loader2 className="animate-spin" size={14} />
-                  ) : (
-                    <RefreshCw size={14} />
-                  )}
-                  <span className="ml-2">{t('integrations.actions.test_connection')}</span>
-                </Button>
-                <Button
-                  variant="outline"
                   size="sm"
                   onClick={handleSubmit}
-                  data-testid={`update-${manifest.id}-button`}
+                  disabled={!requiredFilled}
+                  data-testid={`connect-${manifest.id}-button`}
                 >
-                  {t('integrations.actions.update_config')}
+                  {manifest.oauth ? (
+                    <ExternalLink size={14} className="mr-2" />
+                  ) : (
+                    <Plug size={14} className="mr-2" />
+                  )}
+                  {localConnectLabel}
                 </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => onDisconnect(manifest.id)}
-                  className="text-[hsl(var(--critical))] hover:text-[hsl(var(--critical))] hover:bg-[hsl(var(--critical)/0.1)]"
-                  data-testid={`disconnect-${manifest.id}-button`}
-                >
-                  {t('integrations.actions.disconnect')}
-                </Button>
-              </>
-            ) : (
-              <Button
-                size="sm"
-                onClick={handleSubmit}
-                disabled={!requiredFilled}
-                data-testid={`connect-${manifest.id}-button`}
-              >
-                {manifest.oauth ? (
-                  <ExternalLink size={14} className="mr-2" />
-                ) : (
-                  <Plug size={14} className="mr-2" />
-                )}
-                {localConnectLabel}
-              </Button>
-            )}
-          </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </Card>
   );
 }
 
-export default function IntegrationsPanel() {
+// FastAPI error detail → user-facing text (the backend sends localized
+// `detail.message` for the own-OpenAI-key validation errors).
+function detailMessage(body) {
+  const detail = body?.detail;
+  if (typeof detail === 'string') return detail;
+  if (detail && typeof detail.message === 'string') return detail.message;
+  return undefined;
+}
+
+async function readJson(res) {
+  try {
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * IntegrationsPanel — Settings → Integrations. Order: system status,
+ * then `children` (the Quantro Connect provider catalog), then the
+ * key-based integrations (AI provider, CRM, webhooks).
+ */
+export default function IntegrationsPanel({ children }) {
   const { t } = useLanguage();
+  const auth = useAuth();
+  // Connect / test / change / disconnect are leader+ on the backend.
+  const canManage = canManageConnections(currentWorkspaceOf(auth)?.role);
   const [integrations, setIntegrations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [testingProvider, setTestingProvider] = useState(null);
   const [systemHealth, setSystemHealth] = useState(null);
 
-  const fetchIntegrations = useCallback(async () => {
+  // `silent` refreshes the cards in place (no full-panel spinner), e.g.
+  // to show a new last-test result.
+  const fetchIntegrations = useCallback(async ({ silent = false } = {}) => {
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
       const res = await authFetch(`${backendUrl}/api/integrations`, { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
@@ -682,6 +785,30 @@ export default function IntegrationsPanel() {
   const getBackendState = (provider) =>
     integrations.find((i) => i.provider === provider) || null;
 
+  const handleTest = async (provider) => {
+    try {
+      setTestingProvider(provider);
+      const res = await authFetch(`${backendUrl}/api/integrations/${provider}/test`, { credentials: 'include',
+        method: 'POST',
+      });
+      const data = (await readJson(res)) || {};
+      const manifest = INTEGRATION_MANIFEST.find((m) => m.id === provider);
+      if (manifest?.realTest) {
+        // Real check: the backend explains the outcome (localized) and
+        // stores it as the card's last-test status.
+        const message = data.message || detailMessage(data);
+        if (data.success) toast.success(t('integrations.toasts.test_ok', { provider }), { description: message });
+        else toast.error(t('integrations.toasts.test_fail_real', { provider }), { description: message });
+        fetchIntegrations({ silent: true });
+      } else if (data.success) toast.success(t('integrations.toasts.test_ok', { provider }));
+      else toast.error(t('integrations.toasts.test_fail', { provider }));
+    } catch {
+      toast.error(t('integrations.toasts.test_fail', { provider }));
+    } finally {
+      setTestingProvider(null);
+    }
+  };
+
   const handleConnect = async (provider, config) => {
     try {
       const res = await authFetch(`${backendUrl}/api/integrations/${provider}`, {
@@ -691,9 +818,16 @@ export default function IntegrationsPanel() {
       });
       if (res.ok) {
         toast.success(t('integrations.toasts.connected', { provider }));
-        fetchIntegrations();
+        await fetchIntegrations();
+        // A saved OpenAI key is verified right away so the card shows
+        // whether it really works (real call, see /test).
+        const manifest = INTEGRATION_MANIFEST.find((m) => m.id === provider);
+        if (manifest?.realTest) await handleTest(provider);
       } else {
-        toast.error(t('integrations.toasts.connect_failed', { provider }));
+        const body = await readJson(res);
+        toast.error(t('integrations.toasts.connect_failed', { provider }), {
+          description: detailMessage(body),
+        });
       }
     } catch {
       toast.error(t('integrations.toasts.load_failed'));
@@ -718,40 +852,22 @@ export default function IntegrationsPanel() {
     }
   };
 
-  const handleTest = async (provider) => {
-    try {
-      setTestingProvider(provider);
-      const res = await authFetch(`${backendUrl}/api/integrations/${provider}/test`, { credentials: 'include',
-        method: 'POST',
-      });
-      const data = await res.json();
-      if (data.success) toast.success(t('integrations.toasts.test_ok', { provider }));
-      else toast.error(t('integrations.toasts.test_fail', { provider }));
-    } catch {
-      toast.error(t('integrations.toasts.test_fail', { provider }));
-    } finally {
-      setTestingProvider(null);
-    }
-  };
-
-  if (loading) {
-    return (
-      <div
-        className="flex items-center justify-center py-16"
-        data-testid="integrations-loading"
-      >
-        <Loader2 className="animate-spin text-muted-foreground" size={32} />
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-6" data-testid="integrations-panel">
       <SystemStatusBanner health={systemHealth} t={t} />
 
-      {GROUPS.map((group) => {
+      {children}
+
+      {loading ? (
+        <div
+          className="flex items-center justify-center py-16"
+          data-testid="integrations-loading"
+        >
+          <Loader2 className="animate-spin text-muted-foreground" size={32} />
+        </div>
+      ) : GROUPS.map((group) => {
         const items = INTEGRATION_MANIFEST.filter((m) => m.group === group.key);
-        if (items.length === 0 && group.key !== 'email') return null;
+        if (items.length === 0) return null;
         const GroupIcon = group.icon;
         return (
           <section
@@ -767,7 +883,6 @@ export default function IntegrationsPanel() {
               <Separator className="flex-1 bg-[hsl(var(--border))]" />
             </div>
             <div className="space-y-3">
-              {group.key === 'email' && <RealConnectCard t={t} />}
               {items.map((m) => (
                 <IntegrationCard
                   key={m.id}
@@ -777,6 +892,7 @@ export default function IntegrationsPanel() {
                   onDisconnect={handleDisconnect}
                   onTest={handleTest}
                   testingProvider={testingProvider}
+                  canManage={canManage}
                   t={t}
                 />
               ))}

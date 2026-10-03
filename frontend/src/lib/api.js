@@ -156,6 +156,9 @@ export const exportAuditLog = (workspace_id, params = {}) =>
       return { blob: r.data, filename };
     });
 
+// Business profile (industry, labels, language) for the current workspace.
+export const getBusinessProfile = () => api.get('/business-profile').then(r => r.data);
+
 // Dashboard
 export const getDashboardMetrics = () => api.get('/dashboard/metrics').then(r => r.data);
 export const getAISuggestions = () => api.get('/dashboard/suggestions').then(r => r.data);
@@ -170,6 +173,10 @@ export const batchAnalyzeInbox = (inbox_ids) => api.post('/inbox/batch-analyze',
 export const batchApproveInbox = (inbox_ids) => api.post('/inbox/batch-approve', { inbox_ids }).then(r => r.data);
 export const updateInboxDetails = (id, data) => api.put(`/inbox/${id}/details`, data).then(r => r.data);
 export const approveWithOverrides = (id, data) => api.post(`/inbox/${id}/approve-with-overrides`, data).then(r => r.data);
+// Industry-aware categories: the workspace's own list (from its business
+// profile industry) and "Reclasificar" (re-categorize recent analyzed items).
+export const getInboxCategories = () => api.get('/inbox/categories').then(r => r.data);
+export const reclassifyInbox = (payload = {}) => api.post('/inbox/reclassify', payload).then(r => r.data);
 
 // Calendar
 export const getCalendarEvents = () => api.get('/calendar').then(r => r.data);
@@ -227,7 +234,6 @@ export const getConnectProvider = (provider) => api.get(`/connect/providers/${pr
 export const testConnection = (provider) => api.post(`/connect/providers/${provider}/test`).then(r => r.data);
 export const syncConnection = (provider) => api.post(`/connect/providers/${provider}/sync`).then(r => r.data);
 export const disconnectProvider = (provider) => api.delete(`/connect/providers/${provider}`).then(r => r.data);
-// Facturapi connect removed — fiscal SoT is Quantro OS (Connect → Facturación).
 export const requestGooglePermission = (action_id, return_to) =>
   api.get('/connect/providers/google/request-permission', { params: { action_id, return_to } }).then(r => r.data);
 export const requestMicrosoftPermission = (action_id, return_to) =>

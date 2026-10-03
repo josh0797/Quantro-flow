@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
 import { supabase } from '../lib/supabaseClient';
+import { notePasswordRecoveryEvent } from '../lib/passwordRecovery';
 
 /**
  * AuthContext — single source of truth for the authenticated user.
@@ -111,7 +112,10 @@ export function AuthProvider({ children }) {
       }
     })();
 
-    const { data: sub } = supabase.auth.onAuthStateChange(async (_event, nextSession) => {
+    const { data: sub } = supabase.auth.onAuthStateChange(async (event, nextSession) => {
+      // A reset-password link signed the user in: /auth/callback must ask
+      // for a new password instead of treating it as a normal sign-in.
+      if (event === 'PASSWORD_RECOVERY') notePasswordRecoveryEvent();
       await hydrateFromSession(nextSession);
       // Notify any fetch() wrappers that the token may have changed.
       window.dispatchEvent(new CustomEvent('auth:token-changed'));

@@ -26,7 +26,9 @@ def test_mongo_to_sb_maps_ids():
         "contact_id": "c1", "workspace_id": "ws", "name": "Ada", "email": "a@b.co",
         "_id": "mongo", "extra": "drop-me",
     })
-    assert c["contact_id"] == "c1" and "extra" not in c and "_id" not in c
+    assert c["contact_id"] == "c1" and "_id" not in c
+    # Fields without a column are kept in the `extra` jsonb, never dropped.
+    assert c["extra"] == {"extra": "drop-me"}
     a = mongo_to_sb(ACTIVITY_CFG, {"event_id": "e1", "workspace_id": "ws", "title": "Hi", "timestamp": None})
     assert a["event_id"] == "e1"
     cal = mongo_to_sb(CALENDAR_CFG, {

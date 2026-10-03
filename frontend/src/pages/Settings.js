@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { Settings as SettingsIcon, Plug, Bot, Building2, Users, Loader2, Zap, ExternalLink } from 'lucide-react';
+import { useNavigate, useParams } from 'react-router-dom';
+import { Settings as SettingsIcon, Plug, Bot, Building2, Users, Loader2 } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -13,15 +13,27 @@ import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 import { INDUSTRIES } from '../config/industryConfig';
 import { toast } from 'sonner';
 import IntegrationsPanel from '../components/IntegrationsPanel';
+import ConnectPanel from '../components/ConnectPanel';
 import LanguageSwitcher from '../components/LanguageSwitcher';
+import LegalSettingsCard from '../components/LegalSettingsCard';
 // SimulationModeToggle removed from Settings (UI cleanup — no longer surfaced)
 import { useLanguage } from '../context/LanguageContext';
+
+// Tabs are addressable as /settings/<tab>; /settings (and any unknown
+// tab) opens Integrations, which is also where provider OAuth callbacks
+// and the legacy /connect URLs land.
+export const SETTINGS_TABS = ['integrations', 'automation', 'profile', 'workspace'];
+export const DEFAULT_SETTINGS_TAB = 'integrations';
 
 export default function Settings() {
   const { profile, updateProfile, refetch } = useBusinessProfile();
   const { t } = useLanguage();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState('integrations');
+  const { tab } = useParams();
+  const activeTab = SETTINGS_TABS.includes(tab) ? tab : DEFAULT_SETTINGS_TAB;
+  const setActiveTab = (next) => {
+    if (next !== activeTab) navigate(`/settings/${next}`, { replace: true });
+  };
 
   // Business Profile state
   const [profileForm, setProfileForm] = useState({
@@ -58,8 +70,10 @@ export default function Settings() {
   const saveBusinessProfile = async () => {
     try {
       setSavingProfile(true);
-      await updateProfile(profileForm);
+      const saved = await updateProfile(profileForm);
       toast.success(t('settings.profile.saved_toast'));
+      // New line of business → the backend re-categorizes recent inbox mail.
+      if (saved?.inbox_reclassify_queued) toast.info(t('inbox_categories.settings_reclassifying'));
       refetch();
     } catch (error) {
       toast.error(t('settings.profile.save_failed_toast'));
@@ -85,7 +99,7 @@ export default function Settings() {
         {/* Tabs */}
         <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
           <TabsList className="grid w-full grid-cols-4 bg-[hsl(var(--muted)/0.3)]">
-            <TabsTrigger value="integrations" className="flex items-center gap-2">
+            <TabsTrigger value="integrations" className="flex items-center gap-2" data-testid="settings-tab-integrations">
               <Plug size={14} />
               <span>{t('settings.tabs.integrations')}</span>
             </TabsTrigger>
@@ -103,19 +117,14 @@ export default function Settings() {
             </TabsTrigger>
           </TabsList>
 
-          {/* Integrations Tab */}
-          <TabsContent value="integrations" className="space-y-4 mt-6">
-            <Card
-              data-testid="connect-upsell-banner"
-              className="p-4 bg-[hsl(var(--primary)/0.06)] border-[hsl(var(--primary)/0.25)] flex items-center justify-between gap-3 flex-wrap"
-            >
-              <p className="text-sm text-foreground">{t('connect.manage_here_note')}</p>
-              <Button size="sm" variant="outline" onClick={() => navigate('/connect')} data-testid="connect-upsell-cta">
-                <ExternalLink size={14} className="mr-2" />
-                {t('connect.go_to_connect')}
-              </Button>
-            </Card>
-            <IntegrationsPanel />
+          {/* Integrations Tab — Quantro Connect providers (Google, Microsoft,
+              Facturación, Quantro Internal) + key-based integrations. This is
+              the single place to connect, reconnect, sync, disconnect and
+              review permissions/actions (the old /connect page redirects here). */}
+          <TabsContent value="integrations" className="space-y-4 mt-6" data-testid="settings-integrations-tab">
+            <IntegrationsPanel>
+              <ConnectPanel />
+            </IntegrationsPanel>
           </TabsContent>
 
           {/* Automation Tab */}
@@ -173,9 +182,13 @@ export default function Settings() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {INDUSTRIES.map(ind => (
-                        <SelectItem key={ind.value} value={ind.value}>{ind.label}</SelectItem>
-                      ))}
+                      {INDUSTRIES.map(ind => {
+                        const key = `onboarding_lite.industries.${ind.value}`;
+                        const label = t(key);
+                        return (
+                          <SelectItem key={ind.value} value={ind.value}>{label === key ? ind.label : label}</SelectItem>
+                        );
+                      })}
                     </SelectContent>
                   </Select>
                   <p className="text-xs text-muted-foreground mt-1">
@@ -337,6 +350,8 @@ export default function Settings() {
                 </div>
               </div>
             </Card>
+
+            <LegalSettingsCard />
           </TabsContent>
         </Tabs>
       </div>

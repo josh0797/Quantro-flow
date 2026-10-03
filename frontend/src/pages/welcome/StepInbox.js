@@ -22,7 +22,7 @@ import { Mail } from 'lucide-react';
  */
 export default function StepInbox() {
   const { t } = useLanguage();
-  const { markStepConnected, markStepSkipped } = useOnboarding();
+  const { state, markStepConnected, markStepSkipped, syncInProgress } = useOnboarding();
   const navigate = useNavigate();
   const [pickerOpen, setPickerOpen] = useState(false);
 
@@ -50,8 +50,13 @@ export default function StepInbox() {
   };
 
   const handleSkip = () => {
-    markStepSkipped('inbox');
-    markStepConnected('inbox', 'demo');
+    // Never downgrade a real connection made earlier in this flow. The
+    // progress is per user and dropped when the flow ends (welcomeSession),
+    // so 'real' here is always this user's own, current OAuth.
+    if (state.inbox_connection_mode !== 'real') {
+      markStepSkipped('inbox');
+      markStepConnected('inbox', 'demo');
+    }
     navigate('/welcome/calendar');
   };
 
@@ -81,6 +86,7 @@ export default function StepInbox() {
         previewDurationMs={7000}
         onConnect={handleConnect}
         onSkip={handleSkip}
+        connectBlocked={syncInProgress}
       >
         <InboxMockup />
       </DemoPreview>

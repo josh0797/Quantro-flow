@@ -28,6 +28,19 @@ let webpackConfig = {
       },
     },
   },
+  // Jest 27 (react-scripts 5) reads neither the webpack alias below nor
+  // package.json "exports" subpaths — map both so tests can import
+  // modules that use `@/components/...`, react-router-dom v7 (requires
+  // 'react-router/dom') and Radix (requires '@radix-ui/primitive/is-development').
+  jest: {
+    configure: {
+      moduleNameMapper: {
+        '^@/(.*)$': '<rootDir>/src/$1',
+        '^react-router/dom$': '<rootDir>/node_modules/react-router/dist/development/dom-export.js',
+        '^@radix-ui/primitive/is-development$': '<rootDir>/node_modules/@radix-ui/primitive/dist/internal/is-development.true.js',
+      },
+    },
+  },
   webpack: {
     alias: {
       '@': path.resolve(__dirname, 'src'),

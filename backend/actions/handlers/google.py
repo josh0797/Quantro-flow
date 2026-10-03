@@ -5,9 +5,16 @@ google_oauth.py's ACTION_SCOPES) — so every handler here checks the
 workspace's stored scopes before calling Google, and returns a
 structured `reauthorization_required` error (never a bare 500) when
 the scope is missing, matching the task spec's error model exactly.
+
+The Google client libraries are synchronous (httplib2), so every call
+runs in a worker thread (asyncio.to_thread) and never blocks the event
+loop that serves every other request.
 """
 from __future__ import annotations
 
+import asyncio
+
+import provider_secrets_store
 from errors import QuantroError
 from ..base import ActionContext, ActionResult
 
@@ -15,7 +22,11 @@ from ..base import ActionContext, ActionResult
 async def _load_creds_or_raise(ctx: ActionContext, action_id: str):
     goog = ctx.dep("goog_module")
     col = ctx.dep("google_integrations_col")
-    doc = await col.find_one({"workspace_id": ctx.workspace_id})
+    # Through provider_secrets_store (Supabase primary) — never a raw
+    # Mongo read, which returned stale/missing docs once secrets moved.
+    doc = await provider_secrets_store.get_connection(
+        provider="google", workspace_id=ctx.workspace_id, mongo_col=col,
+    )
     if not doc:
         raise QuantroError("provider_not_connected", "Google is not connected for this workspace")
 
@@ -44,7 +55,7 @@ async def gmail_send(ctx: ActionContext, input: dict) -> ActionResult:
         return ActionResult(status="simulated", result_metadata={"predicted": {"to": input.get("to"), "subject": input.get("subject")}})
     creds = await _load_creds_or_raise(ctx, "google.gmail.send")
     goog = ctx.dep("goog_module")
-    message_id = goog.send_gmail(creds, input["to"], input["subject"], input.get("body", ""))
+    message_id = await asyncio.to_thread(goog.send_gmail, creds, input["to"], input["subject"], input.get("body", ""))
     return ActionResult(status="succeeded", result_metadata={"message_id": message_id}, provider_request_id=message_id)
 
 
@@ -53,7 +64,8 @@ async def calendar_event_create(ctx: ActionContext, input: dict) -> ActionResult
         return ActionResult(status="simulated", result_metadata={"predicted": {"title": input.get("title"), "start_time": input.get("start_time")}})
     creds = await _load_creds_or_raise(ctx, "google.calendar.event.create")
     goog = ctx.dep("goog_module")
-    event_id = goog.create_calendar_event(
+    event_id = await asyncio.to_thread(
+        goog.create_calendar_event,
         creds,
         title=input["title"],
         start_iso=input["start_time"],

@@ -5,11 +5,17 @@ import time
 import asyncio
 import csv
 import io
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 load_dotenv()
+
+# Sentry (quantro-flow-api) — no-op unless the SENTRY_DSN secret is set.
+# Must run before FastAPI() is created so the integrations can hook in.
+from observability import init_sentry
+init_sentry()
 
 import httpx
 import jwt as pyjwt
@@ -17,13 +23,18 @@ from jwt import PyJWKClient, InvalidTokenError, ExpiredSignatureError
 from fastapi import FastAPI, HTTPException, Query, Request, Response, Depends
 from fastapi.responses import StreamingResponse, RedirectResponse, PlainTextResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Tuple
+import ai_billing
 from ai_billing import run_ai_request
+import inbox_categories
 import supabase_admin
 import provider_secrets_store as secrets_store
 import connect_store
+import doc_store
+import mongo_legacy
+import sb_rest
+import storage_flags
 
 # ─── Quantro Connect + Quantro Actions ─────────────────────────────────
 # New platform-layer modules (see integrations/ and actions/ packages).
@@ -36,7 +47,6 @@ from integrations.registry import register_provider, get_provider as get_connect
 from integrations.service import ConnectService
 from integrations.providers.google import GoogleAdapter
 from integrations.providers.microsoft import MicrosoftAdapter
-from integrations.providers.facturapi import FacturapiAdapter
 from integrations.providers.quantro_invoicing import QuantroInvoicingAdapter
 from integrations.providers.quantro_internal import QuantroInternalAdapter
 from actions.executor import ActionExecutor
@@ -51,7 +61,7 @@ from actions.store import (
     wrap_action_policies_col,
 )
 from inbox_store import wrap_inbox_col
-from sync_lock import acquire_sync_lock_lease
+from sync_lock import acquire_sync_lock_lease, acquire_sync_lock_lease_supabase
 from product_domain_store import (
     wrap_activity_col, wrap_content_items_col, wrap_content_templates_col,
     wrap_contacts_col, wrap_calendar_col, product_domains_health,
@@ -60,11 +70,12 @@ from product_domain_store import (
 )
 
 # ─── Config ────────────────────────────────────────────────────────────
-MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
-DB_NAME = os.environ.get("DB_NAME", "quantro_os")
+# MongoDB is legacy (being retired): mongo_legacy.py owns MONGO_URL/DB_NAME
+# and only connects if a storage flag still routes a domain to Mongo.
 # AI Billing — every AI request flows through ai_billing.run_ai_request.
 # Emergent LLM (EMERGENT_LLM_KEY / emergentintegrations) removed in Phase 0.
-# Quantro uses OPENAI_API_KEY (credits) or the user's own key. See ai_billing.py.
+# Quantro uses OPENAI_API_KEY (credits) or, when the workspace connected its
+# own OpenAI key in Settings → Integrations, that key. See ai_billing.py.
 
 # ─── Supabase Auth (shared project with the Quantro landing) ──────────
 # The frontend signs users in through Supabase Auth; we simply verify the
@@ -93,61 +104,117 @@ def _get_jwks_client() -> Optional[PyJWKClient]:
             _jwks_client = None
     return _jwks_client
 
-# ─── MongoDB ───────────────────────────────────────────────────────────
-client = AsyncIOMotorClient(
-    MONGO_URL,
-    # Fail fast on Fly/Atlas network issues so lifespan can soft-fail
-    # instead of blocking health checks for 30s+ per call.
-    serverSelectionTimeoutMS=int(os.environ.get("MONGO_SERVER_SELECTION_TIMEOUT_MS") or 8000),
-)
-db = client[DB_NAME]
+# ─── Storage (Supabase; legacy MongoDB behind flags) ──────────────────
+# Every collection below is a Motor-shaped facade. Which store serves it is
+# decided per domain by storage_flags.py (QUANTRO_<DOMAIN>_PRIMARY /
+# *_MONGO_MIRROR; unset = Supabase, no mirror). The Mongo side is a lazy
+# proxy (mongo_legacy.py): no connection is opened unless a flag still
+# routes a domain to Mongo, so startup does not require Mongo.
+_MONGO_DOMAINS = {
+    "inbox_items": "inbox",
+    "calendar_events": "calendar",
+    "contacts": "contacts",
+    "activity_events": "activity",
+    "content_items": "content",
+    "content_templates": "content",
+    "automation_policies": "actions",
+    "action_executions": "actions",
+    "action_policies": "actions",
+    "integrations_config": "integrations",
+    "google_integrations": "secrets",
+    "google_oauth_state": "secrets",
+    "microsoft_integrations": "secrets",
+    "microsoft_oauth_state": "secrets",
+    "sync_locks": "docs",
+    "user_sessions": "docs",
+    **{name: "docs" for name in doc_store.DOC_COLLECTIONS},
+}
+db = mongo_legacy.LazyDatabase(_MONGO_DOMAINS)
+
+
+def _doc_col(name: str) -> doc_store.FlowDocCollection:
+    """Collection that only ever lived in Mongo → Supabase flow_documents."""
+    return doc_store.wrap(name, db[name])
+
 
 # Collections
-# Phase 6.1: inbox_items dual-write / optional Supabase SoT
-# (QUANTRO_INBOX_PRIMARY, default mongo). See docs/phase6-inbox-items.md.
+# Phase 6.1: inbox_items (QUANTRO_INBOX_PRIMARY). See docs/phase6-inbox-items.md.
 inbox_col = wrap_inbox_col(db["inbox_items"])
 calendar_col = wrap_calendar_col(db["calendar_events"])
 contacts_col = wrap_contacts_col(db["contacts"])
-agents_col = db["agents"]
-onboarding_col = db["onboarding_tasks"]
+agents_col = _doc_col("agents")
+onboarding_col = _doc_col("onboarding_tasks")
 content_col = wrap_content_items_col(db["content_items"])
 activity_col = wrap_activity_col(db["activity_events"])
-# Phase 3: automation_policies dual-write / optional Supabase SoT
-# (QUANTRO_ACTIONS_PRIMARY). escalation_rules remain Mongo-only this phase.
+# Phase 3: automation_policies (QUANTRO_ACTIONS_PRIMARY).
 policies_col = wrap_automation_policies_col(db["automation_policies"])
-escalation_col = db["escalation_rules"]
+escalation_col = _doc_col("escalation_rules")
 templates_col = wrap_content_templates_col(db["content_templates"])
-business_profile_col = db["business_profile"]
-integrations_config_col = db["integrations_config"]
-system_health_col = db["system_health_events"]
+business_profile_col = _doc_col("business_profile")
+# Phase 4: integrations catalog (QUANTRO_INTEGRATIONS_CONFIG_PRIMARY).
+integrations_config_col = connect_store.IntegrationsConfigCollection(db["integrations_config"])
+# The workspace-own OpenAI key lookup reads the same facade as /api/integrations.
+ai_billing.register_integrations_store(integrations_config_col)
+system_health_col = _doc_col("system_health_events")
 # Phase 7a — Auth + multi-tenant
-users_col = db["users"]
+users_col = _doc_col("users")
 # Phase 1: user_sessions is FROZEN / unused. Auth is Supabase JWT only;
-# do not read or write this collection. Kept bound so legacy ad-hoc
-# scripts do not explode if they import server collections by name.
+# do not read or write this collection. Kept bound (lazy — never connects)
+# so legacy ad-hoc scripts do not explode if they import it by name.
 user_sessions_col = db["user_sessions"]  # frozen — see docs/phase1-identity-sot.md
-workspaces_col = db["workspaces"]
+workspaces_col = _doc_col("workspaces")
 # Identity SoT is Supabase org_members / invitations / org_audit_logs
-# when QUANTRO_DB_PRIMARY=supabase (Phase 1). Mongo cols below are an
-# optional mirror (QUANTRO_MONGO_MIRROR) or the rollback read path.
-workspace_members_col = db["workspace_members"]
-workspace_invites_col = db["workspace_invites"]
-audit_log_col = db["audit_log"]
-# Phase 7e / Phase 2 — Google OAuth (Gmail + Calendar)
-# Mongo cols remain the default read primary until QUANTRO_SECRETS_PRIMARY=supabase.
-# Dual-write via provider_secrets_store (see docs/phase2-oauth-secrets.md).
+# when QUANTRO_DB_PRIMARY=supabase (Phase 1). These are Flow's own docs:
+# the membership cache _active_workspace_id reads, plus the only store for
+# workspaces that have no org_id yet. Always written (_local_identity_writes).
+workspace_members_col = _doc_col("workspace_members")
+workspace_invites_col = _doc_col("workspace_invites")
+audit_log_col = _doc_col("audit_log")
+people_onboarding_col = _doc_col("people_onboarding_steps")
+# Phase 2 — Google / Microsoft OAuth docs + CSRF state. Only ever passed as
+# ``mongo_col=`` to provider_secrets_store (QUANTRO_SECRETS_PRIMARY).
 google_integrations_col = db["google_integrations"]
 google_oauth_state_col = db["google_oauth_state"]
-# Phase 7e.2 / Phase 2 — Microsoft Outlook OAuth (Mail + Calendar)
 microsoft_integrations_col = db["microsoft_integrations"]
 microsoft_oauth_state_col = db["microsoft_oauth_state"]
-# Quantro Connect — Facturapi (CFDI México)
-facturapi_connections_col = db["facturapi_connections"]
-facturapi_webhook_events_col = db["facturapi_webhook_events"]
-# Quantro Actions — Phase 3 dual-write (default primary=mongo)
-# See docs/phase3-actions-postgres.md (QUANTRO_ACTIONS_PRIMARY).
+# Quantro Actions — Phase 3 (QUANTRO_ACTIONS_PRIMARY).
 action_executions_col = wrap_executions_col(db["action_executions"])
 action_policies_col = wrap_action_policies_col(db["action_policies"])  # legacy auto-approve overrides
+
+
+# Name → facade, for startup repairs that iterate collection names.
+_COLLECTIONS_BY_NAME: Dict[str, Any] = {
+    "inbox_items": inbox_col,
+    "calendar_events": calendar_col,
+    "contacts": contacts_col,
+    "agents": agents_col,
+    "onboarding_tasks": onboarding_col,
+    "content_items": content_col,
+    "activity_events": activity_col,
+    "automation_policies": policies_col,
+    "escalation_rules": escalation_col,
+    "content_templates": templates_col,
+    "business_profile": business_profile_col,
+    "integrations_config": integrations_config_col,
+    "system_health_events": system_health_col,
+}
+
+
+def _local_identity_writes() -> bool:
+    """Write Flow's own workspace_members / invites / audit_log docs?
+
+    Once those docs live in Supabase (``flow_documents``) they are not a
+    "Mongo mirror" any more: they are the membership cache every request
+    reads and the only store for workspaces without an org_id — so always
+    write them. While they are still on Mongo the Phase 1 mirror flags
+    decide, as before.
+    """
+    return (
+        doc_store.sb_primary()
+        or supabase_admin.is_mongo_mirror_enabled()
+        or supabase_admin.is_mongo_identity_primary()
+    )
+
 
 # The workspace_id used by pre-auth seed + backfill. The first user to
 # log in claims this workspace (rename + become Owner). Subsequent users
@@ -320,16 +387,30 @@ async def _upsert_user_from_claims(claims: dict) -> dict:
         await users_col.insert_one(user_doc)
         existing = user_doc
     else:
-        await users_col.update_one(
-            {"user_id": user_id},
-            {"$set": {
-                "email": email,
-                "name": name,
-                "picture": picture,
-                "last_login_at": datetime.now(timezone.utc),
-                "auth_provider": "supabase",
-            }},
+        # This runs on EVERY authenticated request: only write when the
+        # profile changed or last_login_at is stale (> 5 min), instead of
+        # one write per API call.
+        last = existing.get("last_login_at")
+        if isinstance(last, datetime) and last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        stale = not isinstance(last, datetime) or datetime.now(timezone.utc) - last > timedelta(minutes=5)
+        changed = (
+            existing.get("email") != email
+            or existing.get("name") != name
+            or existing.get("picture") != picture
+            or existing.get("auth_provider") != "supabase"
         )
+        if stale or changed:
+            await users_col.update_one(
+                {"user_id": user_id},
+                {"$set": {
+                    "email": email,
+                    "name": name,
+                    "picture": picture,
+                    "last_login_at": datetime.now(timezone.utc),
+                    "auth_provider": "supabase",
+                }},
+            )
         existing.update({"email": email, "name": name, "picture": picture})
 
     # Ensure the user has an active workspace.
@@ -443,7 +524,7 @@ async def log_audit(
     except Exception:  # noqa: BLE001
         pass
 
-    if supabase_admin.is_mongo_mirror_enabled() or supabase_admin.is_mongo_identity_primary():
+    if _local_identity_writes():
         try:
             await audit_log_col.insert_one({
                 "event_id": str(uuid.uuid4()),
@@ -484,14 +565,20 @@ def _map_audit_event_to_supabase(event_type: str) -> Optional[str]:
 # zero data leakage between modes. All write endpoints MUST tag new
 # records with `is_simulation = await is_simulation_mode(workspace_id)` so
 # they stay in the correct dataset.
-async def is_simulation_mode(workspace_id: str = DEFAULT_WORKSPACE_ID) -> bool:
+#
+# None of the tenant-scoped helpers below default ``workspace_id`` to
+# DEFAULT_WORKSPACE_ID: a caller that forgot it silently read/wrote the
+# "default" workspace's data (see log_activity).
+async def is_simulation_mode(workspace_id: str) -> bool:
     """Return True if the given workspace is currently in Simulation Mode."""
     profile = await business_profile_col.find_one(
         {"workspace_id": workspace_id},
         {"_id": 0, "simulation_mode": 1},
     )
-    if not profile:
-        # Legacy fallback for pre-migration instances
+    if not profile and workspace_id == DEFAULT_WORKSPACE_ID:
+        # Legacy fallback for pre-migration instances: the un-stamped
+        # {profile_id: "default"} doc is the default workspace's profile
+        # (backfill_workspace_scoping promotes it) — never another tenant's.
         profile = await business_profile_col.find_one(
             {"profile_id": "default"},
             {"_id": 0, "simulation_mode": 1},
@@ -499,7 +586,7 @@ async def is_simulation_mode(workspace_id: str = DEFAULT_WORKSPACE_ID) -> bool:
     return bool((profile or {}).get("simulation_mode", False))
 
 
-async def get_mode_filter(workspace_id: str = DEFAULT_WORKSPACE_ID) -> dict:
+async def get_mode_filter(workspace_id: str) -> dict:
     """Return the Mongo filter that isolates the current mode + workspace.
 
     Combines:
@@ -541,7 +628,7 @@ def _lang_directive(language_code):
     return f"Respond in {name}. All textual fields (summary, description, generated copy) must be written in {name}."
 
 
-async def _workspace_language(workspace_id: str = DEFAULT_WORKSPACE_ID) -> str:
+async def _workspace_language(workspace_id: str) -> str:
     """Return the active business-profile language ('es' | 'en') for a workspace."""
     try:
         profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
@@ -549,34 +636,40 @@ async def _workspace_language(workspace_id: str = DEFAULT_WORKSPACE_ID) -> str:
     except Exception:
         return "es"
 
-async def build_intent_prompt(business_profile=None, workspace_id: str = DEFAULT_WORKSPACE_ID):
-    """Build intent detection prompt with business profile context."""
+async def _business_profile_for_prompts(workspace_id: str) -> dict:
+    """The workspace's business profile, or the seeded defaults."""
+    profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
+    return profile if profile else {"industry": "other", "entity_labels": {}}
+
+
+async def build_intent_prompt(business_profile=None, *, workspace_id: str):
+    """Build the inbox triage prompt with business profile context.
+
+    Besides the intent, the model assigns one of the workspace's own inbox
+    categories (inbox_categories.py): only the list for this workspace's
+    industry is sent, so a store never sees real-estate categories.
+    """
     if not business_profile:
-        profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
-        business_profile = profile if profile else {"industry": "other", "entity_labels": {}}
-    
+        business_profile = await _business_profile_for_prompts(workspace_id)
+
     industry = business_profile.get("industry", "other")
-    labels = business_profile.get("entity_labels", {})
+    labels = business_profile.get("entity_labels") or {}
     language = business_profile.get("language", "es")
-    
-    industry_context = {
-        "real_estate": "real estate operations",
-        "healthcare": "healthcare and patient management",
-        "consulting": "consulting and client services",
-        "ecommerce": "e-commerce and customer operations",
-        "other": "business operations"
-    }.get(industry, "business operations")
-    
-    entity_name = labels.get("services", "property")
-    
+    category_set = inbox_categories.get_category_set(industry)
+
+    entity_name = labels.get("services") or category_set["asset_hint"]
+
     return f"""You are an AI assistant for Quantro Flow, a Business Operating System.
-The business operates in: {industry_context}.
+The business operates in: {category_set["business_context"]}.
 {_lang_directive(language)}
 
 Analyze incoming messages and detect intent.
+{inbox_categories.build_prompt_block(industry)}
 
 Respond with ONLY valid JSON (no markdown fences):
 {{
+  "category": "<{inbox_categories.category_json_hint(industry)}>",
+  "category_confidence": <float 0.0-1.0>,
   "intent": "<booking|onboarding|follow_up|inquiry|escalation|spam|needs_review>",
   "confidence": <float 0.0-1.0>,
   "summary": "<1-sentence summary>",
@@ -593,7 +686,7 @@ Respond with ONLY valid JSON (no markdown fences):
   }}
 }}"""
 
-async def build_content_prompt(business_profile=None, workspace_id: str = DEFAULT_WORKSPACE_ID):
+async def build_content_prompt(business_profile=None, *, workspace_id: str):
     """Build content generation prompt with business profile context."""
     if not business_profile:
         profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
@@ -642,7 +735,29 @@ async def parse_ai_json(response_text):
     except json.JSONDecodeError:
         return None
 
-async def log_activity(event_type, title, description, related_id=None, related_type=None, workspace_id: Optional[str] = None):
+# Greppable WARNING tag (only WARNING+ reaches `fly logs`): an activity
+# event reached log_activity without a workspace and was NOT written.
+ACTIVITY_NO_WORKSPACE = "ACTIVITY_NO_WORKSPACE"
+_activity_logger = logging.getLogger("quantro.activity")
+# Set on every event written since the workspace fix (it lands in
+# activity_events.extra). scripts/fix_activity_workspace.py never moves such
+# a row: only events written before the fix can have leaked into "default".
+ACTIVITY_WORKSPACE_EXPLICIT = "workspace_explicit"
+
+
+async def log_activity(event_type, title, description, related_id=None, related_type=None, *, workspace_id: Optional[str]):
+    """Append an activity-feed event to ``workspace_id``'s feed.
+
+    ``workspace_id`` is required (keyword-only, no default): it used to
+    default to DEFAULT_WORKSPACE_ID, which put other tenants' inbox senders,
+    subjects and AI summaries in the "default" workspace's feed. An event
+    without a workspace is dropped (one WARNING line, event_type only —
+    titles/descriptions carry customer data). tests/test_activity_workspace
+    fails on any call that does not pass ``workspace_id=`` explicitly.
+    """
+    if not workspace_id:
+        _activity_logger.warning("%s activity event dropped (event_type=%s)", ACTIVITY_NO_WORKSPACE, event_type)
+        return None
     event = {
         "event_id": str(uuid.uuid4()),
         "event_type": event_type,
@@ -651,8 +766,9 @@ async def log_activity(event_type, title, description, related_id=None, related_
         "related_id": related_id,
         "related_type": related_type,
         "timestamp": now_iso(),
-        "is_simulation": await is_simulation_mode(workspace_id or DEFAULT_WORKSPACE_ID),
-        "workspace_id": workspace_id or DEFAULT_WORKSPACE_ID,
+        "is_simulation": await is_simulation_mode(workspace_id),
+        "workspace_id": workspace_id,
+        ACTIVITY_WORKSPACE_EXPLICIT: True,
     }
     await activity_col.insert_one(event)
     return event
@@ -688,7 +804,11 @@ async def execute_action_for_item(item, source="auto"):
     # Downstream artifacts inherit the mode of the triggering inbox item
     # so everything remains in the correct sandbox/workspace.
     sim_flag = bool(item.get("is_simulation", False))
-    ws_id = item.get("workspace_id", DEFAULT_WORKSPACE_ID)
+    # Callers load the item scoped to their workspace; never fall back to
+    # the default workspace (the executor would write there).
+    ws_id = item.get("workspace_id")
+    if not ws_id:
+        return {"executed": False, "reason": "Inbox item has no workspace"}
 
     async def run(action_id: str, input_payload: dict):
         return await action_executor.execute(
@@ -754,12 +874,44 @@ async def execute_action_for_item(item, source="auto"):
     return {"executed": executed, "action_type": action_type, "results": results}
 
 
+def _inbox_view(item: Optional[dict]) -> Optional[dict]:
+    """Inbox item with the fields the action/AI paths index directly.
+
+    Gmail/Outlook-synced rows carry ``from_address``/``preview`` instead of
+    the demo seed's ``from_email``/``body``. They only became visible in the
+    Supabase-primary inbox after the Mongo exit backfill, so give the
+    analyze/approve paths the same keys (read-side only, never written).
+    """
+    if item is None:
+        return None
+    view = dict(item)
+    view["from_name"] = view.get("from_name") or view.get("from_address") or ""
+    view["from_email"] = view.get("from_email") or view.get("from_address") or ""
+    view["subject"] = view.get("subject") or ""
+    view["body"] = view.get("body") or view.get("preview") or ""
+    if not view.get("inbox_id") and view.get("id"):
+        view["inbox_id"] = view["id"]
+    return view
+
+
+def _as_iso_text(value: Any) -> str:
+    """Calendar times are ISO strings in legacy Mongo docs and datetimes when
+    read back from Supabase (timestamptz). String checks need text."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value or ""
+
+
 async def evaluate_advanced_escalation(item, intent, confidence, policy_action):
     """Evaluate advanced escalation conditions beyond simple intent/keyword matching."""
     escalation_info = None
     escalation_reasons = []
-    workspace_id = item.get("workspace_id", DEFAULT_WORKSPACE_ID)
-    
+    # The item's own workspace only: falling back to "default" evaluated
+    # (and quoted, in the reasons) another tenant's rules and calendar.
+    workspace_id = item.get("workspace_id")
+    if not workspace_id:
+        return None
+
     rules = await escalation_col.find({"workspace_id": workspace_id, "enabled": True}).to_list(100)
     entities = item.get("ai_intent", {}).get("entities", {})
     text = f"{item.get('subject', '')} {item.get('body', '')}".lower()
@@ -784,7 +936,7 @@ async def evaluate_advanced_escalation(item, intent, confidence, policy_action):
                     existing_events = await calendar_col.find({"workspace_id": workspace_id}).to_list(100)
                     for ev in existing_events:
                         try:
-                            ev_start = ev.get("start_time", "")
+                            ev_start = _as_iso_text(ev.get("start_time"))
                             if proposed_dt.lower() in ev_start.lower() or ev_start[:10] == proposed_dt[:10]:
                                 matched = True
                                 escalation_reasons.append(f"Potential calendar conflict with '{ev.get('title', 'existing event')}'")
@@ -795,7 +947,7 @@ async def evaluate_advanced_escalation(item, intent, confidence, policy_action):
                 if not matched:
                     from datetime import date
                     today_str = date.today().isoformat()
-                    today_events = [e for e in await calendar_col.find({"workspace_id": workspace_id}).to_list(100) if today_str in e.get("start_time", "")]
+                    today_events = [e for e in await calendar_col.find({"workspace_id": workspace_id}).to_list(100) if today_str in _as_iso_text(e.get("start_time"))]
                     if len(today_events) >= 4:
                         matched = True
                         escalation_reasons.append(f"Calendar is busy ({len(today_events)} events today)")
@@ -936,6 +1088,7 @@ async def seed_database():
     for _a in activity_events:
         _a.setdefault("workspace_id", DEFAULT_WORKSPACE_ID)
         _a.setdefault("is_simulation", True)
+        _a[ACTIVITY_WORKSPACE_EXPLICIT] = True
     await activity_col.insert_many(activity_events)
 
     # Automation Policies (per-intent rules)
@@ -1184,7 +1337,8 @@ async def ensure_integrations_seeded():
                 patch["workspace_id"] = DEFAULT_WORKSPACE_ID
             if patch:
                 await integrations_config_col.update_one(
-                    {"_id": existing["_id"]}, {"$set": patch}
+                    {"workspace_id": DEFAULT_WORKSPACE_ID, "provider": item["provider"]},
+                    {"$set": patch},
                 )
                 repairs.append({
                     "type": "metadata_backfilled",
@@ -1193,8 +1347,13 @@ async def ensure_integrations_seeded():
                 })
 
     # Always log a check event (healthy = repairs is empty)
+    # Global startup checks live under the default workspace: /api/system/health
+    # reads [workspace, "default"]. Without it Supabase stores NULL (the Mongo
+    # startup repair used to fill "default"), the health card goes stale and the
+    # backfill's --verify reports every boot as a pending update.
     await system_health_col.insert_one({
         "event_id": str(uuid.uuid4()),
+        "workspace_id": DEFAULT_WORKSPACE_ID,
         "scope": "integrations",
         "status": "repaired" if repairs else "healthy",
         "repairs": repairs,
@@ -1224,6 +1383,24 @@ BACKFILLED_COLLECTIONS = [
 ]
 
 
+def _legacy_repair_targets(names: List[str]) -> List[Tuple[str, Any]]:
+    """(name, facade) for collections whose store is still Mongo-primary.
+
+    The startup repairs below were written for legacy Mongo data. Once a
+    domain is on Supabase they are skipped: the Mongo → Supabase backfill
+    (scripts/mongo_to_supabase.py) applies the same defaults while copying.
+    Going through the facade keeps the Supabase shadow in sync meanwhile.
+    """
+    out: List[Tuple[str, Any]] = []
+    for name in names:
+        domain = _MONGO_DOMAINS.get(name)
+        col = _COLLECTIONS_BY_NAME.get(name)
+        if col is None or domain is None or storage_flags.domain_on_supabase(domain):
+            continue
+        out.append((name, col))
+    return out
+
+
 async def backfill_simulation_flag():
     """Mark legacy un-flagged operational records as simulation data.
 
@@ -1231,18 +1408,23 @@ async def backfill_simulation_flag():
     that already have `is_simulation: True` or `is_simulation: False` are
     left untouched, so user-created live records remain in Live Mode."""
     repaired = {}
-    for name in BACKFILLED_COLLECTIONS:
-        col = db[name]
-        res = await col.update_many(
-            {"is_simulation": {"$exists": False}},
-            {"$set": {"is_simulation": True}},
-        )
-        if res.modified_count:
+    for name, col in _legacy_repair_targets(BACKFILLED_COLLECTIONS):
+        # One collection failing must not skip the rest (or abort startup).
+        try:
+            res = await col.update_many(
+                {"is_simulation": {"$exists": False}},
+                {"$set": {"is_simulation": True}},
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[startup] simulation-flag repair skipped for {name}: {type(exc).__name__}: {exc}")
+            continue
+        if getattr(res, "modified_count", 0):
             repaired[name] = res.modified_count
     if repaired:
         try:
             await system_health_col.insert_one({
                 "event_id": str(uuid.uuid4()),
+                "workspace_id": DEFAULT_WORKSPACE_ID,
                 "scope": "data_isolation",
                 "status": "repaired",
                 "repairs": [
@@ -1271,12 +1453,16 @@ WORKSPACE_SCOPED_COLLECTIONS = [
 
 async def backfill_workspace_scoping():
     """Idempotently tag legacy records with workspace_id=DEFAULT_WORKSPACE_ID."""
-    for name in WORKSPACE_SCOPED_COLLECTIONS:
-        col = db[name]
-        await col.update_many(
-            {"workspace_id": {"$exists": False}},
-            {"$set": {"workspace_id": DEFAULT_WORKSPACE_ID}},
-        )
+    for name, col in _legacy_repair_targets(WORKSPACE_SCOPED_COLLECTIONS):
+        # One collection failing must not skip the rest, nor the default
+        # business-profile / workspace-shell steps below.
+        try:
+            await col.update_many(
+                {"workspace_id": {"$exists": False}},
+                {"$set": {"workspace_id": DEFAULT_WORKSPACE_ID}},
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[startup] workspace-scoping repair skipped for {name}: {type(exc).__name__}: {exc}")
     # Ensure the default business profile document exists with workspace_id.
     existing = await business_profile_col.find_one({"workspace_id": DEFAULT_WORKSPACE_ID})
     if not existing:
@@ -1308,7 +1494,9 @@ async def backfill_workspace_scoping():
 
 async def seed_workspace_config(workspace_id: str, *, industry: str = "other", language: str = "es"):
     """Create the baseline business_profile + integrations_config + policies
-    for a brand-new workspace. Idempotent: never overwrites existing configs."""
+    for a brand-new workspace. Idempotent: never overwrites existing configs.
+    One read per collection (not one per default item): this runs for every
+    workspace at startup and each read is an HTTP round-trip on Supabase."""
     now = datetime.now(timezone.utc)
 
     # Business profile
@@ -1333,11 +1521,12 @@ async def seed_workspace_config(workspace_id: str, *, industry: str = "other", l
         })
 
     # Integrations catalog (one row per provider for this workspace)
+    have_providers = {
+        r.get("provider")
+        for r in await integrations_config_col.find({"workspace_id": workspace_id}, {"_id": 0, "provider": 1}).to_list(500)
+    }
     for item in DEFAULT_INTEGRATIONS_CATALOG:
-        existing = await integrations_config_col.find_one({
-            "workspace_id": workspace_id, "provider": item["provider"]
-        })
-        if not existing:
+        if item["provider"] not in have_providers:
             await integrations_config_col.insert_one({
                 "integration_id": str(uuid.uuid4()),
                 "workspace_id": workspace_id,
@@ -1352,9 +1541,12 @@ async def seed_workspace_config(workspace_id: str, *, industry: str = "other", l
             })
 
     # Automation policies (default per-intent rules) — idempotent per intent.
+    have_intents = {
+        r.get("intent")
+        for r in await policies_col.find({"workspace_id": workspace_id}, {"_id": 0, "intent": 1}).to_list(1000)
+    }
     for p in DEFAULT_AUTOMATION_POLICIES:
-        existing = await policies_col.find_one({"workspace_id": workspace_id, "intent": p["intent"]})
-        if not existing:
+        if p["intent"] not in have_intents:
             await policies_col.insert_one({
                 "workspace_id": workspace_id,
                 "policy_id": str(uuid.uuid4()),
@@ -1370,9 +1562,12 @@ async def seed_workspace_config(workspace_id: str, *, industry: str = "other", l
             })
 
     # Escalation rules — idempotent per rule name.
+    have_rules = {
+        r.get("name")
+        for r in await escalation_col.find({"workspace_id": workspace_id}, {"_id": 0, "name": 1}).to_list(1000)
+    }
     for r in DEFAULT_ESCALATION_RULES:
-        existing = await escalation_col.find_one({"workspace_id": workspace_id, "name": r["name"]})
-        if not existing:
+        if r["name"] not in have_rules:
             await escalation_col.insert_one({
                 "workspace_id": workspace_id,
                 "rule_id": str(uuid.uuid4()),
@@ -1386,9 +1581,12 @@ async def seed_workspace_config(workspace_id: str, *, industry: str = "other", l
             })
 
     # Content templates — idempotent per template name.
+    have_templates = {
+        r.get("name")
+        for r in await templates_col.find({"workspace_id": workspace_id}, {"_id": 0, "name": 1}).to_list(1000)
+    }
     for tpl in DEFAULT_CONTENT_TEMPLATES:
-        existing = await templates_col.find_one({"workspace_id": workspace_id, "name": tpl["name"]})
-        if not existing:
+        if tpl["name"] not in have_templates:
             await templates_col.insert_one({
                 "workspace_id": workspace_id,
                 "template_id": str(uuid.uuid4()),
@@ -1597,23 +1795,44 @@ async def reconcile_supabase_memberships_to_mongo(user_doc: dict) -> Optional[st
 
 
 # ─── Lifespan ──────────────────────────────────────────────────────────
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Soft-fail startup jobs so /api/health can bind even when Mongo/Atlas
-    # is unreachable (common on first Fly deploys before Network Access).
-    for _label, _coro in (
-        ("seed_database", seed_database),
-        ("ensure_integrations_seeded", ensure_integrations_seeded),
-        ("backfill_simulation_flag", backfill_simulation_flag),
-        ("backfill_workspace_scoping", backfill_workspace_scoping),
-        ("migrate_legacy_role_names", migrate_legacy_role_names),
-        ("ensure_action_indexes", lambda: ensure_action_indexes(action_executions_col)),
-        ("backfill_workspace_automations", backfill_workspace_automations),
-    ):
+async def _ensure_action_indexes_if_mongo():
+    # Postgres indexes ship in migrations; only a Mongo-primary actions
+    # store needs the Motor index.
+    if not storage_flags.domain_on_supabase("actions"):
+        await ensure_action_indexes(action_executions_col)
+
+
+STARTUP_JOBS = (
+    ("seed_database", lambda: seed_database()),
+    ("ensure_integrations_seeded", lambda: ensure_integrations_seeded()),
+    ("backfill_simulation_flag", lambda: backfill_simulation_flag()),
+    ("backfill_workspace_scoping", lambda: backfill_workspace_scoping()),
+    ("migrate_legacy_role_names", lambda: migrate_legacy_role_names()),
+    ("ensure_action_indexes", lambda: _ensure_action_indexes_if_mongo()),
+    ("backfill_workspace_automations", lambda: backfill_workspace_automations()),
+)
+
+
+async def run_startup_jobs() -> Dict[str, str]:
+    """Soft-fail startup jobs so /api/health can bind even when a store is
+    unreachable. Returns {job: "ok" | error class} (tests use it)."""
+    outcome: Dict[str, str] = {}
+    for _label, _coro in STARTUP_JOBS:
         try:
             await _coro()
+            outcome[_label] = "ok"
         except Exception as exc:  # noqa: BLE001
+            outcome[_label] = type(exc).__name__
             print(f"[startup] {_label} failed (continuing): {exc}")
+    return outcome
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print(f"[startup] storage: {storage_flags.summary()}")
+    # Idempotent repairs/seeding run in the background: over Supabase REST they
+    # take longer than they did on Mongo, and /api/health must bind at once.
+    startup_task = asyncio.create_task(run_startup_jobs())
 
     # Phase 7e — Background sync scheduler. We launch a single asyncio
     # task that wakes up every PERIODIC_SYNC_INTERVAL_SECS and calls the
@@ -1627,18 +1846,27 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        sync_task.cancel()
-        try:
-            await sync_task
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001
-            pass
-        client.close()
+        for task in (sync_task, startup_task):
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        mongo_legacy.close()
+        await sb_rest.aclose()
 
 
 # ─── Periodic provider sync (Phase 7e) ────────────────────────────────
 PERIODIC_SYNC_INTERVAL_SECS = int(
     os.environ.get("PERIODIC_SYNC_INTERVAL_SECS") or 15 * 60
 )
+
+# Provider SDK calls are synchronous (googleapiclient/httplib2, MSAL,
+# httpx.Client) and one Gmail sync is ~50 sequential HTTPS round-trips.
+# The API runs a single uvicorn worker, so every such call made from
+# async code goes through asyncio.to_thread — otherwise one workspace's
+# sync freezes every request, /api/health included (Fly's check times
+# out at 5 s). tests/test_provider_calls_off_event_loop.py enforces it.
 
 
 async def _perform_google_sync_for_workspace(workspace_id: str) -> Dict[str, Any]:
@@ -1655,7 +1883,7 @@ async def _perform_google_sync_for_workspace(workspace_id: str) -> Dict[str, Any
     counts = {"emails": 0, "events": 0}
     now = datetime.now(timezone.utc)
     try:
-        emails = goog.fetch_recent_gmail(creds, limit=50)
+        emails = await asyncio.to_thread(goog.fetch_recent_gmail, creds, limit=50)
         for m in emails:
             await inbox_col.update_one(
                 {"workspace_id": workspace_id, "gmail_id": m["gmail_id"]},
@@ -1673,7 +1901,7 @@ async def _perform_google_sync_for_workspace(workspace_id: str) -> Dict[str, Any
                 upsert=True,
             )
             counts["emails"] += 1
-        events = goog.fetch_upcoming_calendar(creds, days=30)
+        events = await asyncio.to_thread(goog.fetch_upcoming_calendar, creds, days=30)
         for ev in events:
             event_id = str(uuid.uuid4())
             canonical = canonical_calendar_write(
@@ -1747,8 +1975,9 @@ _local_sync_locks: Dict[str, float] = {}
 async def _acquire_sync_lock(provider: str, workspace_id: str, owner_id: Optional[str] = None) -> bool:
     """Return True if this instance should run sync for provider+workspace.
 
-    Prefer atomic Mongo lease (multi-instance); fall back to in-process
-    window if Mongo is unavailable.
+    Atomic lease in Supabase ``flow_sync_locks`` (legacy: Mongo
+    ``sync_locks`` while QUANTRO_DOCS_PRIMARY=mongo); falls back to the
+    in-process window if the store is unavailable.
     """
     import time as _time
     key = f"{provider}:{workspace_id}"
@@ -1758,16 +1987,24 @@ async def _acquire_sync_lock(provider: str, workspace_id: str, owner_id: Optiona
         return False
     acquired = False
     try:
-        lock_col = db["sync_locks"]
-        acquired = await acquire_sync_lock_lease(
-            lock_col,
-            provider=provider,
-            workspace_id=workspace_id,
-            window_seconds=_SYNC_LOCK_WINDOW_SECONDS,
-            owner_id=owner_id,
-        )
+        if doc_store.sb_primary():
+            acquired = await acquire_sync_lock_lease_supabase(
+                provider=provider,
+                workspace_id=workspace_id,
+                window_seconds=_SYNC_LOCK_WINDOW_SECONDS,
+                owner_id=owner_id,
+                requester=doc_store._req,
+            )
+        else:
+            acquired = await acquire_sync_lock_lease(
+                db["sync_locks"],
+                provider=provider,
+                workspace_id=workspace_id,
+                window_seconds=_SYNC_LOCK_WINDOW_SECONDS,
+                owner_id=owner_id,
+            )
     except Exception:  # noqa: BLE001
-        # Mongo unavailable — single-process fallback only.
+        # Lock store unavailable — single-process fallback only.
         acquired = True
     if not acquired:
         return False
@@ -2349,7 +2586,7 @@ async def update_member_role(
                 )
             except Exception:  # noqa: BLE001
                 pass
-        if supabase_admin.is_mongo_mirror_enabled() or supabase_admin.is_mongo_identity_primary():
+        if _local_identity_writes():
             await workspace_members_col.update_one(
                 {"user_id": user.user_id, "workspace_id": workspace_id},
                 {"$set": {"role": "leader"}},
@@ -2376,7 +2613,7 @@ async def update_member_role(
             if supabase_admin.is_supabase_primary():
                 raise HTTPException(status_code=502, detail="Failed to update role in Supabase")
 
-    if supabase_admin.is_mongo_mirror_enabled() or supabase_admin.is_mongo_identity_primary():
+    if _local_identity_writes():
         await workspace_members_col.update_one(
             {"user_id": target_user_id, "workspace_id": workspace_id},
             {"$set": {"role": new_role, "role_updated_at": datetime.now(timezone.utc)}},
@@ -2442,7 +2679,7 @@ async def remove_member(
             if supabase_admin.is_supabase_primary():
                 raise HTTPException(status_code=502, detail="Failed to remove member in Supabase")
 
-    if supabase_admin.is_mongo_mirror_enabled() or supabase_admin.is_mongo_identity_primary():
+    if _local_identity_writes():
         await workspace_members_col.delete_one(
             {"user_id": target_user_id, "workspace_id": workspace_id}
         )
@@ -2544,7 +2781,7 @@ async def create_invite(
         "supabase_token": sb_token,
     }
 
-    if supabase_admin.is_mongo_mirror_enabled() or supabase_admin.is_mongo_identity_primary():
+    if _local_identity_writes():
         await workspace_invites_col.insert_one(dict(invite_doc))
 
     await log_audit(
@@ -2644,7 +2881,7 @@ async def revoke_invite(
             revoked_in_sb = False
 
     matched = 0
-    if supabase_admin.is_mongo_mirror_enabled() or supabase_admin.is_mongo_identity_primary():
+    if _local_identity_writes():
         result = await workspace_invites_col.update_one(
             {"workspace_id": workspace_id, "invite_id": invite_id},
             {"$set": {"revoked": True, "revoked_at": datetime.now(timezone.utc), "revoked_by": user.user_id}},
@@ -2666,23 +2903,35 @@ async def revoke_invite(
     return {"success": True}
 
 
+async def _workspace_for_org(org_id: Optional[str]) -> Optional[str]:
+    """Reverse of workspace_to_org_id: the Flow workspace of a Supabase org.
+
+    ``None`` when Flow has no workspace for the org. Never the default
+    workspace unless the org IS the configured default org: the shared
+    ``invitations`` table also holds Quantro OS invitations, and mapping an
+    unknown org to "default" let any such invite token add its holder to
+    the default workspace.
+    """
+    if not org_id:
+        return None
+    ws = await workspaces_col.find_one({"org_id": org_id}, {"_id": 0, "workspace_id": 1})
+    if ws and ws.get("workspace_id"):
+        return ws["workspace_id"]
+    if org_id == supabase_admin.resolve_default_org_id():
+        return DEFAULT_WORKSPACE_ID
+    return None
+
+
 async def _resolve_invite_by_token(token: str, access_token: Optional[str] = None) -> Optional[dict]:
     """Resolve an invite from Supabase SoT (preferred) or Mongo mirror."""
     if supabase_admin.is_supabase_primary() or supabase_admin.is_dual_write_enabled():
         try:
             sb = await supabase_admin.get_invitation_by_token(token, access_token)
-            if sb:
-                org_id = sb.get("org_id")
-                workspace_id = DEFAULT_WORKSPACE_ID
-                # Best-effort reverse map org → workspace.
-                try:
-                    ws = await workspaces_col.find_one({"org_id": org_id}, {"_id": 0, "workspace_id": 1})
-                    if ws and ws.get("workspace_id"):
-                        workspace_id = ws["workspace_id"]
-                    elif org_id and org_id == supabase_admin.resolve_default_org_id():
-                        workspace_id = DEFAULT_WORKSPACE_ID
-                except Exception:  # noqa: BLE001
-                    pass
+            org_id = sb.get("org_id") if sb else None
+            # An invitation of an org Flow has no workspace for is not a
+            # Flow invite: fall through to Flow's own invite docs (→ 404).
+            workspace_id = await _workspace_for_org(org_id) if sb else None
+            if sb and workspace_id:
                 return {
                     "invite_id": sb.get("id"),
                     "supabase_invite_id": sb.get("id"),
@@ -2802,7 +3051,7 @@ async def accept_invite(token: str, user: User = Depends(get_current_user)):
             except Exception:  # noqa: BLE001
                 pass
 
-    if supabase_admin.is_mongo_mirror_enabled() or supabase_admin.is_mongo_identity_primary():
+    if _local_identity_writes():
         await workspace_members_col.update_one(
             {"workspace_id": workspace_id, "user_id": user.user_id},
             {"$set": {
@@ -2844,7 +3093,7 @@ async def accept_invite(token: str, user: User = Depends(get_current_user)):
 # We persist the same five canonical step keys per (workspace_id,
 # member_user_id) so the UI can show progress + completed_at timestamps
 # without recomputing on every render.
-people_onboarding_col = db["people_onboarding_steps"]
+# people_onboarding_col is bound at the top (flow_documents).
 
 ONBOARDING_STEPS = [
     "invitation_sent",
@@ -3182,6 +3431,22 @@ async def mark_onboarding_complete(
             },
             upsert=True,
         )
+    # Same Supabase shadow as the per-step endpoint (mapped workspaces only).
+    org_id = await workspace_to_org_id(workspace_id)
+    if org_id and supabase_admin.is_dual_write_enabled():
+        for key in ONBOARDING_STEPS:
+            try:
+                await supabase_admin.upsert_onboarding_step(
+                    org_id=org_id,
+                    member_id=member_user_id,
+                    step_key=key,
+                    status="completed",
+                    metadata={"forced_by": user.user_id},
+                    access_token=user.access_token or "",
+                    completed_at_iso=now.isoformat(),
+                )
+            except Exception:  # noqa: BLE001
+                pass
     await log_audit(
         "onboarding.completed",
         f"{user.email} marked onboarding complete for {member_user_id}",
@@ -3610,6 +3875,15 @@ async def ready():
     if not sb_ok:
         ok = False
 
+    # Effective storage routing (no secrets) — verify the Mongo exit here.
+    try:
+        storage = storage_flags.summary()
+        storage["mongo_client_created"] = mongo_legacy.client_created()
+        storage["mongo_disallowed_access_count"] = mongo_legacy.disallowed_access_count()
+        checks["storage"] = storage
+    except Exception as exc:  # noqa: BLE001
+        checks["storage"] = {"error": type(exc).__name__}
+
     # Store primary flags (no secrets)
     try:
         checks["secrets"] = secrets_store.secrets_health()
@@ -3627,7 +3901,7 @@ async def ready():
         if hasattr(actions_store, "actions_health"):
             checks["actions"] = actions_store.actions_health()
         else:
-            primary = (os.environ.get("QUANTRO_ACTIONS_PRIMARY") or "mongo").lower()
+            primary = storage_flags.parse_primary("QUANTRO_ACTIONS_PRIMARY")
             checks["actions"] = {"actions_primary": primary, "configured": True}
     except Exception as exc:  # noqa: BLE001
         checks["actions"] = {"error": type(exc).__name__}
@@ -3739,10 +4013,10 @@ async def _quantro_connect_health_checks(workspace_id: str) -> List[Dict[str, An
     """Quantro Connect + Actions checks, additive to the pre-existing
     System Health checks above. Deliberately does NOT feed into
     `overall` (healthy/degraded/repaired) — an unconfigured *optional*
-    provider (e.g. Microsoft OAuth not set up in this deployment, or no
-    Facturapi connection yet) is informational, not a platform failure;
-    per the task spec, a provider with insufficient scope is "limited",
-    not a system failure either."""
+    provider (e.g. Microsoft OAuth not set up in this deployment, or
+    Quantro OS invoicing not configured) is informational, not a
+    platform failure; per the task spec, a provider with insufficient
+    scope is "limited", not a system failure either."""
     checks: List[Dict[str, Any]] = []
 
     providers = list_connect_providers()
@@ -3776,17 +4050,6 @@ async def _quantro_connect_health_checks(workspace_id: str) -> List[Dict[str, An
         "detail": f"Google: {'configured' if goog.is_oauth_configured() else 'not configured'} · Microsoft: {'configured' if msoa.is_oauth_configured() else 'not configured'}",
     })
 
-    facturapi_doc = await facturapi_connections_col.find_one({"workspace_id": workspace_id}, {"_id": 0, "status": 1, "last_error": 1, "environment": 1})
-    checks.append({
-        "id": "facturapi_connectivity", "label": "Facturapi connectivity",
-        "ok": not facturapi_doc or facturapi_doc.get("status") != "error",
-        "detail": (
-            "Not connected for this workspace" if not facturapi_doc
-            else f"Connected ({facturapi_doc.get('environment')})" if facturapi_doc.get("status") != "error"
-            else f"Last check failed: {facturapi_doc.get('last_error') or 'unknown error'}"
-        ),
-    })
-
     limited: List[str] = []
     stale: List[str] = []
     for adapter in providers:
@@ -3817,16 +4080,6 @@ async def _quantro_connect_health_checks(workspace_id: str) -> List[Dict[str, An
         "id": "stale_connections", "label": "No stale connections",
         "ok": len(stale) == 0,
         "detail": "All syncs are recent" if not stale else f"No sync in 7+ days: {', '.join(stale)}",
-    })
-
-    recent_failed_webhooks = await facturapi_webhook_events_col.count_documents({
-        "workspace_id": workspace_id, "signature_valid": False,
-        "received_at": {"$gte": datetime.now(timezone.utc) - timedelta(hours=24)},
-    })
-    checks.append({
-        "id": "webhook_failures", "label": "No recent webhook signature failures",
-        "ok": recent_failed_webhooks == 0,
-        "detail": "No failures in the last 24h" if recent_failed_webhooks == 0 else f"{recent_failed_webhooks} unverified webhook event(s) in the last 24h",
     })
 
     return checks
@@ -3898,6 +4151,177 @@ async def get_inbox(status: Optional[str] = None, workspace_id: str = Depends(ge
     items = await inbox_col.find(merge_query(query, mode_filter)).sort("received_at", -1).to_list(100)
     return [serialize_doc(item) for item in items]
 
+# ─── Inbox categories (industry-aware) ────────────────────────────────
+# Each workspace's mail is categorized against its own industry's list
+# (inbox_categories.py). These routes are declared before
+# /api/inbox/{inbox_id} so "categories" is never read as an inbox id.
+INBOX_RECLASSIFY_MAX = 50
+_INBOX_RECLASSIFY_CONCURRENCY = 4
+# Background re-categorization after an industry change, one per workspace.
+# Kept referenced here so the tasks are not garbage-collected mid-run.
+_inbox_reclassify_tasks: Dict[str, "asyncio.Task[Any]"] = {}
+_reclassify_logger = logging.getLogger("quantro.inbox.reclassify")
+
+
+class InboxReclassifyRequest(BaseModel):
+    limit: int = Field(INBOX_RECLASSIFY_MAX, ge=1, le=INBOX_RECLASSIFY_MAX)
+    # Also re-run items already categorized for the current industry.
+    force: bool = False
+
+
+def _inbox_message_text(item: dict) -> str:
+    """The user prompt the triage model sees for an (``_inbox_view``) item."""
+    return f"From: {item['from_name']} ({item['from_email']})\nSubject: {item['subject']}\n\n{item['body']}"
+
+
+@app.get("/api/inbox/categories")
+async def get_inbox_categories(workspace_id: str = Depends(get_current_workspace_id)):
+    """This workspace's inbox categories, from its business-profile industry.
+
+    Only the workspace's own list (ES/EN labels) — the UI builds its chips
+    and the category filter from it.
+    """
+    profile = await _business_profile_for_prompts(workspace_id)
+    return inbox_categories.public_payload(profile.get("industry"))
+
+
+async def _reclassify_recent_inbox(
+    workspace_id: str,
+    user: User,
+    *,
+    limit: int = INBOX_RECLASSIFY_MAX,
+    force: bool = False,
+) -> dict:
+    """Re-run categorization for the workspace's most recent analyzed items.
+
+    Same prompt, model and AI-credit path as analyze (one run_ai_request per
+    item, charged to ``user``); nothing extra per email. Only the
+    ``ai_category*`` fields are rewritten: intent, suggested action, status,
+    policy and execution trail stay untouched, so no action is re-run.
+    Items already categorized for the current industry are skipped unless
+    ``force``. The first billing / provider HTTPException (402 / 502 / 503)
+    stops the run and is re-raised, like batch-analyze.
+    """
+    limit = max(1, min(int(limit or INBOX_RECLASSIFY_MAX), INBOX_RECLASSIFY_MAX))
+    profile = await _business_profile_for_prompts(workspace_id)
+    industry = profile.get("industry")
+    set_key = inbox_categories.resolve_category_set(industry)
+    intent_prompt = await build_intent_prompt(profile, workspace_id=workspace_id)
+    language = (profile.get("language") or "es").lower()
+
+    mode_filter = await get_mode_filter(workspace_id)
+    recent = await inbox_col.find(
+        merge_query({"ai_intent": {"$ne": None}}, mode_filter)
+    ).sort("received_at", -1).to_list(limit)
+    targets = [i for i in recent if force or i.get("ai_category_set") != set_key]
+
+    async def recategorize(raw: dict) -> bool:
+        item = _inbox_view(raw)
+        ai_response = await run_ai_request(
+            user_id=user.user_id,
+            email=user.email,
+            access_token=user.access_token,
+            system_prompt=intent_prompt,
+            user_prompt=_inbox_message_text(item),
+            language=language,
+            # Without it a workspace with its own OpenAI key is billed to Quantro credits.
+            workspace_id=workspace_id,
+        )
+        ai_result = await parse_ai_json(ai_response["text"])
+        if not isinstance(ai_result, dict):
+            return False  # keep the previous category rather than overwrite it with "otro"
+        await inbox_col.update_one(
+            {"workspace_id": workspace_id, "inbox_id": item["inbox_id"]},
+            {"$set": inbox_categories.category_fields(ai_result, industry)},
+        )
+        return True
+
+    reclassified = failed = 0
+    try:
+        for start in range(0, len(targets), _INBOX_RECLASSIFY_CONCURRENCY):
+            chunk = targets[start:start + _INBOX_RECLASSIFY_CONCURRENCY]
+            outcomes = await asyncio.gather(*(recategorize(i) for i in chunk), return_exceptions=True)
+            blocked: Optional[HTTPException] = None
+            for outcome in outcomes:
+                if isinstance(outcome, HTTPException):
+                    blocked = blocked or outcome
+                elif isinstance(outcome, BaseException) or outcome is False:
+                    failed += 1
+                else:
+                    reclassified += 1
+            if blocked is not None:
+                raise blocked
+    finally:
+        if reclassified:
+            await log_activity(
+                "ai", "Inbox recategorized",
+                f"{reclassified} message(s) recategorized for {inbox_categories.CATEGORY_SETS[set_key]['label_en']}",
+                None, "inbox", workspace_id=workspace_id,
+            )
+
+    return {
+        "success": True,
+        "category_set": set_key,
+        "considered": len(recent),
+        "reclassified": reclassified,
+        "skipped_up_to_date": len(recent) - len(targets),
+        "failed": failed,
+    }
+
+
+def _cancel_queued_reclassify(workspace_id: str) -> None:
+    task = _inbox_reclassify_tasks.pop(workspace_id, None)
+    if task is not None and not task.done():
+        task.cancel()
+
+
+async def _run_queued_reclassify(workspace_id: str, user: User) -> None:
+    try:
+        await _reclassify_recent_inbox(workspace_id, user)
+    except asyncio.CancelledError:
+        raise
+    except HTTPException as exc:
+        # Out of AI credits / provider down: the inbox keeps its previous
+        # categories and the user can press "Reclasificar" later.
+        _reclassify_logger.warning("inbox reclassify stopped (workspace=%s, status=%s)", workspace_id, exc.status_code)
+    except Exception:  # noqa: BLE001
+        _reclassify_logger.exception("inbox reclassify failed (workspace=%s)", workspace_id)
+
+
+async def _queue_inbox_reclassify(workspace_id: str, user: User) -> bool:
+    """Re-categorize recent items in the background after an industry change.
+
+    Returns False (nothing queued) when the current mode has no analyzed
+    item. A job still running for the previous industry is cancelled.
+    """
+    mode_filter = await get_mode_filter(workspace_id)
+    if not await inbox_col.count_documents(merge_query({"ai_intent": {"$ne": None}}, mode_filter)):
+        return False
+    _cancel_queued_reclassify(workspace_id)
+    task = asyncio.create_task(_run_queued_reclassify(workspace_id, user))
+    _inbox_reclassify_tasks[workspace_id] = task
+
+    def _forget(done: "asyncio.Task[Any]") -> None:
+        if _inbox_reclassify_tasks.get(workspace_id) is done:
+            _inbox_reclassify_tasks.pop(workspace_id, None)
+
+    task.add_done_callback(_forget)
+    return True
+
+
+@app.post("/api/inbox/reclassify")
+async def reclassify_inbox(
+    req: Optional[InboxReclassifyRequest] = None,
+    workspace_id: str = Depends(get_current_workspace_id),
+    user: User = Depends(get_current_user),
+):
+    """The inbox "Reclasificar" action: re-categorize recent analyzed items (max 50)."""
+    req = req or InboxReclassifyRequest()
+    # This run redoes whatever a background job (industry change) was doing.
+    _cancel_queued_reclassify(workspace_id)
+    return await _reclassify_recent_inbox(workspace_id, user, limit=req.limit, force=req.force)
+
+
 @app.get("/api/inbox/{inbox_id}")
 async def get_inbox_item(inbox_id: str, workspace_id: str = Depends(get_current_workspace_id)):
     mode_filter = await get_mode_filter(workspace_id)
@@ -3908,18 +4332,21 @@ async def get_inbox_item(inbox_id: str, workspace_id: str = Depends(get_current_
 
 @app.post("/api/inbox/{inbox_id}/analyze")
 async def analyze_inbox_item(inbox_id: str, workspace_id: str = Depends(get_current_workspace_id), user: User = Depends(get_current_user)):
-    item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
+    item = _inbox_view(await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id}))
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
+    ws_id = item.get("workspace_id") or workspace_id
     
     # Get business profile for context-aware prompts
-    intent_prompt = await build_intent_prompt(workspace_id=workspace_id)
+    profile = await _business_profile_for_prompts(workspace_id)
+    intent_prompt = await build_intent_prompt(profile, workspace_id=workspace_id)
     language = await _workspace_language(workspace_id)
 
-    message_text = f"From: {item['from_name']} ({item['from_email']})\nSubject: {item['subject']}\n\n{item['body']}"
+    message_text = _inbox_message_text(item)
 
     ai_response = await run_ai_request(
         user_id=user.user_id,
+        workspace_id=workspace_id,
         email=user.email,
         access_token=user.access_token,
         system_prompt=intent_prompt,
@@ -3936,12 +4363,13 @@ async def analyze_inbox_item(inbox_id: str, workspace_id: str = Depends(get_curr
         {"$set": {
             "ai_intent": {"intent": ai_result["intent"], "confidence": ai_result["confidence"], "summary": ai_result["summary"], "entities": ai_result.get("entities", {})},
             "ai_suggested_action": ai_result.get("suggested_action"),
+            **inbox_categories.category_fields(ai_result, profile.get("industry")),
             "status": "processed",
             "read": True,
         }}
     )
     
-    await log_activity("ai", "AI processed inbox", f"Intent: {ai_result['intent']} ({ai_result['confidence']:.0%}) - {ai_result['summary']}", inbox_id, "inbox")
+    await log_activity("ai", "AI processed inbox", f"Intent: {ai_result['intent']} ({ai_result['confidence']:.0%}) - {ai_result['summary']}", inbox_id, "inbox", workspace_id=ws_id)
     
     # Evaluate policy
     intent = ai_result["intent"]
@@ -3960,7 +4388,7 @@ async def analyze_inbox_item(inbox_id: str, workspace_id: str = Depends(get_curr
     policy_action = _normalize_policy_action(policy_action)
 
     # Evaluate advanced escalation conditions (applies to all policy actions)
-    updated_item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
+    updated_item = _inbox_view(await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id}))
     escalation_info = await evaluate_advanced_escalation(updated_item, intent, confidence, policy_action)
 
     # If escalation triggered, override policy action
@@ -3984,7 +4412,7 @@ async def analyze_inbox_item(inbox_id: str, workspace_id: str = Depends(get_curr
 
 @app.post("/api/inbox/{inbox_id}/approve")
 async def approve_inbox_action(inbox_id: str, workspace_id: str = Depends(get_current_workspace_id)):
-    item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
+    item = _inbox_view(await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id}))
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
     if not item.get("ai_suggested_action"):
@@ -3994,7 +4422,7 @@ async def approve_inbox_action(inbox_id: str, workspace_id: str = Depends(get_cu
     action_type = action["type"]
     results = []
     sim_flag = bool(item.get("is_simulation", False))
-    ws_id = item.get("workspace_id", DEFAULT_WORKSPACE_ID)
+    ws_id = item.get("workspace_id") or workspace_id
     
     # Execute action based on type
     if action_type == "schedule_meeting":
@@ -4015,7 +4443,7 @@ async def approve_inbox_action(inbox_id: str, workspace_id: str = Depends(get_cu
             "workspace_id": ws_id,
         }
         await calendar_col.insert_one(event)
-        await log_activity("calendar", "Meeting scheduled", f"Meeting with {item['from_name']} created from AI action", event["event_id"], "calendar")
+        await log_activity("calendar", "Meeting scheduled", f"Meeting with {item['from_name']} created from AI action", event["event_id"], "calendar", workspace_id=ws_id)
         results.append({"type": "event_created", "event_id": event["event_id"]})
     
     elif action_type == "create_contact":
@@ -4038,7 +4466,7 @@ async def approve_inbox_action(inbox_id: str, workspace_id: str = Depends(get_cu
         }
         await contacts_col.insert_one(contact)
         await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"contact_id": contact["contact_id"]}})
-        await log_activity("crm", "Contact created", f"New contact {contact['name']} from inbox action", contact["contact_id"], "contact")
+        await log_activity("crm", "Contact created", f"New contact {contact['name']} from inbox action", contact["contact_id"], "contact", workspace_id=ws_id)
         results.append({"type": "contact_created", "contact_id": contact["contact_id"]})
     
     elif action_type == "start_onboarding":
@@ -4080,19 +4508,19 @@ async def approve_inbox_action(inbox_id: str, workspace_id: str = Depends(get_cu
             }
             await onboarding_col.insert_one(task)
         
-        await log_activity("onboarding", "Onboarding started", f"New agent {agent['name']} - onboarding initiated", agent["agent_id"], "agent")
+        await log_activity("onboarding", "Onboarding started", f"New agent {agent['name']} - onboarding initiated", agent["agent_id"], "agent", workspace_id=ws_id)
         results.append({"type": "agent_created", "agent_id": agent["agent_id"]})
     
     elif action_type == "send_follow_up":
-        await log_activity("inbox", "Follow-up queued", f"Follow-up action queued for {item['from_name']}", inbox_id, "inbox")
+        await log_activity("inbox", "Follow-up queued", f"Follow-up action queued for {item['from_name']}", inbox_id, "inbox", workspace_id=ws_id)
         results.append({"type": "follow_up_queued"})
     
     elif action_type == "flag_review":
-        await log_activity("inbox", "Flagged for review", f"Message from {item['from_name']} flagged for manual review", inbox_id, "inbox")
+        await log_activity("inbox", "Flagged for review", f"Message from {item['from_name']} flagged for manual review", inbox_id, "inbox", workspace_id=ws_id)
         results.append({"type": "flagged"})
     
     else:
-        await log_activity("inbox", "Action approved", f"Action '{action_type}' approved for {item['from_name']}", inbox_id, "inbox")
+        await log_activity("inbox", "Action approved", f"Action '{action_type}' approved for {item['from_name']}", inbox_id, "inbox", workspace_id=ws_id)
         results.append({"type": action_type})
     
     await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"status": "actioned"}})
@@ -4101,11 +4529,11 @@ async def approve_inbox_action(inbox_id: str, workspace_id: str = Depends(get_cu
 
 @app.post("/api/inbox/{inbox_id}/decline")
 async def decline_inbox_action(inbox_id: str, workspace_id: str = Depends(get_current_workspace_id)):
-    item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
+    item = _inbox_view(await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id}))
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
     await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"status": "declined"}})
-    await log_activity("inbox", "Action declined", f"AI suggestion for {item['from_name']} was declined", inbox_id, "inbox")
+    await log_activity("inbox", "Action declined", f"AI suggestion for {item['from_name']} was declined", inbox_id, "inbox", workspace_id=item.get("workspace_id") or workspace_id)
     return {"success": True}
 
 # ─── Batch AI Triage ───────────────────────────────────────────────────
@@ -4115,11 +4543,12 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
     results = []
     
     # Get business profile once for all items
-    intent_prompt = await build_intent_prompt(workspace_id=workspace_id)
+    profile = await _business_profile_for_prompts(workspace_id)
+    intent_prompt = await build_intent_prompt(profile, workspace_id=workspace_id)
     language = await _workspace_language(workspace_id)
     
     for inbox_id in req.inbox_ids:
-        item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
+        item = _inbox_view(await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id}))
         if not item:
             results.append({"inbox_id": inbox_id, "status": "error", "error": "Not found"})
             continue
@@ -4131,9 +4560,10 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
         )
         
         try:
-            message_text = f"From: {item['from_name']} ({item['from_email']})\nSubject: {item['subject']}\n\n{item['body']}"
+            message_text = _inbox_message_text(item)
             ai_response = await run_ai_request(
                 user_id=user.user_id,
+                workspace_id=workspace_id,
                 email=user.email,
                 access_token=user.access_token,
                 system_prompt=intent_prompt,
@@ -4150,12 +4580,13 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
                 {"$set": {
                     "ai_intent": {"intent": ai_result["intent"], "confidence": ai_result["confidence"], "summary": ai_result["summary"], "entities": ai_result.get("entities", {})},
                     "ai_suggested_action": ai_result.get("suggested_action"),
+                    **inbox_categories.category_fields(ai_result, profile.get("industry")),
                     "status": "processed",
                     "read": True,
                 }}
             )
             
-            await log_activity("ai", "Batch triage classified", f"{item['from_name']}: {ai_result['intent']} ({ai_result['confidence']:.0%})", inbox_id, "inbox")
+            await log_activity("ai", "Batch triage classified", f"{item['from_name']}: {ai_result['intent']} ({ai_result['confidence']:.0%})", inbox_id, "inbox", workspace_id=item.get("workspace_id") or workspace_id)
             
             # Evaluate policy for this item
             intent = ai_result["intent"]
@@ -4174,7 +4605,7 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
             policy_action = _normalize_policy_action(policy_action)
 
             # Evaluate advanced escalation conditions (applies to all policy actions)
-            updated_item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
+            updated_item = _inbox_view(await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id}))
             escalation_info = await evaluate_advanced_escalation(updated_item, intent, confidence, policy_action)
             
             # If escalation triggered, override policy action
@@ -4227,7 +4658,7 @@ async def batch_analyze_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
             )
             results.append({"inbox_id": inbox_id, "status": "error", "error": str(e)})
     
-    await log_activity("ai", "Batch triage complete", f"Processed {len(req.inbox_ids)} message(s), {sum(1 for r in results if r['status'] == 'classified')} classified", None, "inbox")
+    await log_activity("ai", "Batch triage complete", f"Processed {len(req.inbox_ids)} message(s), {sum(1 for r in results if r['status'] == 'classified')} classified", None, "inbox", workspace_id=workspace_id)
     
     return {"success": True, "results": results, "total": len(req.inbox_ids), "classified": sum(1 for r in results if r["status"] == "classified")}
 
@@ -4237,7 +4668,7 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
     results = []
     
     for inbox_id in req.inbox_ids:
-        item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
+        item = _inbox_view(await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id}))
         if not item or not item.get("ai_suggested_action"):
             results.append({"inbox_id": inbox_id, "status": "skipped", "reason": "No action available"})
             continue
@@ -4251,7 +4682,7 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
             action = item["ai_suggested_action"]
             action_type = action["type"]
             sim_flag = bool(item.get("is_simulation", False))
-            ws_id = item.get("workspace_id", DEFAULT_WORKSPACE_ID)
+            ws_id = item.get("workspace_id") or workspace_id
             
             if action_type == "schedule_meeting":
                 entities = item.get("ai_intent", {}).get("entities", {})
@@ -4271,7 +4702,7 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
                     "workspace_id": ws_id,
                 }
                 await calendar_col.insert_one(event)
-                await log_activity("calendar", "Meeting scheduled (batch)", f"Meeting with {item['from_name']}", event["event_id"], "calendar")
+                await log_activity("calendar", "Meeting scheduled (batch)", f"Meeting with {item['from_name']}", event["event_id"], "calendar", workspace_id=ws_id)
             
             elif action_type == "create_contact":
                 entities = item.get("ai_intent", {}).get("entities", {})
@@ -4292,10 +4723,10 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
                     "workspace_id": ws_id,
                 }
                 await contacts_col.insert_one(contact)
-                await log_activity("crm", "Contact created (batch)", f"New contact {contact['name']}", contact["contact_id"], "contact")
+                await log_activity("crm", "Contact created (batch)", f"New contact {contact['name']}", contact["contact_id"], "contact", workspace_id=ws_id)
             
             elif action_type == "send_follow_up":
-                await log_activity("inbox", "Follow-up queued (batch)", f"For {item['from_name']}", inbox_id, "inbox")
+                await log_activity("inbox", "Follow-up queued (batch)", f"For {item['from_name']}", inbox_id, "inbox", workspace_id=ws_id)
             
             elif action_type == "start_onboarding":
                 entities = item.get("ai_intent", {}).get("entities", {})
@@ -4316,10 +4747,10 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
                 for idx, title in enumerate(["Complete compliance training", "Set up CRM profile", "Configure email signature", "Schedule orientation with team lead", "Access granted to listing portal"]):
                     await onboarding_col.insert_one({
                 "workspace_id": workspace_id,"task_id": str(uuid.uuid4()), "agent_id": agent["agent_id"], "title": title, "description": f"Auto-generated step {idx+1}", "status": "pending", "order": idx + 1, "completed_at": None, "auto_generated": True, "is_simulation": sim_flag})
-                await log_activity("onboarding", "Onboarding started (batch)", f"Agent {agent['name']} onboarding initiated", agent["agent_id"], "agent")
+                await log_activity("onboarding", "Onboarding started (batch)", f"Agent {agent['name']} onboarding initiated", agent["agent_id"], "agent", workspace_id=ws_id)
             
             else:
-                await log_activity("inbox", "Action approved (batch)", f"For {item['from_name']}", inbox_id, "inbox")
+                await log_activity("inbox", "Action approved (batch)", f"For {item['from_name']}", inbox_id, "inbox", workspace_id=ws_id)
             
             await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"status": "actioned"}})
             results.append({"inbox_id": inbox_id, "status": "actioned", "action_type": action_type})
@@ -4328,7 +4759,7 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
             results.append({"inbox_id": inbox_id, "status": "error", "error": str(e)})
     
     actioned_count = sum(1 for r in results if r["status"] == "actioned")
-    await log_activity("system", "Batch approval complete", f"{actioned_count}/{len(req.inbox_ids)} actions executed", None, "inbox")
+    await log_activity("system", "Batch approval complete", f"{actioned_count}/{len(req.inbox_ids)} actions executed", None, "inbox", workspace_id=workspace_id)
     
     return {"success": True, "results": results, "total": len(req.inbox_ids), "actioned": actioned_count}
 
@@ -4336,7 +4767,7 @@ async def batch_approve_inbox(req: BatchAnalyzeRequest, workspace_id: str = Depe
 @app.put("/api/inbox/{inbox_id}/details")
 async def update_inbox_details(inbox_id: str, req: UpdateInboxDetailsRequest, workspace_id: str = Depends(get_current_workspace_id)):
     """Allow user to edit AI-extracted entities and suggested action before approving."""
-    item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
+    item = _inbox_view(await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id}))
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
     
@@ -4362,7 +4793,7 @@ async def update_inbox_details(inbox_id: str, req: UpdateInboxDetailsRequest, wo
     
     if update_fields:
         await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": update_fields})
-        await log_activity("inbox", "Details edited", f"Manual adjustments made to {item['from_name']}'s request", inbox_id, "inbox")
+        await log_activity("inbox", "Details edited", f"Manual adjustments made to {item['from_name']}'s request", inbox_id, "inbox", workspace_id=item.get("workspace_id") or workspace_id)
     
     updated = await inbox_col.find_one({"inbox_id": inbox_id})
     return serialize_doc(updated)
@@ -4370,7 +4801,7 @@ async def update_inbox_details(inbox_id: str, req: UpdateInboxDetailsRequest, wo
 @app.post("/api/inbox/{inbox_id}/approve-with-overrides")
 async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest, workspace_id: str = Depends(get_current_workspace_id)):
     """Approve an action with optional manual overrides for details."""
-    item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
+    item = _inbox_view(await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id}))
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
     if not item.get("ai_suggested_action"):
@@ -4381,7 +4812,7 @@ async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest
     entities = item.get("ai_intent", {}).get("entities", {})
     results = []
     sim_flag = bool(item.get("is_simulation", False))
-    ws_id = item.get("workspace_id", DEFAULT_WORKSPACE_ID)
+    ws_id = item.get("workspace_id") or workspace_id
     
     if action_type == "schedule_meeting":
         event = {
@@ -4400,7 +4831,7 @@ async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest
             "workspace_id": ws_id,
         }
         await calendar_col.insert_one(event)
-        await log_activity("calendar", "Meeting scheduled", f"Meeting with {item['from_name']} (with adjustments)", event["event_id"], "calendar")
+        await log_activity("calendar", "Meeting scheduled", f"Meeting with {item['from_name']} (with adjustments)", event["event_id"], "calendar", workspace_id=ws_id)
         results.append({"type": "event_created", "event_id": event["event_id"]})
     
     elif action_type == "create_contact":
@@ -4422,7 +4853,7 @@ async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest
         }
         await contacts_col.insert_one(contact)
         await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"contact_id": contact["contact_id"]}})
-        await log_activity("crm", "Contact created", f"New contact {contact['name']} (with adjustments)", contact["contact_id"], "contact")
+        await log_activity("crm", "Contact created", f"New contact {contact['name']} (with adjustments)", contact["contact_id"], "contact", workspace_id=ws_id)
         results.append({"type": "contact_created", "contact_id": contact["contact_id"]})
     
     elif action_type == "start_onboarding":
@@ -4442,15 +4873,15 @@ async def approve_with_overrides(inbox_id: str, req: ApproveWithOverridesRequest
         await agents_col.insert_one(agent)
         for idx, title in enumerate(["Complete compliance training", "Set up CRM profile", "Configure email signature", "Schedule orientation with team lead", "Access granted to listing portal"]):
             await onboarding_col.insert_one({"workspace_id": ws_id, "task_id": str(uuid.uuid4()), "agent_id": agent["agent_id"], "title": title, "description": f"Auto-generated step {idx+1}", "status": "pending", "order": idx + 1, "completed_at": None, "auto_generated": True, "is_simulation": sim_flag})
-        await log_activity("onboarding", "Onboarding started", f"Agent {agent['name']} onboarding initiated (with adjustments)", agent["agent_id"], "agent")
+        await log_activity("onboarding", "Onboarding started", f"Agent {agent['name']} onboarding initiated (with adjustments)", agent["agent_id"], "agent", workspace_id=ws_id)
         results.append({"type": "agent_created", "agent_id": agent["agent_id"]})
     
     elif action_type == "send_follow_up":
-        await log_activity("inbox", "Follow-up queued", f"Follow-up for {item['from_name']}", inbox_id, "inbox")
+        await log_activity("inbox", "Follow-up queued", f"Follow-up for {item['from_name']}", inbox_id, "inbox", workspace_id=ws_id)
         results.append({"type": "follow_up_queued"})
     
     else:
-        await log_activity("inbox", "Action approved", f"For {item['from_name']}", inbox_id, "inbox")
+        await log_activity("inbox", "Action approved", f"For {item['from_name']}", inbox_id, "inbox", workspace_id=ws_id)
         results.append({"type": action_type})
     
     await inbox_col.update_one({"inbox_id": inbox_id}, {"$set": {"status": "actioned"}})
@@ -4600,7 +5031,7 @@ async def create_agent(req: CreateAgentRequest, workspace_id: str = Depends(get_
         }
         await onboarding_col.insert_one(task)
     
-    await log_activity("onboarding", "New agent added", f"{req.name} added to the team. Onboarding initiated.", agent["agent_id"], "agent")
+    await log_activity("onboarding", "New agent added", f"{req.name} added to the team. Onboarding initiated.", agent["agent_id"], "agent", workspace_id=workspace_id)
     
     # Return with tasks
     tasks = await onboarding_col.find({"agent_id": agent["agent_id"]}).sort("order", 1).to_list(20)
@@ -4624,7 +5055,7 @@ async def update_onboarding_task(task_id: str, req: UpdateOnboardingTaskRequest,
     
     task = await onboarding_col.find_one({"task_id": task_id, "workspace_id": workspace_id})
     if task:
-        await log_activity("onboarding", f"Task {req.status}", f"Onboarding task '{task['title']}' marked as {req.status}", task["agent_id"], "agent")
+        await log_activity("onboarding", f"Task {req.status}", f"Onboarding task '{task['title']}' marked as {req.status}", task["agent_id"], "agent", workspace_id=workspace_id)
     
     return {"success": True}
 
@@ -4646,6 +5077,7 @@ async def generate_content(req: ContentGenerateRequest, workspace_id: str = Depe
 
     ai_response = await run_ai_request(
         user_id=user.user_id,
+        workspace_id=workspace_id,
         email=user.email,
         access_token=user.access_token,
         system_prompt=content_prompt,
@@ -4690,7 +5122,7 @@ async def generate_content(req: ContentGenerateRequest, workspace_id: str = Depe
         await content_col.insert_one(email_item)
         items_created.append(serialize_doc(email_item))
     
-    await log_activity("content", "Content generated", f"AI generated {len(items_created)} content item(s)", None, "content")
+    await log_activity("content", "Content generated", f"AI generated {len(items_created)} content item(s)", None, "content", workspace_id=workspace_id)
     
     return {"success": True, "items": items_created}
 
@@ -4761,14 +5193,14 @@ async def update_policy(policy_id: str, req: AutomationPolicyRequest, workspace_
     result = await policies_col.update_one({"workspace_id": workspace_id, "policy_id": policy_id}, {"$set": update})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Policy not found")
-    await log_activity("system", "Policy updated", f"Automation policy for '{req.intent}' updated", policy_id, "policy")
+    await log_activity("system", "Policy updated", f"Automation policy for '{req.intent}' updated", policy_id, "policy", workspace_id=workspace_id)
     updated = await policies_col.find_one({"workspace_id": workspace_id, "policy_id": policy_id})
     return serialize_doc(updated)
 
 @app.get("/api/policies/evaluate/{inbox_id}")
 async def evaluate_policy_for_item(inbox_id: str, workspace_id: str = Depends(get_current_workspace_id)):
     """Evaluate what action a policy would take for a given inbox item."""
-    item = await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id})
+    item = _inbox_view(await inbox_col.find_one({"workspace_id": workspace_id, "inbox_id": inbox_id}))
     if not item or not item.get("ai_intent"):
         return {"action": "manual_review", "reason": "No AI classification available", "escalation": None}
     
@@ -4924,7 +5356,7 @@ async def delete_template(template_id: str, workspace_id: str = Depends(get_curr
         raise HTTPException(status_code=404, detail="Template not found")
     return {"success": True}
 
-async def build_template_prompt(business_profile=None, workspace_id: str = DEFAULT_WORKSPACE_ID):
+async def build_template_prompt(business_profile=None, *, workspace_id: str):
     """Build template enhancement prompt with business profile context."""
     if not business_profile:
         profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
@@ -4963,8 +5395,10 @@ async def generate_from_template(template_id: str, req: GenerateFromTemplateRequ
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
     
-    # Fill in variables manually first
-    body = template["body_template"]
+    # Fill in variables manually first (templates created outside Flow's
+    # editor may only carry the Supabase `body`/`channel` columns).
+    legacy_body = template.get("body")
+    body = template.get("body_template") or (legacy_body if isinstance(legacy_body, str) else "") or ""
     subject = template.get("subject_template", "") or ""
     for key, value in req.context.items():
         body = body.replace(f"{{{{{key}}}}}", str(value))
@@ -4974,10 +5408,11 @@ async def generate_from_template(template_id: str, req: GenerateFromTemplateRequ
     template_prompt = await build_template_prompt(workspace_id=workspace_id)
     language = await _workspace_language(workspace_id)
 
-    prompt = f"Template category: {template['category']}\nTemplate name: {template['name']}\n\nSubject (if email): {subject}\n\nBody:\n{body}\n\nContext: {json.dumps(req.context)}\n\nPlease enhance this content while keeping the overall structure and intent."
+    prompt = f"Template category: {template.get('category')}\nTemplate name: {template.get('name')}\n\nSubject (if email): {subject}\n\nBody:\n{body}\n\nContext: {json.dumps(req.context)}\n\nPlease enhance this content while keeping the overall structure and intent."
 
     ai_response = await run_ai_request(
         user_id=user.user_id,
+        workspace_id=workspace_id,
         email=user.email,
         access_token=user.access_token,
         system_prompt=template_prompt,
@@ -4991,7 +5426,8 @@ async def generate_from_template(template_id: str, req: GenerateFromTemplateRequ
         ai_result = {"subject": subject, "body": body, "enhanced": False}
     
     # Save as content item
-    content_type = "email_draft" if template["template_type"] == "email" else "social_post"
+    template_type = template.get("template_type") or ("email" if (template.get("channel") or "email") == "email" else "social_post")
+    content_type = "email_draft" if template_type == "email" else "social_post"
     
     if content_type == "email_draft":
         content_data = {
@@ -5002,22 +5438,26 @@ async def generate_from_template(template_id: str, req: GenerateFromTemplateRequ
     else:
         content_data = {
             "text": ai_result.get("body") or body,
-            "hashtags": [f"#{tag}" for tag in template.get("tags", [])],
+            "hashtags": [f"#{tag}" for tag in (template.get("tags") or [])],
             "platform": "instagram",
         }
     
     content_item = {
         "content_id": str(uuid.uuid4()),
         "type": content_type,
-        "title": f"{template['name']} - {req.context.get('contact_name', 'Generated')}",
+        "title": f"{template.get('name')} - {req.context.get('contact_name', 'Generated')}",
         "content": content_data,
         "status": "draft",
         "created_at": now_iso(),
         "created_by": "ai_template",
         "template_id": template_id,
+        # Without these the Supabase write was skipped (no workspace_id) and
+        # the item was only reachable through Mongo's startup re-tagging.
+        "workspace_id": workspace_id,
+        "is_simulation": await is_simulation_mode(workspace_id),
     }
     await content_col.insert_one(content_item)
-    await log_activity("content", "Content from template", f"Generated '{template['name']}' content", content_item["content_id"], "content")
+    await log_activity("content", "Content from template", f"Generated '{template.get('name')}' content", content_item["content_id"], "content", workspace_id=workspace_id)
     
     return {"success": True, "item": serialize_doc(content_item), "enhanced": ai_result.get("enhanced", False)}
 
@@ -5066,7 +5506,7 @@ async def get_business_profile(workspace_id: str = Depends(get_current_workspace
     return serialize_doc(profile)
 
 @app.put("/api/business-profile")
-async def update_business_profile(req: BusinessProfileUpdate, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("leader"))):
+async def update_business_profile(req: BusinessProfileUpdate, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("leader")), user: User = Depends(get_current_user)):
     """Update the business profile configuration."""
     # Get current profile to check if we need to generate simulation data
     current_profile = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
@@ -5090,7 +5530,7 @@ async def update_business_profile(req: BusinessProfileUpdate, workspace_id: str 
         upsert=True
     )
     
-    await log_activity("system", "Business Profile updated", f"Industry: {req.industry}, Simulation: {req.simulation_mode}", workspace_id, "profile")
+    await log_activity("system", "Business Profile updated", f"Industry: {req.industry}, Simulation: {req.simulation_mode}", workspace_id, "profile", workspace_id=workspace_id)
 
     # Auto-generate simulation dataset when entering Simulation Mode if:
     #   (a) turning simulation ON and no simulation data exists yet, OR
@@ -5112,10 +5552,19 @@ async def update_business_profile(req: BusinessProfileUpdate, workspace_id: str 
 
         if need_regenerate:
             await generate_simulation_data(req.industry, workspace_id)
-            await log_activity("system", "Simulation data auto-generated", f"Generated {req.industry} data", "simulation", "system")
+            await log_activity("system", "Simulation data auto-generated", f"Generated {req.industry} data", "simulation", "system", workspace_id=workspace_id)
+
+    # New line of business → new inbox category list: re-categorize the
+    # recent analyzed items in the background (same AI-credit path as
+    # analyze, capped at INBOX_RECLASSIFY_MAX).
+    reclassify_queued = False
+    if inbox_categories.resolve_category_set(req.industry) != inbox_categories.resolve_category_set(old_industry):
+        reclassify_queued = await _queue_inbox_reclassify(workspace_id, user)
 
     updated = await business_profile_col.find_one({"workspace_id": workspace_id}, {"_id": 0})
-    return serialize_doc(updated)
+    out = serialize_doc(updated) or {}
+    out["inbox_reclassify_queued"] = reclassify_queued
+    return out
 
 # ─── Integrations Config ───────────────────────────────────────────────
 class IntegrationUpdate(BaseModel):
@@ -5163,6 +5612,24 @@ async def get_integration(provider: str, workspace_id: str = Depends(get_current
 
 OAUTH_ONLY_PROVIDERS = {"gmail", "google_calendar"}
 
+# Fields describing the last "Probar conexión" run. Stored on the
+# integrations_config row (Supabase keeps them in `extra`) and cleared
+# whenever the key changes or the integration is disconnected.
+_LAST_TEST_FIELDS = ("last_test_at", "last_test_ok", "last_test_reason")
+_OPENAI_KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-]{16,400}")
+
+
+def _looks_like_openai_key(value: str) -> bool:
+    return bool(_OPENAI_KEY_RE.fullmatch(value or ""))
+
+
+def _own_key_bad_request(reason: str, language: str) -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail={"error": reason, "message": ai_billing.own_key_message(reason, language)},
+    )
+
+
 @app.put("/api/integrations/{provider}")
 async def update_integration(provider: str, req: IntegrationUpdate, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("leader"))):
     """Update an integration configuration.
@@ -5172,6 +5639,13 @@ async def update_integration(provider: str, req: IntegrationUpdate, workspace_id
     the Phase 0 audit note in integrations/secrets.py's module
     docstring for why this matters (this endpoint used to persist and
     return API keys in plaintext).
+
+    Disconnecting (status "disconnected") DELETES every stored secret of
+    the integration (the encrypted OpenAI key included) instead of
+    merging an empty config over it. Saving a new secret replaces the old
+    ciphertext. For 'openai' the key is the workspace's own key used by
+    ai_billing.run_ai_request, so it is validated here (format, model
+    allowlist) before it is stored.
     """
     if provider in OAUTH_ONLY_PROVIDERS and req.status == "connected":
         raise HTTPException(
@@ -5191,9 +5665,38 @@ async def update_integration(provider: str, req: IntegrationUpdate, workspace_id
     existing_config = (existing_doc or {}).get("config") or {}
     incoming_config = dict(req.config)
     for secret_field in integration_secrets.SECRET_FIELD_NAMES:
-        if secret_field in incoming_config and not incoming_config[secret_field]:
+        value = incoming_config.get(secret_field)
+        if isinstance(value, str):
+            value = value.strip()
+            incoming_config[secret_field] = value
+        if secret_field in incoming_config and not value:
             incoming_config.pop(secret_field)
+
+    is_openai = provider == ai_billing.OPENAI_PROVIDER
+    if is_openai and req.status == "connected":
+        language = await _workspace_language(workspace_id)
+        new_key = incoming_config.get("api_key")
+        if new_key is not None and (not isinstance(new_key, str) or not _looks_like_openai_key(new_key)):
+            raise _own_key_bad_request("invalid_openai_key_format", language)
+        if not new_key and not existing_config.get("api_key"):
+            raise _own_key_bad_request("openai_key_required", language)
+        model = incoming_config.get("model")
+        if model not in (None, "") and model not in ai_billing.OWN_KEY_ALLOWED_MODELS:
+            raise _own_key_bad_request("model_not_allowed", language)
+
     merged_config = {**existing_config, **integration_secrets.encrypt_config_secrets(incoming_config)}
+    # A new secret — or, for OpenAI, a different model — invalidates the
+    # last connection test (it checked the old key/model pair).
+    credentials_changed = any(f in incoming_config for f in integration_secrets.SECRET_FIELD_NAMES) or (
+        is_openai and "model" in incoming_config and incoming_config.get("model") != existing_config.get("model")
+    )
+
+    if req.status == "disconnected":
+        # Disconnect = forget the credentials, not just flip a flag.
+        merged_config = {
+            k: v for k, v in merged_config.items()
+            if k not in integration_secrets.SECRET_FIELD_NAMES
+        }
 
     update_data = {
         "status": req.status,
@@ -5203,6 +5706,10 @@ async def update_integration(provider: str, req: IntegrationUpdate, workspace_id
 
     if req.status == "connected":
         update_data["last_sync_at"] = now_iso()
+    if req.status == "disconnected" or credentials_changed:
+        # A previous test result says nothing about a new (or no) key.
+        for f in _LAST_TEST_FIELDS:
+            update_data[f] = None
 
     result = await connect_store.update_integrations_config(
         workspace_id=workspace_id,
@@ -5227,9 +5734,58 @@ async def update_integration(provider: str, req: IntegrationUpdate, workspace_id
     doc["config"] = integration_secrets.redact_config(doc.get("config"))
     return doc
 
+
+async def _test_openai_integration(workspace_id: str) -> Dict[str, Any]:
+    """Real check of the workspace's own OpenAI key (retrieves the chosen
+    model with a short timeout). Persists the outcome as last_test_* on the
+    row so the Settings card can show it. Never echoes the key."""
+    language = await _workspace_language(workspace_id)
+    try:
+        own_key = await ai_billing.get_user_api_key(workspace_id, integrations_col=integrations_config_col)
+    except ai_billing.OwnKeyStoreUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "ai_unavailable", "message": ai_billing.own_key_message("store_unavailable", language)},
+        )
+    model = own_key.model if own_key else ai_billing.OWN_KEY_DEFAULT_MODEL
+    if own_key is None:
+        ok, reason = False, "not_connected"
+    elif not own_key.api_key:
+        ok, reason = False, "own_key_unreadable"
+    else:
+        ok, reason = await ai_billing.check_openai_key(own_key.api_key, own_key.model)
+
+    tested_at = datetime.now(timezone.utc).isoformat()
+    if own_key is not None:
+        await connect_store.update_integrations_config(
+            workspace_id=workspace_id,
+            provider=ai_billing.OPENAI_PROVIDER,
+            mongo_col=integrations_config_col,
+            fields={"last_test_at": tested_at, "last_test_ok": ok, "last_test_reason": reason},
+        )
+        await log_audit(
+            "integration.tested",
+            f"openai -> {'ok' if ok else reason}",
+            workspace_id=workspace_id,
+            metadata={"provider": ai_billing.OPENAI_PROVIDER, "ok": ok, "reason": reason, "model": model},
+        )
+    return {
+        "success": ok,
+        "status": "ok" if ok else "failed",
+        "reason": reason,
+        "model": model,
+        "tested_at": tested_at,
+        "message": ai_billing.own_key_message("ok" if ok else reason, language, model),
+    }
+
+
 @app.post("/api/integrations/{provider}/test")
 async def test_integration(provider: str, workspace_id: str = Depends(get_current_workspace_id), _m: dict = Depends(require_role("leader"))):
-    """Test an integration connection (simulated)."""
+    """Test an integration connection.
+
+    'openai' runs a real check against OpenAI with the workspace's saved
+    key; the other providers keep the simulated status check.
+    """
     integration = await connect_store.get_integrations_config(
         workspace_id=workspace_id,
         provider=provider,
@@ -5238,7 +5794,10 @@ async def test_integration(provider: str, workspace_id: str = Depends(get_curren
     )
     if not integration:
         raise HTTPException(status_code=404, detail="Integration not found")
-    
+
+    if provider == ai_billing.OPENAI_PROVIDER:
+        return await _test_openai_integration(workspace_id)
+
     # Simulate connection test
     if integration.get("status") == "connected":
         return {"success": True, "message": f"{provider.title()} connection is healthy"}
@@ -5478,7 +6037,7 @@ async def generate_simulation(workspace_id: str = Depends(get_current_workspace_
     industry = profile.get("industry", "other")
     result = await generate_simulation_data(industry, workspace_id)
     
-    await log_activity("system", "Simulation data generated", f"Generated {industry} operational data", "simulation", "system")
+    await log_activity("system", "Simulation data generated", f"Generated {industry} operational data", "simulation", "system", workspace_id=workspace_id)
     
     return result
 
@@ -5494,7 +6053,7 @@ async def clear_simulation(workspace_id: str = Depends(get_current_workspace_id)
         "activities": (await activity_col.delete_many({"is_simulation": True, "workspace_id": workspace_id})).deleted_count,
     }
     
-    await log_activity("system", "Simulation data cleared", "All simulation data removed", "simulation", "system")
+    await log_activity("system", "Simulation data cleared", "All simulation data removed", "simulation", "system", workspace_id=workspace_id)
     
     return {"success": True, "deleted": deleted_counts}
 
@@ -5600,8 +6159,12 @@ async def google_oauth_start(
     return_to: Optional[str] = None,
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
 ):
     """Kick off the Authorization Code Flow.
+
+    Leader+ only: the connection is the whole workspace's mailbox (same
+    rule as DELETE /api/connect/providers/{provider}).
 
     The frontend hits this with a Bearer token (so we know the
     workspace+user) and then sends the user's browser to ``auth_url``.
@@ -5684,6 +6247,12 @@ def _frontend_base_url() -> str:
 # Keeps /start + the callback from ever building a redirect to an
 # arbitrary attacker-supplied path (open redirect via ?return_to=).
 # Absolute URLs, protocol-relative (//evil), hosts, and unknown paths → default.
+#
+# The web app's integrations UI (Quantro Connect) lives in Settings →
+# Integrations and starts OAuth with return_to="/settings" (Settings opens
+# on that tab). "/connect" is the pre-merge page: the SPA redirects it —
+# query string included — to /settings/integrations, so keep it allowed
+# for OAuth states and links created before the merge.
 ALLOWED_OAUTH_RETURN_PATHS = {
     "/connect",
     "/actions",
@@ -5729,6 +6298,29 @@ def _safe_oauth_error_code(raw: Optional[str]) -> str:
     return code if code in _KNOWN_OAUTH_ERROR_CODES else "oauth_error"
 
 
+async def _consume_callback_state(provider: str, mongo_col, state: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Consume the OAuth ``state`` row for a provider callback, if any.
+
+    Called BEFORE the callback looks at ``?error=``: when the user presses
+    Cancel on the consent screen the provider still sends ``state`` back,
+    and the row tells us which page started the flow (Settings →
+    Integrations sends ``/settings``). Every exit — error, expired state,
+    success — must bounce there, not to the Welcome onboarding default.
+    Consuming it also makes a cancelled state unusable. A store failure
+    is logged and treated as "no state" (the callback then bounces with
+    ``invalid_state`` instead of a raw 500 on the API domain).
+    """
+    if not state:
+        return None
+    try:
+        return await secrets_store.consume_oauth_state(
+            provider=provider, mongo_col=mongo_col, state=state,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{provider}_oauth_callback] could not read OAuth state: {type(exc).__name__}")
+        return None
+
+
 @app.get("/api/integrations/google/callback")
 async def google_oauth_callback(
     request: Request,
@@ -5756,20 +6348,22 @@ async def google_oauth_callback(
             status_code=500,
         )
     base_redirect = fe
-    return_path = DEFAULT_OAUTH_RETURN_PATH  # updated once we trust state_doc below
+    return_path = DEFAULT_OAUTH_RETURN_PATH  # only when there is no usable state
 
     def _bounce(qs: str) -> RedirectResponse:
         target = base_redirect + return_path + ("?" + qs if qs else "")
         return RedirectResponse(url=target, status_code=303)
 
+    # Read the state first (even on ?error=) so every outcome returns to
+    # the page that started the flow; return_to is allowlist-sanitized.
+    state_doc = await _consume_callback_state("google", google_oauth_state_col, state)
+    if state_doc:
+        return_path = _sanitize_return_to(state_doc.get("return_to"))
+
     if error:
         return _bounce(f"google_connected=error&reason={_safe_oauth_error_code(error)}")
     if not code or not state:
         return _bounce("google_connected=error&reason=missing_code_or_state")
-
-    state_doc = await secrets_store.consume_oauth_state(
-        provider="google", mongo_col=google_oauth_state_col, state=state,
-    )
     if not state_doc:
         return _bounce("google_connected=error&reason=invalid_state")
 
@@ -5780,12 +6374,12 @@ async def google_oauth_callback(
     redirect_uri = state_doc.get("redirect_uri") or goog.resolve_redirect_uri(str(request.base_url))
     workspace_id = state_doc.get("workspace_id")
     user_id = state_doc.get("user_id")
-    return_to = _sanitize_return_to(state_doc.get("return_to"))
-    return_path = return_to  # now safe to use the real destination
+    return_to = return_path
 
     try:
-        creds, profile = goog.exchange_code_for_tokens(
-            code, redirect_uri, code_verifier=state_doc.get("code_verifier")
+        creds, profile = await asyncio.to_thread(
+            goog.exchange_code_for_tokens,
+            code, redirect_uri, code_verifier=state_doc.get("code_verifier"),
         )
     except Exception as exc:  # noqa: BLE001
         # Log the real exception server-side only — never put exception
@@ -5901,7 +6495,7 @@ async def _load_google_credentials(workspace_id: str):
         expires_at=doc.get("expires_at"),
         scopes=doc.get("scopes"),
     )
-    if goog.maybe_refresh(creds):
+    if await asyncio.to_thread(goog.maybe_refresh, creds):
         # Persist the rotated access token + new expiry. Refresh tokens
         # rarely change but we still re-encrypt to be safe.
         new_expiry = creds.expiry
@@ -5948,7 +6542,7 @@ async def google_oauth_sync(
     counts = {"emails": 0, "events": 0}
 
     try:
-        emails = goog.fetch_recent_gmail(creds, limit=50)
+        emails = await asyncio.to_thread(goog.fetch_recent_gmail, creds, limit=50)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Gmail fetch failed: {exc}") from exc
 
@@ -5986,7 +6580,7 @@ async def google_oauth_sync(
         counts["emails"] += 1
 
     try:
-        events = goog.fetch_upcoming_calendar(creds, days=30)
+        events = await asyncio.to_thread(goog.fetch_upcoming_calendar, creds, days=30)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Calendar fetch failed: {exc}") from exc
 
@@ -6080,9 +6674,9 @@ async def _disconnect_google_workspace(workspace_id: str, user_id: Optional[str]
     refresh = goog.decrypt_token(doc.get("refresh_token"))
     access = goog.decrypt_token(doc.get("access_token"))
     if refresh:
-        goog.revoke_token(refresh)
+        await asyncio.to_thread(goog.revoke_token, refresh)
     elif access:
-        goog.revoke_token(access)
+        await asyncio.to_thread(goog.revoke_token, access)
 
     await secrets_store.delete_connection(
         provider="google", workspace_id=workspace_id, mongo_col=google_integrations_col,
@@ -6125,6 +6719,7 @@ async def _disconnect_google_workspace(workspace_id: str, user_id: Optional[str]
 async def google_oauth_disconnect(
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
 ):
     return await _disconnect_google_workspace(workspace_id, user.user_id)
 
@@ -6169,6 +6764,7 @@ async def microsoft_oauth_start(
     return_to: Optional[str] = None,
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
 ):
     if not msoa.is_oauth_configured():
         raise HTTPException(
@@ -6189,7 +6785,7 @@ async def microsoft_oauth_start(
         created_at=datetime.now(timezone.utc),
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
     )
-    auth_url = msoa.build_authorization_url(state=state, redirect_uri=redirect_uri)
+    auth_url = await asyncio.to_thread(msoa.build_authorization_url, state=state, redirect_uri=redirect_uri)
     return {"auth_url": auth_url, "state": state}
 
 
@@ -6215,20 +6811,22 @@ async def microsoft_oauth_callback(
             status_code=500,
         )
     base_redirect = fe
-    return_path = DEFAULT_OAUTH_RETURN_PATH
+    return_path = DEFAULT_OAUTH_RETURN_PATH  # only when there is no usable state
 
     def _bounce(qs: str) -> RedirectResponse:
         target = base_redirect + return_path + ("?" + qs if qs else "")
         return RedirectResponse(url=target, status_code=303)
 
+    # Same as Google: read the state before ?error= so a cancel from
+    # Settings → Integrations returns to /settings, not /welcome/inbox.
+    state_doc = await _consume_callback_state("microsoft", microsoft_oauth_state_col, state)
+    if state_doc:
+        return_path = _sanitize_return_to(state_doc.get("return_to"))
+
     if error:
         return _bounce(f"microsoft_connected=error&reason={_safe_oauth_error_code(error)}")
     if not code or not state:
         return _bounce("microsoft_connected=error&reason=missing_code_or_state")
-
-    state_doc = await secrets_store.consume_oauth_state(
-        provider="microsoft", mongo_col=microsoft_oauth_state_col, state=state,
-    )
     if not state_doc:
         return _bounce("microsoft_connected=error&reason=invalid_state")
     expires = state_doc.get("expires_at")
@@ -6238,13 +6836,12 @@ async def microsoft_oauth_callback(
     redirect_uri = state_doc.get("redirect_uri") or msoa.resolve_redirect_uri(str(request.base_url))
     workspace_id = state_doc.get("workspace_id")
     user_id = state_doc.get("user_id")
-    return_to = _sanitize_return_to(state_doc.get("return_to"))
-    return_path = return_to
+    return_to = return_path
 
     try:
         requested_scopes = state_doc.get("requested_scopes") or None
-        token_payload, profile = msoa.exchange_code_for_tokens(
-            code, redirect_uri, scopes=requested_scopes,
+        token_payload, profile = await asyncio.to_thread(
+            msoa.exchange_code_for_tokens, code, redirect_uri, scopes=requested_scopes,
         )
     except Exception as exc:  # noqa: BLE001
         print(f"[microsoft_oauth_callback] token exchange failed for workspace={workspace_id}: {exc}")
@@ -6337,7 +6934,8 @@ async def _load_microsoft_credentials(workspace_id: str) -> Tuple[Optional[str],
         try:
             # Preserve incremental Action scopes (Mail.Send / Calendars.ReadWrite)
             # — refreshing with base _graph_scopes() alone drops writes after ~1h.
-            fresh = msoa.refresh_access_token(
+            fresh = await asyncio.to_thread(
+                msoa.refresh_access_token,
                 refresh_plain,
                 scopes=msoa.normalize_refresh_scopes(doc.get("scopes")),
             )
@@ -6379,7 +6977,7 @@ async def _perform_microsoft_sync_for_workspace(workspace_id: str) -> Dict[str, 
     counts = {"emails": 0, "events": 0}
     now = datetime.now(timezone.utc)
     try:
-        emails = msoa.fetch_recent_outlook(access, limit=50)
+        emails = await asyncio.to_thread(msoa.fetch_recent_outlook, access, limit=50)
         for m in emails:
             await inbox_col.update_one(
                 {"workspace_id": workspace_id, "ms_id": m["ms_id"]},
@@ -6397,7 +6995,7 @@ async def _perform_microsoft_sync_for_workspace(workspace_id: str) -> Dict[str, 
                 upsert=True,
             )
             counts["emails"] += 1
-        events = msoa.fetch_upcoming_outlook_events(access)  # env window + pagination
+        events = await asyncio.to_thread(msoa.fetch_upcoming_outlook_events, access)  # env window + pagination
         cal_metrics = {
             "inserted": 0, "updated": 0, "unchanged": 0,
             "cancelled": 0, "possible_duplicates": 0, "events": 0,
@@ -6555,6 +7153,7 @@ async def _disconnect_microsoft_workspace(workspace_id: str, user_id: Optional[s
 async def microsoft_oauth_disconnect(
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
 ):
     return await _disconnect_microsoft_workspace(workspace_id, user.user_id)
 
@@ -6580,6 +7179,7 @@ async def toggle_auto_sync(
     req: AutoSyncToggleRequest,
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
 ):
     """Pause or resume the periodic sync for a connected integration.
 
@@ -6772,10 +7372,6 @@ async def complete_welcome_onboarding(
 # at CALL time, not at function-definition time, so the forward
 # reference here is safe.
 
-def _backend_public_url() -> Optional[str]:
-    return (os.environ.get("BACKEND_PUBLIC_URL") or "").strip() or None
-
-
 google_adapter = GoogleAdapter(
     google_integrations_col, goog, _perform_google_sync_for_workspace, _disconnect_google_workspace,
     secrets_store=secrets_store,
@@ -6784,10 +7380,8 @@ microsoft_adapter = MicrosoftAdapter(
     microsoft_integrations_col, msoa, _perform_microsoft_sync_for_workspace, _disconnect_microsoft_workspace,
     secrets_store=secrets_store,
 )
-# Keep Facturapi adapter for legacy webhook + vault compatibility only —
-# it is NOT registered in Connect (replaced by Quantro OS "Facturación").
-facturapi_adapter = FacturapiAdapter(facturapi_connections_col, facturapi_webhook_events_col, _backend_public_url, log_audit_fn=log_audit)
-quantro_invoicing_adapter = QuantroInvoicingAdapter()
+# Flow workspace → Quantro OS organization (OS requires organization_id).
+quantro_invoicing_adapter = QuantroInvoicingAdapter(org_resolver=workspace_to_org_id)
 quantro_internal_adapter = QuantroInternalAdapter()
 
 register_provider(google_adapter)
@@ -6815,6 +7409,7 @@ action_executor = ActionExecutor(
         "calendar_col": calendar_col,
         "agents_col": agents_col,
         "onboarding_col": onboarding_col,
+        "inbox_col": inbox_col,
         "log_activity": log_activity,
         "google_integrations_col": google_integrations_col,
         "microsoft_integrations_col": microsoft_integrations_col,
@@ -6822,10 +7417,20 @@ action_executor = ActionExecutor(
         "load_microsoft_credentials": _load_microsoft_credentials,
         "goog_module": goog,
         "msoa_module": msoa,
-        "facturapi_adapter": facturapi_adapter,
         "quantro_invoicing_adapter": quantro_invoicing_adapter,
     },
 )
+
+
+@app.exception_handler(sb_rest.SupabaseStoreError)
+async def supabase_store_error_handler(request: Request, exc: sb_rest.SupabaseStoreError):
+    """A Supabase-primary store could not read/write. 503 (retryable) instead
+    of a silent Mongo fallback or a dropped write. Never includes row data."""
+    print(f"[storage] {request.method} {request.url.path}: {exc}")
+    return JSONResponse(
+        status_code=503,
+        content={"error": "storage_unavailable", "message": "Storage temporarily unavailable. Please retry."},
+    )
 
 
 @app.exception_handler(QuantroError)
@@ -6879,34 +7484,6 @@ async def connect_disconnect_provider(
     return await connect_service.disconnect(workspace_id, provider)
 
 
-class FacturapiConnectRequest(BaseModel):
-    secret_key: str
-
-
-@app.post("/api/connect/providers/facturapi/connect")
-async def connect_facturapi(
-    req: FacturapiConnectRequest,
-    workspace_id: str = Depends(get_current_workspace_id),
-    _m: dict = Depends(require_role("leader")),
-):
-    """Deprecated — fiscal SoT is Quantro OS (Connect provider: Facturación).
-
-    Kept so older clients get a clear 410 instead of silently writing a
-    Facturapi secret into Flow. Historical migrations / webhook routes
-    remain for data compatibility.
-    """
-    raise HTTPException(
-        status_code=410,
-        detail={
-            "error": "deprecated",
-            "message": (
-                "Facturapi connect was removed from Quantro Flow. "
-                "Use Connect → Facturación (Quantro OS service credentials)."
-            ),
-        },
-    )
-
-
 @app.get("/api/connect/providers/google/request-permission")
 async def connect_google_request_permission(
     request: Request,
@@ -6914,6 +7491,7 @@ async def connect_google_request_permission(
     return_to: Optional[str] = None,
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
 ):
     """Incremental Google authorization for one Action's write scope —
     the "Grant permission" flow. Reuses the exact same state-doc +
@@ -6955,6 +7533,7 @@ async def connect_microsoft_request_permission(
     return_to: Optional[str] = None,
     workspace_id: str = Depends(get_current_workspace_id),
     user: User = Depends(get_current_user),
+    _m: dict = Depends(require_role("leader")),
 ):
     """Incremental Microsoft consent for Action write scopes (Mail.Send /
     Calendars.ReadWrite). Connected Limited → Grant → OAuth → Connected.
@@ -6972,8 +7551,9 @@ async def connect_microsoft_request_permission(
     redirect_uri = msoa.resolve_redirect_uri(base_url)
     state = uuid.uuid4().hex
     requested_scopes = msoa.scopes_for_incremental([scope])
-    auth_url = msoa.build_incremental_authorization_url(
-        state=state, redirect_uri=redirect_uri, additional_scopes=[scope]
+    auth_url = await asyncio.to_thread(
+        msoa.build_incremental_authorization_url,
+        state=state, redirect_uri=redirect_uri, additional_scopes=[scope],
     )
     await secrets_store.put_oauth_state(
         provider="microsoft",
@@ -6988,28 +7568,6 @@ async def connect_microsoft_request_permission(
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
     )
     return {"auth_url": auth_url, "state": state}
-
-
-# ─── Facturapi webhook receiver ────────────────────────────────────────
-
-@app.post("/api/webhooks/facturapi/{connection_id}/{webhook_token}")
-async def facturapi_webhook_receiver(connection_id: str, webhook_token: str, request: Request):
-    """No @app-level auth dependency — Facturapi calls this directly.
-    Authenticity comes from the high-entropy webhook_token embedded in
-    the URL path (generated per-connection, see
-    FacturapiAdapter._register_webhook) plus, when available, the
-    Facturapi-Signature header verified against Facturapi's own
-    validate-signature endpoint. Unknown connection / bad token get a
-    plain 404 (don't help an attacker distinguish "wrong token" from
-    "no such endpoint"); everything else — including malformed/
-    duplicate events, which ARE legitimate Facturapi traffic — gets a
-    2xx so Facturapi doesn't retry-storm us."""
-    raw_body = await request.body()
-    signature = request.headers.get("Facturapi-Signature")
-    result = await facturapi_adapter.handle_webhook(connection_id, webhook_token, raw_body, signature)
-    if result.get("reason") in ("unknown_connection", "invalid_token"):
-        raise HTTPException(status_code=404, detail="Not found")
-    return result
 
 
 # ─── Quantro Actions API ────────────────────────────────────────────────

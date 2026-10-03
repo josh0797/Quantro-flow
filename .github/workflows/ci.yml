@@ -38,13 +38,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt pytest pytest-asyncio httpx
 
-      - name: Phase 1–4 + 6 identity / OAuth / actions / Facturapi / inbox
+      - name: Phase 1–3 + 6 identity / OAuth / actions / inbox
         run: |
           PYTHONPATH=backend pytest \
             test_phase1_identity_sot.py \
             test_phase2_oauth_secrets.py \
             test_phase3_actions_postgres.py \
-            test_phase4_facturapi_connect.py \
             test_phase6_inbox_items.py \
             -q
 
@@ -63,7 +62,7 @@ jobs:
           MONGO_URL: mongodb://localhost:27017
           DB_NAME: quantro_test
         run: |
-          PYTHONPATH=. python -c "import google_oauth; import microsoft_oauth; import provider_secrets_store; import product_domain_store; import actions.store"
+          PYTHONPATH=. python -c "import google_oauth; import microsoft_oauth; import provider_secrets_store; import product_domain_store; import actions.store; import doc_store; import mongo_legacy; import storage_flags; import scripts.mongo_to_supabase; import scripts.fix_activity_workspace"
 
   frontend:
     name: Frontend

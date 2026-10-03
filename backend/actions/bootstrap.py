@@ -3,8 +3,8 @@ Registers every Action definition. Called once at server startup
 (see server.py's lifespan). Risk levels follow the task spec's own
 examples verbatim: read/list -> low, internal creates -> low, an
 Action that reaches a real external system (send an email, create a
-calendar event on Google/Microsoft) -> medium, issuing a CFDI -> high,
-cancelling one -> critical.
+calendar event on Google/Microsoft) -> medium. Flow never issues or
+cancels CFDI: invoicing is read-only against Quantro OS.
 """
 from __future__ import annotations
 
@@ -17,10 +17,6 @@ from .registry import register_action
 
 _STR = {"type": "string"}
 _STR_REQ = {"type": "string", "required": True}
-_NUM_REQ = {"type": "number", "required": True}
-_ARR_REQ = {"type": "array", "required": True}
-_OBJ_REQ = {"required": True}  # customer/address can be either an object or an id string per Facturapi's API
-_ANY = {}
 
 
 def register_all_actions() -> None:
@@ -109,8 +105,11 @@ def register_all_actions() -> None:
     register_action(ActionDefinition(
         action_id="quantro_invoicing.invoice.prepare_reply", provider="quantro_invoicing",
         name="Prepare invoice email reply",
-        description="Build a Gmail/Outlook reply payload from Quantro OS invoice metadata.",
-        input_schema={"invoice_id": _STR, "q": _STR, "to": _STR, "channel": _STR},
+        description=(
+            "Build a Gmail/Outlook reply payload from Quantro OS invoice metadata — "
+            "only for the invoice's own customer email."
+        ),
+        input_schema={"invoice_id": _STR, "q": _STR, "to": _STR_REQ, "channel": _STR},
         risk_level=RiskLevel.LOW, handler=quantro_invoicing_handlers.invoice_prepare_reply,
         idempotent=True, minimum_role="member",
     ))

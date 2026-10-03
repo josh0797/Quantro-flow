@@ -28,7 +28,7 @@ Safety guarantees
   left off. No row is updated; only inserted-if-missing.
 * **Granular --table flag.** You can run only the table you want
   (``members``, ``invites``, ``audit``, ``provider_connections``,
-  ``facturapi_connections``, ``webhook_events``, ``integrations_config``,
+  ``integrations_config``,
   ``action_executions``, ``automation_policies``, ``action_policies``,
   ``inbox_items``, ``activity_events``, ``content_items``, ``content_templates``,
   ``contacts``, ``calendar_events``, ``all``).
@@ -865,175 +865,9 @@ async def migrate_action_policies(
 
 
 
-# ── Phase 4: Facturapi + webhook inbox + integrations_config ──────────
-async def migrate_facturapi_connections(
-    db, sb: SupabaseClient, ws_org: Dict[str, str], reporter: Reporter, *,
-    execute: bool, limit: Optional[int],
-) -> None:
-    """Copy facturapi_connections → provider_connections (provider=facturapi).
-
-    Ciphertext copied as-is. Never logs secret/webhook token values.
-    """
-    print("\n--- facturapi_connections → provider_connections (facturapi) ---")
-    seen = 0
-    dry_seen: set = set()
-    provider = "facturapi"
-
-    def _iso(value: Any) -> Optional[str]:
-        return _iso_ts(value)
-
-    cursor = db["facturapi_connections"].find({})
-    async for row in cursor:
-        if limit and seen >= limit:
-            break
-        seen += 1
-        wid = row.get("workspace_id")
-        if not wid:
-            reporter.bump("facturapi_connections", "skip:no_workspace")
-            continue
-
-        status, body = await sb.get(
-            "/rest/v1/provider_connections",
-            {
-                "workspace_id": f"eq.{wid}",
-                "provider": f"eq.{provider}",
-                "select": "id",
-                "limit": "1",
-            },
-        )
-        if status == 200 and isinstance(body, list) and body:
-            print(f"  [skip:duplicate] facturapi ws={wid}")
-            reporter.bump("facturapi_connections", "skip:duplicate")
-            continue
-        if wid in dry_seen:
-            reporter.bump("facturapi_connections", "skip:duplicate_in_run")
-            continue
-
-        org_id = ws_org.get(wid) or (DEFAULT_ORG_ID or None)
-        meta: Dict[str, Any] = {}
-        if row.get("last_error") is not None:
-            meta["last_error"] = row.get("last_error")
-
-        payload: Dict[str, Any] = {
-            "workspace_id": wid,
-            "provider": provider,
-            "org_id": org_id if org_id and is_uuid(org_id) else None,
-            "connection_id": row.get("connection_id"),
-            "environment": row.get("environment"),
-            "organization_id": row.get("organization_id"),
-            "legal_name": row.get("legal_name"),
-            "is_production_ready": row.get("is_production_ready"),
-            "timezone": row.get("timezone"),
-            "api_key_enc": row.get("secret_key_encrypted"),
-            "webhook_id": row.get("webhook_id"),
-            "webhook_token_enc": row.get("webhook_token_encrypted"),
-            "webhook_secret_enc": row.get("webhook_signing_secret_encrypted"),
-            "connected": (row.get("status") == "connected"),
-            "status": row.get("status"),
-            "connected_at": _iso(row.get("connected_at")),
-            "updated_at": _iso(row.get("updated_at")),
-            "meta": meta,
-        }
-        if payload["org_id"] is None:
-            payload.pop("org_id")
-
-        hint = (row.get("legal_name") or row.get("organization_id") or "?")[:40]
-        if not execute:
-            print(f"  [dry] would upsert facturapi ws={wid} org={hint}")
-            reporter.bump("facturapi_connections", "dry:would_insert")
-            dry_seen.add(wid)
-            continue
-
-        status, body = await sb.post(
-            "/rest/v1/provider_connections?on_conflict=workspace_id,provider",
-            payload,
-            prefer="resolution=merge-duplicates,return=minimal",
-        )
-        if status < 400:
-            print(f"  [ok] upserted facturapi ws={wid} org={hint}")
-            reporter.bump("facturapi_connections", "upserted")
-            dry_seen.add(wid)
-        else:
-            print(f"  [error:{status}] facturapi ws={wid} body={str(body)[:160]}")
-            reporter.bump("facturapi_connections", f"error:{status}")
-            reporter.error(
-                "facturapi_connections", wid, f"http {status}: {str(body)[:120]}",
-            )
-
-
-async def migrate_webhook_events(
-    db, sb: SupabaseClient, reporter: Reporter, *,
-    execute: bool, limit: Optional[int],
-) -> None:
-    """Copy facturapi_webhook_events → webhook_events."""
-    print("\n--- facturapi_webhook_events → webhook_events ---")
-    seen = 0
-    dry_seen: set = set()
-    provider = "facturapi"
-    cursor = db["facturapi_webhook_events"].find({})
-    async for row in cursor:
-        if limit and seen >= limit:
-            break
-        seen += 1
-        eid = row.get("event_id")
-        wid = row.get("workspace_id")
-        if not eid or not wid:
-            reporter.bump("webhook_events", "skip:missing_key")
-            continue
-
-        status, body = await sb.get(
-            "/rest/v1/webhook_events",
-            {
-                "provider": f"eq.{provider}",
-                "event_id": f"eq.{eid}",
-                "select": "id",
-                "limit": "1",
-            },
-        )
-        if status == 200 and isinstance(body, list) and body:
-            print(f"  [skip:duplicate] event_id={eid}")
-            reporter.bump("webhook_events", "skip:duplicate")
-            continue
-        if eid in dry_seen:
-            reporter.bump("webhook_events", "skip:duplicate_in_run")
-            continue
-
-        payload = {
-            "workspace_id": wid,
-            "provider": provider,
-            "connection_id": row.get("connection_id"),
-            "event_id": eid,
-            "event_type": row.get("event_type"),
-            "payload": {"summary": row.get("payload_summary") or {}},
-            "headers_meta": {
-                "livemode": row.get("livemode"),
-                "signature_valid": row.get("signature_valid"),
-            },
-            "received_at": _iso_ts(row.get("received_at")),
-            "status": "received",
-        }
-
-        if not execute:
-            print(f"  [dry] would insert event_id={eid} type={row.get('event_type')}")
-            reporter.bump("webhook_events", "dry:would_insert")
-            dry_seen.add(eid)
-            continue
-
-        status, body = await sb.post(
-            "/rest/v1/webhook_events",
-            payload,
-            prefer="return=minimal",
-        )
-        if status < 400:
-            print(f"  [ok] inserted event_id={eid}")
-            reporter.bump("webhook_events", "upserted")
-            dry_seen.add(eid)
-        else:
-            print(f"  [error:{status}] event_id={eid} body={str(body)[:160]}")
-            reporter.bump("webhook_events", f"error:{status}")
-            reporter.error("webhook_events", eid, f"http {status}: {str(body)[:120]}")
-
-
+# ── Phase 4: integrations_config ──────────────────────────────────────
+# (The customer-owned Facturapi connections and their webhook receipts were
+# retired on 2026-09-30 and are no longer backfilled.)
 async def migrate_integrations_config(
     db, sb: SupabaseClient, reporter: Reporter, *,
     execute: bool, limit: Optional[int],
@@ -1455,14 +1289,6 @@ async def main(args: argparse.Namespace) -> None:
         await migrate_action_policies(
             db, sb, reporter, execute=args.execute, limit=args.limit,
         )
-    if table in ("facturapi_connections", "all"):
-        await migrate_facturapi_connections(
-            db, sb, ws_org, reporter, execute=args.execute, limit=args.limit,
-        )
-    if table in ("webhook_events", "all"):
-        await migrate_webhook_events(
-            db, sb, reporter, execute=args.execute, limit=args.limit,
-        )
     if table in ("integrations_config", "all"):
         await migrate_integrations_config(
             db, sb, reporter, execute=args.execute, limit=args.limit,
@@ -1511,7 +1337,7 @@ def parse_args() -> argparse.Namespace:
         "--table",
         choices=[
             "members", "invites", "audit", "provider_connections",
-            "facturapi_connections", "webhook_events", "integrations_config",
+            "integrations_config",
             "action_executions", "automation_policies", "action_policies",
             "inbox_items", "activity_events", "content_items", "content_templates",
             "contacts", "calendar_events", "all",

@@ -85,3 +85,17 @@ def test_frontend_public_url_apex_normalizes_to_www():
     raw = "https://quantroflow.cloud"
     normalized = "https://www.quantroflow.cloud" if raw == "https://quantroflow.cloud" else raw
     assert normalized == "https://www.quantroflow.cloud"
+
+
+def test_real_allowlist_keeps_settings_and_legacy_connect_paths():
+    """The web app returns Connect OAuth flows to /settings (Settings →
+    Integrations) and redirects the legacy /connect page there. Both must
+    stay on the real allowlist, or the callback falls back to
+    /welcome/inbox and drops an existing user into the onboarding flow."""
+    import server as srv
+
+    assert srv._sanitize_return_to("/settings") == "/settings"
+    assert srv._sanitize_return_to("/connect") == "/connect"
+    assert srv._sanitize_return_to("/welcome/inbox") == "/welcome/inbox"
+    # Query strings are still rejected — the SPA must not rely on them.
+    assert srv._sanitize_return_to("/settings?tab=integrations") == srv.DEFAULT_OAUTH_RETURN_PATH

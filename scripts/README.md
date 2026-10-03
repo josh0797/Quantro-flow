@@ -1,3 +1,8 @@
+> **Mongo exit:** use `backend/scripts/mongo_to_supabase.py` instead (ships in
+> the image, runs on the Fly machine, covers every collection, idempotent,
+> dry-run by default) — see `docs/mongo-exit-runbook.md`. The script below is
+> the older Phase 7c one-shot and is kept for reference only.
+
 # Backfill MongoDB → Supabase
 
 Scripts para Phase 7c. **Uso bajo demanda únicamente** — no corren en boot ni en CI.

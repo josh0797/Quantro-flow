@@ -84,7 +84,7 @@ QUANTRO_INBOX_MONGO_MIRROR=0
 
 `QUANTRO_INBOX_PRIMARY` is **independent** of Phase 1 `QUANTRO_DB_PRIMARY`,
 Phase 2 `QUANTRO_SECRETS_PRIMARY`, Phase 3 `QUANTRO_ACTIONS_PRIMARY`, and
-Phase 4 Facturapi connect flags.
+Phase 4 `QUANTRO_INTEGRATIONS_CONFIG_PRIMARY`.
 
 ### Behaviour matrix
 

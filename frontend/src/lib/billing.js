@@ -32,25 +32,40 @@ export const TEST_USERS = [
 export const TEST_USER_LIMIT = 15000;
 
 // ---------- AI CREDITS (USD-based, real cost per request) ----------
-// Each plan ships with a fixed monthly bag of "credits" measured in USD.
-// Every request consumes its real Stripe-grade cost based on the model's
-// per-token pricing. When the user's bag hits 0 we fall back to the
-// user-supplied OpenAI API key (if configured); otherwise smart features
-// are blocked.
+// Pro and Enterprise ship with a fixed monthly bag of "credits" measured in
+// USD; Essential includes no Quantro AI credits (a balance already stored
+// on an Essential profile is still honoured until it runs out — never
+// clawed back). Every request consumes its real Stripe-grade cost based on
+// the model's per-token pricing. A workspace that connected its OWN OpenAI
+// key (Settings → Integrations) runs every AI request on that key instead:
+// OpenAI bills the customer and no Quantro credits are consumed. Without
+// credits and without an own key, smart features are blocked.
 export const PLAN_CREDITS = {
-  essential: 5,    // $5 USD / month
+  essential: 0,    // no Quantro AI credits included
   pro: 10,         // $10 USD / month
   enterprise: 20,  // $20 USD / month
 };
 
+/**
+ * Pricing-card bullet for the AI credits a plan includes. Plans with a bag
+ * get the usual "$N USD en créditos IA / mes" string; a plan with none gets
+ * an explicit "not included" entry ({ label, included: false }) so the card
+ * never renders "$0 USD en créditos IA / mes".
+ */
+export function planCreditsFeature(planKey) {
+  const credits = Number(PLAN_CREDITS[planKey] || 0);
+  if (credits > 0) return `$${credits} USD en créditos IA / mes`;
+  return { label: 'Créditos IA no incluidos', included: false };
+}
+
 // Internal QA accounts always get the top tier in credits + calls.
 export const TEST_USER_CREDITS = 20;
 
-// Per-1M-tokens pricing for every model we route through Quantro's key.
-// When the user runs on Quantro credits we ALWAYS force gpt-4o-mini so
-// costs stay predictable. The other entries exist only so the helper
-// can also be reused for the user's own key when we let them pick a
-// model in the future.
+// Per-1M-tokens pricing for every model Flow can call. On Quantro credits
+// we ALWAYS force gpt-4o-mini so costs stay predictable; the other entries
+// are the models a workspace may pick for its own OpenAI key (see
+// OWN_KEY_ALLOWED_MODELS in backend/ai_billing.py), where the cost is
+// informational only (OpenAI bills the customer).
 export const MODEL_PRICING = {
   'gpt-4o-mini':   { inputPer1M: 0.15, outputPer1M: 0.60 },
   // For visibility — not used while consuming Quantro credits.
@@ -60,6 +75,23 @@ export const MODEL_PRICING = {
 
 // The model the backend forces when using Quantro's API key.
 export const QUANTRO_FORCED_MODEL = 'gpt-4o-mini';
+
+// Models a workspace may pick for its OWN OpenAI key (Settings →
+// Integrations). Lock-step with OWN_KEY_ALLOWED_MODELS /
+// OWN_KEY_DEFAULT_MODEL in backend/ai_billing.py (pinned by
+// backend/tests/test_own_openai_key.py): the backend rejects anything else
+// on save and runs legacy values (e.g. "gpt-4-turbo") on the default.
+export const OPENAI_DEFAULT_MODEL = 'gpt-4o-mini';
+export const OPENAI_MODEL_OPTIONS = [
+  { value: 'gpt-4o-mini', labelKey: 'integrations.openai.model_gpt_4o_mini' },
+  { value: 'gpt-4o', labelKey: 'integrations.openai.model_gpt_4o' },
+  { value: 'gpt-4.1-mini', labelKey: 'integrations.openai.model_gpt_4_1_mini' },
+];
+
+/** The model the backend actually uses for a saved own-key model. */
+export function resolveOwnKeyModel(model) {
+  return OPENAI_MODEL_OPTIONS.some((o) => o.value === model) ? model : OPENAI_DEFAULT_MODEL;
+}
 
 /**
  * Compute the real USD cost of an OpenAI request from its token usage.
@@ -107,7 +139,7 @@ export const PLANS = [
       'CRM + Inbox con ejecución automática',
       'AI Coach (limitado)',
       'Automatizaciones básicas',
-      `$${PLAN_CREDITS.essential} USD en créditos IA / mes`,
+      planCreditsFeature('essential'),
       'Contabilidad básica',
       'CFDI 4.0',
     ],
@@ -131,7 +163,7 @@ export const PLANS = [
       'Decisiones + plan de acción',
       'Automatizaciones avanzadas',
       'Multiusuario (3 asientos)',
-      `$${PLAN_CREDITS.pro} USD en créditos IA / mes`,
+      planCreditsFeature('pro'),
       'Contabilidad avanzada',
     ],
     seats: 3,
@@ -151,7 +183,7 @@ export const PLANS = [
       'Multiusuario (10 asientos)',
       'Lean Management completo',
       'Quantro Revenue',
-      `$${PLAN_CREDITS.enterprise} USD en créditos IA / mes`,
+      planCreditsFeature('enterprise'),
       'Onboarding dedicado',
       'Soporte prioritario',
       'Agentes personalizados (próximamente)',
@@ -221,7 +253,13 @@ export function getOpenAIUsageLimit({ email, profile }) {
 }
 
 /**
- * Resolve the user's AI credit state based on profiles + email overrides.
+ * Resolve the user's AI credit state based on profiles + email overrides
+ * and whether the active workspace connected its own OpenAI key
+ * (`workspaceOwnKey`, from GET /api/integrations/openai: status
+ * 'connected' + config.has_api_key). Mirrors
+ * backend/ai_billing.resolve_credits_state(own_key_active=...): the own
+ * key always wins. The legacy profile flags (has_user_api_key,
+ * user_openai_api_key_encrypted) were never written and are ignored.
  *
  * Returns:
  *   {
@@ -229,16 +267,18 @@ export function getOpenAIUsageLimit({ email, profile }) {
  *     used: number,         // consumed so far this cycle
  *     remaining: number,    // total - used (server is the authority)
  *     percent: 0..100,      // for the Progress bar
- *     hasOwnApiKey: bool,   // whether the user has supplied their own key
+ *     hasOwnApiKey: bool,   // the workspace connected its own OpenAI key
  *     source: 'quantro' | 'user_api' | 'blocked',
  *     blocked: bool,        // true ⇒ cannot use smart features
- *     reason: string,
+ *     reason: string,       // 'plan_no_credits' when blocked on a plan
+ *                           // that includes no Quantro credits (Essential)
  *   }
  */
-export function getCreditsState({ email, profile }) {
+export function getCreditsState({ email, profile, workspaceOwnKey = false }) {
   const lcEmail = String(email || '').toLowerCase();
   const isTestUser = lcEmail && TEST_USERS.includes(lcEmail);
   const planKey = (profile?.plan || '').toLowerCase();
+  const planIncludesNoCredits = !isTestUser && planKey in PLAN_CREDITS && PLAN_CREDITS[planKey] <= 0;
   const baseTotal = isTestUser
     ? TEST_USER_CREDITS
     : (planKey in PLAN_CREDITS ? PLAN_CREDITS[planKey] : 0);
@@ -249,21 +289,24 @@ export function getCreditsState({ email, profile }) {
   const remainingRaw = profile?.ai_credits_remaining;
   const remaining = Math.max(0, Number(remainingRaw ?? (total - used)) || 0);
   const percent = total > 0 ? Math.min(100, Math.round((used / total) * 1000) / 10) : 0;
-  const hasOwnApiKey = !!profile?.user_openai_api_key_encrypted || !!profile?.has_user_api_key;
+  const hasOwnApiKey = !!workspaceOwnKey;
 
   let source;
   let blocked = false;
   let reason;
-  if (remaining > 0) {
+  if (hasOwnApiKey) {
+    source = 'user_api';
+    reason = 'workspace_openai_key';
+  } else if (remaining > 0) {
     source = 'quantro';
     reason = 'using_quantro_credits';
-  } else if (hasOwnApiKey) {
-    source = 'user_api';
-    reason = 'using_user_api_key';
   } else {
     source = 'blocked';
     blocked = true;
-    reason = 'no_credits_no_user_key';
+    // Mirrors ai_billing.resolve_credits_state: a plan that includes no
+    // Quantro credits (Essential) gets its own reason so the UI doesn't
+    // tell the user they "used up" credits they were never given.
+    reason = planIncludesNoCredits ? 'plan_no_credits' : 'no_credits_no_user_key';
   }
 
   return { total, used, remaining, percent, hasOwnApiKey, source, blocked, reason };
