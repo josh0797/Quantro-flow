@@ -7,8 +7,9 @@ Pins the owner decision (2026-09-26):
   * Balances already stored on an Essential profile are honoured until they
     run out (no claw-back).
   * Pro ($10) and Enterprise ($20) behave exactly as before.
-  * decrement_ai_credits is still called with the user's own JWT (the
-    Quantro OS migration keeps that call working).
+  * decrement_ai_credits is called with the service-role key, never with the
+    user's JWT (PR #28: EXECUTE is revoked from authenticated afterwards; see
+    tests/test_ai_billing_decrement_service_role.py).
   * backend, frontend billing.js and the reference stripe-webhook agree.
 """
 from __future__ import annotations
@@ -235,22 +236,35 @@ class _FakeAsyncClient:
         return _FakeResponse()
 
 
-async def test_rpc_decrement_credits_still_uses_the_users_jwt(monkeypatch):
+def _jwt_for(sub: str) -> str:
+    import base64
+    import json
+
+    def _b64(obj: Dict[str, Any]) -> str:
+        raw = json.dumps(obj).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    return f"{_b64({'alg': 'HS256', 'typ': 'JWT'})}.{_b64({'sub': sub})}.sig"
+
+
+async def test_rpc_decrement_credits_uses_the_service_role_key(monkeypatch):
     _FakeAsyncClient.calls = []
     monkeypatch.setattr(ai_billing, "SUPABASE_URL", "https://example.supabase.co")
     monkeypatch.setattr(ai_billing, "SUPABASE_ANON_KEY", "anon-key")
     monkeypatch.setattr(ai_billing, "SUPABASE_SERVICE_ROLE_KEY", "service-role-key")
     monkeypatch.setattr(ai_billing.httpx, "AsyncClient", _FakeAsyncClient)
 
-    await ai_billing.rpc_decrement_credits(USER_ID, 0.0123, "user-jwt")
+    user_jwt = _jwt_for(USER_ID)
+    await ai_billing.rpc_decrement_credits(USER_ID, 0.0123, user_jwt)
 
     assert len(_FakeAsyncClient.calls) == 1
     call = _FakeAsyncClient.calls[0]
     assert call["url"] == "https://example.supabase.co/rest/v1/rpc/decrement_ai_credits"
     assert call["json"] == {"p_user_id": USER_ID, "p_amount": 0.0123}
-    assert call["headers"]["Authorization"] == "Bearer user-jwt"
-    assert call["headers"]["apikey"] == "anon-key"
-    assert "service-role-key" not in str(call["headers"])
+    assert call["headers"]["Authorization"] == "Bearer service-role-key"
+    assert call["headers"]["apikey"] == "service-role-key"
+    assert user_jwt not in str(call["headers"])
+    assert "anon-key" not in str(call["headers"])
 
 
 # ---------- lock-step with frontend + reference webhook ---------------
