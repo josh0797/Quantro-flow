@@ -114,7 +114,8 @@ def _declare_membership_tables(fake) -> None:
     fake.specs["invitations"] = TableSpec(
         ["id", "org_id", "email", "role", "token", "accepted", "expires_at", "created_at", "full_name",
          "job_title", "invited_by"])
-    for name in ("org_members", "team_members", "invitations"):
+    fake.specs["organizations"] = TableSpec(["id", "name", "owner_id", "created_at"], not_null=["name"])
+    for name in ("org_members", "team_members", "invitations", "organizations"):
         fake.rows[name] = []
 
 
@@ -128,6 +129,7 @@ def _tm(member_id: str, user_id: Optional[str], role: str, status: str = "active
 async def _org_workspace(server, fake) -> None:
     """Workspace ws_org ↔ Quantro OS org ORG: owner, leader, member."""
     _declare_membership_tables(fake)
+    fake.rows["organizations"].append({"id": ORG, "name": "Acme", "owner_id": "u-owner"})
     await server.workspaces_col.insert_one({"workspace_id": "ws_org", "name": "Acme", "owner_user_id": "u-owner",
                                             "org_id": ORG, "claimed": True})
     for uid, role in (("u-owner", "owner"), ("u-leader", "leader"), ("u-member", "member")):
@@ -236,6 +238,23 @@ async def test_people_os_refusals_become_stable_error_codes(org, answer, status,
     assert detail["message"] == people_os.ERRORS[error][1]   # Flow's own text, never the database's
 
 
+@pytest.mark.parametrize("status, code, error", [
+    (500, "P0002", "member_not_found"),      # PostgREST answers P0* with HTTP 500
+    (401, "PGRST301", "auth_required"),       # expired / invalid JWT
+    (401, None, "auth_required"),
+    (500, "40001", "people_os_unavailable"),
+    (503, None, "people_os_unavailable"),
+    (404, "PGRST202", "people_os_unavailable"),
+    (403, None, "permission_required"),
+    (400, "XX123", "people_os_failed"),
+])
+def test_classify_checks_sqlstates_before_status_buckets(status, code, error):
+    import people_os
+    from supabase_admin import RpcResult
+
+    assert people_os.classify(RpcResult(False, status, None, code, "Team member not found.")).error == error
+
+
 # ── role change / removal ───────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -252,6 +271,14 @@ async def test_role_change_calls_change_member_role_with_the_member_id(org):
     assert lookups and set(lookups) == {JWT}
     cached = await server.workspace_members_col.find_one({"workspace_id": "ws_org", "user_id": "u-member"})
     assert cached["role"] == "viewer"
+
+
+@pytest.mark.asyncio
+async def test_a_member_gone_between_lookup_and_rpc_is_member_not_found(org):
+    fake, _, c = org
+    fake.rpc_handlers["change_member_role"] = lambda body, auth: _err("P0002", "Team member not found.", 500)
+    resp = await c.call("u-owner", "ws_org", "PATCH", "/api/workspaces/ws_org/members/u-member", json={"role": "viewer"})
+    assert resp.status_code == 404 and resp.json()["detail"]["error"] == "member_not_found"
 
 
 @pytest.mark.asyncio
@@ -346,6 +373,84 @@ async def test_cancel_invite_revokes_the_pending_row_only(org):
     assert _direct_membership_writes(fake) == []
 
 
+# ── revoked in Quantro OS = no Flow access ──────────────────────────────
+
+def _drop_org_member(fake, user_id: str) -> None:
+    """What the People OS mirror does on revoke_member_access / delete_member."""
+    fake.rows["org_members"] = [r for r in fake.rows["org_members"] if r["user_id"] != user_id]
+
+
+def _org_member_reads(fake) -> int:
+    return sum(1 for m, route, _ in fake.auth_log if m == "GET" and route == "/rest/v1/org_members")
+
+
+@pytest.mark.asyncio
+async def test_someone_revoked_in_quantro_os_loses_flow_access_despite_the_cache(org):
+    fake, server, c = org
+    await server.users_col.insert_one({"user_id": "u-member", "email": "u-member@example.com",
+                                       "current_workspace_id": "ws_org"})
+    before = await c.call("u-member", "ws_org", "GET", "/api/business-profile")
+    assert before.status_code == 200
+
+    _drop_org_member(fake, "u-member")   # revoked in Mi Equipo › Accesos; Flow's cache still has the doc
+    assert await server.workspace_members_col.find_one({"workspace_id": "ws_org", "user_id": "u-member"})
+
+    scoped = await c.call("u-member", "ws_org", "GET", "/api/business-profile")
+    assert scoped.status_code == 403 and scoped.json()["detail"] == "No workspace access"
+    roster = await c.call("u-member", "ws_org", "GET", "/api/workspaces/ws_org/members")
+    assert roster.status_code == 403
+    switch = await c.call("u-member", "ws_org", "POST", "/api/auth/workspaces/switch", json={"workspace_id": "ws_org"})
+    assert switch.status_code == 403
+    # The stale cache doc and the pointer to the workspace are gone.
+    assert await server.workspace_members_col.find_one({"workspace_id": "ws_org", "user_id": "u-member"}) is None
+    user_doc = await server.users_col.find_one({"user_id": "u-member"})
+    assert "current_workspace_id" not in user_doc
+
+
+@pytest.mark.asyncio
+async def test_a_revoked_member_falls_back_to_their_other_workspace_and_auth_me_hides_the_org(org):
+    fake, server, c = org
+    await server.workspace_members_col.insert_one({"workspace_id": "ws_a", "user_id": "u-member", "role": "member"})
+    for ws in ("ws_a", "ws_org"):
+        await server.business_profile_col.update_one({"workspace_id": ws}, {"$set": {"industry": f"marker-{ws}"}},
+                                                     upsert=True)
+    assert (await c.call("u-member", "ws_org", "GET", "/api/business-profile")).json()["industry"] == "marker-ws_org"
+    _drop_org_member(fake, "u-member")
+    resp = await c.call("u-member", "ws_org", "GET", "/api/business-profile")
+    assert resp.status_code == 200 and resp.json()["industry"] == "marker-ws_a"
+    me = (await c.call("u-member", "ws_a", "GET", "/api/auth/me")).json()
+    assert [w["workspace_id"] for w in me["workspaces"]] == ["ws_a"]
+
+
+@pytest.mark.asyncio
+async def test_require_role_uses_the_quantro_os_role_with_one_org_members_read(org):
+    fake, server, c = org
+    await server.policies_col.insert_one({"workspace_id": "ws_org", "policy_id": "p1", "name": "x"})
+    for row in fake.rows["org_members"]:
+        if row["user_id"] == "u-leader":
+            row["role"] = "viewer"   # demoted in Quantro OS; the cache still says leader
+    reads = _org_member_reads(fake)
+    resp = await c.call("u-leader", "ws_org", "DELETE", "/api/policies/p1")
+    assert resp.status_code == 403 and resp.json()["detail"]["your_role"] == "viewer"
+    assert _org_member_reads(fake) - reads == 1   # get_current_workspace_id's read is reused
+
+
+@pytest.mark.asyncio
+async def test_an_org_members_outage_falls_back_to_the_cache(org):
+    fake, _, c = org
+    fake.drop_table("org_members")   # the read fails (404 PGRST205): unknown, not "not a member"
+    resp = await c.call("u-member", "ws_org", "GET", "/api/business-profile")
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_the_owner_without_an_org_members_row_keeps_access(org):
+    fake, _, c = org
+    _drop_org_member(fake, "u-owner")   # organizations.owner_id still says u-owner
+    resp = await c.call("u-owner", "ws_org", "GET", "/api/workspaces/ws_org/members")
+    assert resp.status_code == 200 and resp.json()["your_role"] == "owner"
+
+
 # ── accept ──────────────────────────────────────────────────────────────
 
 def _preview(kind: str = "team", status: str = "valid"):
@@ -379,9 +484,11 @@ async def test_accept_claims_the_invite_as_the_invitee(org):
 
     resp = await c.call("u-new", "ws_b", "POST", f"/api/invites/{TOKEN}/accept")
     assert resp.status_code == 200, resp.text
-    assert resp.json()["workspace_id"] == "ws_org" and resp.json()["role"] == "member"
+    body = resp.json()
+    assert body["workspace_id"] == "ws_org" and body["role"] == "member" and body["organization_name"] == "Acme"
+    # Accept does not preview again: only the /join page's peek spends a
+    # get_invitation_preview call (one rate-limit bucket for all of Flow).
     assert [(fn, args) for fn, args, _ in fake.rpc_calls] == [
-        ("get_invitation_preview", {"p_token": TOKEN}),
         ("get_invitation_preview", {"p_token": TOKEN}),
         ("accept_team_invite", {"p_token": TOKEN, "p_full_name": None}),
     ]
@@ -394,35 +501,124 @@ async def test_accept_claims_the_invite_as_the_invitee(org):
 @pytest.mark.asyncio
 async def test_a_legacy_invitations_row_is_accepted_with_accept_invitation(org):
     fake, _, c = org
-    fake.rpc_handlers["get_invitation_preview"] = _preview("org")
+    fake.rpc_handlers["accept_team_invite"] = lambda args, auth: FakeResponse(
+        200, {"success": False, "code": "invalid", "error": "Invitación inválida o expirada"})
     fake.rpc_handlers["accept_invitation"] = _accepting(fake, ORG, "u-new")
     resp = await c.call("u-new", "ws_b", "POST", f"/api/invites/{TOKEN}/accept")
     assert resp.status_code == 200 and resp.json()["workspace_id"] == "ws_org"
-    # The argument NAME selects accept_invitation(p_token uuid), never the _token overload.
+    # People OS did not know the token, so the legacy row is tried; the
+    # argument NAME selects accept_invitation(p_token uuid), never the _token overload.
+    assert [fn for fn, _, _ in fake.rpc_calls] == ["accept_team_invite", "accept_invitation"]
     assert fake.rpc_calls[-1] == ("accept_invitation", {"p_token": TOKEN}, JWT)
 
 
-@pytest.mark.parametrize("preview_status, accept_answer, status, error", [
-    ("expired", None, 410, "invite_expired"),
-    ("used", None, 410, "invite_used"),
-    ("invalid", None, 404, "invite_invalid"),
-    ("rate_limited", None, 429, "rate_limited"),
-    ("valid", FakeResponse(200, {"success": False, "code": "email_mismatch", "error": "Esta invitación fue enviada a otro correo"}),
-     403, "email_mismatch"),
-    ("valid", FakeResponse(200, {"success": False, "code": "revoked"}), 410, "invite_revoked"),
-    ("valid", _err("QSEAT", "No seat is free (2 of 2 used).", hint="seat_required"), 409, "seat_required"),
+def _invite_result(code: str) -> FakeResponse:
+    return FakeResponse(200, {"success": False, "code": code, "error": "Esta invitación fue enviada a otro correo"})
+
+
+@pytest.mark.parametrize("accept_answer, status, error, tried_legacy", [
+    (_invite_result("invalid"), 404, "invite_invalid", True),
+    (_invite_result("expired"), 410, "invite_expired", False),
+    (_invite_result("used"), 410, "invite_used", False),
+    (_invite_result("rate_limited"), 429, "rate_limited", False),
+    (_invite_result("email_mismatch"), 403, "email_mismatch", False),
+    (_invite_result("revoked"), 410, "invite_revoked", False),
+    (_err("QSEAT", "No seat is free (2 of 2 used).", hint="seat_required"), 409, "seat_required", False),
 ])
 @pytest.mark.asyncio
-async def test_accept_refusals(org, preview_status, accept_answer, status, error):
+async def test_accept_refusals(org, accept_answer, status, error, tried_legacy):
     fake, server, c = org
-    fake.rpc_handlers["get_invitation_preview"] = _preview("team", preview_status)
     fake.rpc_handlers["accept_team_invite"] = lambda args, auth: accept_answer
+    fake.rpc_handlers["accept_invitation"] = lambda args, auth: _invite_result("invalid")
     resp = await c.call("u-new", "ws_b", "POST", f"/api/invites/{TOKEN}/accept")
     assert resp.status_code == status and resp.json()["detail"]["error"] == error
-    if preview_status != "valid":
-        assert [fn for fn, _, _ in fake.rpc_calls] == ["get_invitation_preview"]
+    assert [fn for fn, _, _ in fake.rpc_calls] == (
+        ["accept_team_invite", "accept_invitation"] if tried_legacy else ["accept_team_invite"])
     assert "otro correo" not in resp.text
     assert await server.workspace_members_col.find_one({"workspace_id": "ws_org", "user_id": "u-new"}) is None
+
+
+@pytest.mark.parametrize("preview_status, status, error", [
+    ("expired", 410, "invite_expired"),
+    ("used", 410, "invite_used"),
+    ("invalid", 404, "invite_invalid"),
+    ("rate_limited", 429, "rate_limited"),
+])
+@pytest.mark.asyncio
+async def test_peek_refusals(org, preview_status, status, error):
+    fake, _, c = org
+    fake.rpc_handlers["get_invitation_preview"] = _preview("team", preview_status)
+    resp = await c.call("u-new", "ws_b", "GET", f"/api/invites/{TOKEN}")
+    assert resp.status_code == status and resp.json()["detail"]["error"] == error
+
+
+@pytest.mark.asyncio
+async def test_invite_lookups_are_throttled_per_user_and_skip_non_tokens(org):
+    import people_os
+
+    fake, _, c = org
+    fake.rpc_handlers["get_invitation_preview"] = _preview("team")
+    # Not a uuid: no People OS token can look like this, so Quantro OS is not asked.
+    junk = await c.call("u-new", "ws_b", "GET", "/api/invites/not-a-token")
+    assert junk.status_code == 404 and junk.json()["detail"]["error"] == "invite_invalid"
+    assert fake.rpc_calls == []
+
+    budget = people_os.INVITE_LIMITS["preview"]
+    for _ in range(budget - 1):
+        assert (await c.call("u-new", "ws_b", "GET", f"/api/invites/{TOKEN}")).status_code == 200
+    over = await c.call("u-new", "ws_b", "GET", f"/api/invites/{TOKEN}")
+    assert over.status_code == 429 and over.json()["detail"]["error"] == "rate_limited"
+    assert len(fake.rpc_calls) == budget - 1   # the refused call never reached Quantro OS
+    # Another user's budget is their own.
+    assert (await c.call("u-b", "ws_b", "GET", f"/api/invites/{TOKEN}")).status_code == 200
+
+    fake.rpc_handlers["accept_team_invite"] = lambda args, auth: _invite_result("invalid")
+    fake.rpc_handlers["accept_invitation"] = lambda args, auth: _invite_result("invalid")
+    for _ in range(people_os.INVITE_LIMITS["accept"]):
+        assert (await c.call("u-x", "ws_b", "POST", f"/api/invites/{TOKEN}/accept")).status_code == 404
+    over = await c.call("u-x", "ws_b", "POST", f"/api/invites/{TOKEN}/accept")
+    assert over.status_code == 429 and over.json()["detail"]["error"] == "rate_limited"
+
+
+def test_throttle_window_slides():
+    import people_os
+
+    t = people_os._Throttle()
+    assert all(t.allow("k", 2, 300, now=n) for n in (0.0, 1.0))
+    assert not t.allow("k", 2, 300, now=299.0)
+    assert t.allow("k", 2, 300, now=300.5)      # the first hit left the window
+
+
+@pytest.mark.asyncio
+async def test_accept_names_a_new_org_workspace_after_the_organization(app):
+    fake, server, RealAsyncClient = app
+    await _tenants(server)
+    _declare_membership_tables(fake)
+    other = "33333333-3333-4333-8333-333333333333"
+    fake.rows["organizations"].append({"id": other, "name": "Globex", "owner_id": "u-globex-owner"})
+    fake.rpc_handlers["accept_team_invite"] = _accepting(fake, other, "u-b", role="member")
+    transport = httpx.ASGITransport(app=server.app, raise_app_exceptions=True)
+    async with RealAsyncClient(transport=transport, base_url="http://test") as http:
+        resp = await Client(server, http).call("u-b", "ws_b", "POST", f"/api/invites/{TOKEN}/accept")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["organization_name"] == "Globex"
+    ws = await server.workspaces_col.find_one({"workspace_id": body["workspace_id"]})
+    # Not "u-b" (the invitee's name): the owner must not land in a workspace named after an employee.
+    assert ws["org_id"] == other and ws["name"] == "Globex" and ws["owner_user_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_sign_in_names_a_new_org_workspace_after_the_organization(app):
+    fake, server, _ = app
+    _declare_membership_tables(fake)
+    org = "55555555-5555-4555-8555-555555555555"
+    fake.rows["organizations"].append({"id": org, "name": "Initech", "owner_id": "u-ini"})
+    fake.rows["org_members"].append({"id": "om-ini", "org_id": org, "user_id": "u-ini", "role": "owner",
+                                     "joined_at": "2026-10-01T00:00:00+00:00"})
+    ws_id = await server.reconcile_supabase_memberships_to_mongo({"user_id": "u-ini", "name": "Pat Doe"})
+    ws = await server.workspaces_col.find_one({"workspace_id": ws_id})
+    assert ws["org_id"] == org and ws["name"] == "Initech"
 
 
 # ── Flow-only workspaces keep Flow's own invites ────────────────────────

@@ -28,8 +28,8 @@ Mi Equipo → Accesos screen and writes its own audit row (`rbac_audit_log`).
 | `POST /api/workspaces/{id}/invites` | `invite_member(p_org_id, p_email, p_role, p_full_name, p_job_title, p_department_id => null, p_company_access => [org])` | `people.invite`; only the owner grants Leader / Accountant (D9 for others); seats (`QSEAT`) and plan (`QPLAN`); one live invite per email |
 | `GET /api/workspaces/{id}/invites` | read `team_members` (status `invited`) + legacy `invitations` (read-only) | RLS: `people.view` |
 | `DELETE /api/workspaces/{id}/invites/{invite_id}` | `revoke_member_access(p_member_id)` on the invited row | `people.manage_access`; legacy `invitations` rows → 409 `legacy_invite_read_only` |
-| `GET /api/invites/{token}` | `get_invitation_preview(p_token)` | token-scoped, no ids |
-| `POST /api/invites/{token}/accept` | `accept_team_invite(p_token, p_full_name => null)` (kind `team`) or `accept_invitation(p_token)` (kind `org`, legacy) — the **invitee's** JWT | confirmed email = invited email, unused, unexpired, inviter still allowed, seats / plan; never a downgrade |
+| `GET /api/invites/{token}` | `get_invitation_preview(p_token)` (only for a uuid token; Flow throttles it per user, see below) | token-scoped, no ids |
+| `POST /api/invites/{token}/accept` | `accept_team_invite(p_token, p_full_name => null)`; when it answers `invalid` (not a People OS token), `accept_invitation(p_token)` (legacy `invitations` row) — the **invitee's** JWT, no preview call | confirmed email = invited email, unused, unexpired, inviter still allowed, seats / plan; never a downgrade; `invite_accept:<uid>` 10 per 5 min |
 | `PATCH /api/workspaces/{id}/members/{user_id}` | `change_member_role(p_member_id, p_role)` | `people.change_role`; Leader / Accountant only by the owner; never one's own role |
 | `DELETE /api/workspaces/{id}/members/{user_id}` | `revoke_member_access(p_member_id)` (default: access ends, the record stays and can be reactivated in Quantro OS) | `people.manage_access`; never oneself |
 | `DELETE /api/workspaces/{id}/members/{user_id}?permanent=true` | `delete_member(p_member_id)` | `people.delete` (Leader default: off) |
@@ -52,7 +52,34 @@ https://www.quantro.technology/?invite=<token>
 value is accepted.) The invitee can also accept it on Flow's
 `/join/<token>` page; after acceptance Flow maps the organization to its
 workspace (creating one, as at sign-in, when the organization has none —
-never the default workspace unless it is the configured default org).
+named after the organization, never after the invitee — and never the
+default workspace unless it is the configured default org).
+
+### Rate limits
+
+`get_invitation_preview` rate-limits per client IP (`invite_preview:<ip>`,
+30 per 5 min) and Flow calls it from its server, so every Flow preview
+shares one bucket. Flow therefore: answers a non-uuid token `invite_invalid`
+without asking Quantro OS; never previews on accept (`accept_team_invite`
+is limited per user by Quantro OS); and allows each user 6 `GET
+/api/invites/{token}` and 10 `POST …/accept` per 5 minutes
+(`people_os.INVITE_LIMITS`, in-process per worker; over it: 429
+`rate_limited`). Keying the preview limit on `auth.uid()` when a JWT is
+present is a Quantro OS (konta) change, not made here.
+
+### Revocation ends Flow access
+
+Flow's `workspace_members` docs are a cache. For an organization workspace
+`_membership_for` asks `org_members` (service role): a row → member with
+that role; no row → **not a member** — revoked or deleted in Quantro OS
+(the mirror deletes the row) — and the stale cache doc (plus the user's
+pointer to the workspace) is dropped. `organizations.owner_id` still makes
+the owner a member without a row. Only when the read fails (no service
+role, no answer, non-200) does Flow fall back to its cache.
+`get_current_workspace_id` (every workspace-scoped endpoint),
+`require_role`, `/api/auth/me` and `/api/auth/workspaces/switch` all go
+through it, so the next request after a revocation is refused (or lands in
+another workspace of the person).
 
 ### Ownership
 
@@ -80,20 +107,22 @@ database's text. The frontend translates each code (es / en) in
 | `not_member` | 403 | `42501` not a member |
 | `duplicate_invite` | 409 | `23505` |
 | `invalid_email` / `invalid_input` | 422 | `22023`, `23514` |
-| `member_not_found` | 404 | `P0002`, or no visible People OS row |
+| `member_not_found` | 404 | `P0002` (PostgREST sends it as HTTP 500: SQLSTATEs are matched before status buckets), or no visible People OS row |
 | `email_required` | 422 | Flow: People OS invitations need an email |
 | `invite_invalid` / `invite_expired` / `invite_used` / `invite_revoked` | 404 / 410 | preview status or `invite_result.code` |
-| `email_mismatch` / `email_unconfirmed` / `auth_required` | 403 | `invite_result.code` (never 401: that signs the user out) |
-| `rate_limited` | 429 | `invite_result.code` / preview |
+| `email_mismatch` / `email_unconfirmed` / `auth_required` | 403 | `invite_result.code`; `auth_required` also for `PGRST301` / `PGRST302` / any 401 (never 401 itself: that signs the user out) |
+| `rate_limited` | 429 | `invite_result.code` / preview / Flow's per-user invite throttle |
 | `ownership_transfer_disabled` / `owner_change_disabled` | 409 | Flow |
 | `legacy_invite_read_only` / `invite_already_accepted` | 409 | Flow |
-| `people_os_unavailable` | 503 | no answer, 5xx, `PGRST202` (function not deployed) |
+| `people_os_unavailable` | 503 | no answer, 5xx without a known SQLSTATE, `PGRST202` (function not deployed) |
 | `people_os_failed` | 502 | anything else |
 
 ## Flags and storage
 
-* Membership reads are unchanged: `_membership_for` reads `org_members`
-  (service role) when `QUANTRO_DB_PRIMARY=supabase`, Flow's docs otherwise.
+* Membership reads: `_membership_for` reads `org_members` (service role)
+  when `QUANTRO_DB_PRIMARY=supabase` and the workspace has an organization —
+  a successful read without a row means "not a member" (see "Revocation ends
+  Flow access") — and Flow's docs otherwise.
 * For organization workspaces the People OS call decides; Flow's own docs
   (`workspace_members`, `workspace_invites`, `audit_log`) are written only
   after it succeeded, as a cache (`_local_identity_writes`). Flow's invite
@@ -114,6 +143,8 @@ database's text. The frontend translates each code (es / en) in
   owner gets `plan_required` / `member_not_found` from Flow too.
 * `get_invitation_preview` rate-limits per client IP; Flow calls it from its
   server, so all Flow previews share Flow's egress IP bucket (30 per 5 min).
+  Flow's per-user throttle bounds what one account can spend; keying the
+  limit on `auth.uid()` when a JWT is present (konta) would make it per user.
 * Once this Flow version is deployed, the planned DB guard that rejects
   `org_members` writes not coming from the mirror or the org-creation owner
   row can be added: Flow no longer writes `org_members` or `invitations`.

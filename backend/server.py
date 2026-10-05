@@ -457,7 +457,13 @@ async def _active_workspace_id(request: Request, user: User) -> str:
       1. `X-Workspace-Id` header (explicit switcher intent)
       2. user.current_workspace_id (last-used)
       3. first membership (deterministic fallback)
-    The chosen id is validated against membership to prevent cross-workspace access."""
+    The chosen id is validated against membership to prevent cross-workspace access.
+
+    Flow's workspace_members docs are only a cache: each candidate is
+    confirmed with ``_membership_for``, which for a workspace of a Quantro
+    OS organization asks org_members (People OS's mirror) and drops the
+    cache doc of someone revoked or deleted there. The confirmed
+    membership is kept on ``request.state`` for ``require_role``."""
     header_ws = request.headers.get("x-workspace-id") or request.headers.get("X-Workspace-Id")
     candidate_ids = []
     if header_ws:
@@ -466,14 +472,17 @@ async def _active_workspace_id(request: Request, user: User) -> str:
         candidate_ids.append(user.current_workspace_id)
 
     memberships = await workspace_members_col.find({"user_id": user.user_id}, {"_id": 0}).to_list(50)
-    member_ids = {m["workspace_id"] for m in memberships}
-    if not member_ids:
+    cached = {m["workspace_id"]: m for m in memberships if m.get("workspace_id")}
+    if not cached:
         raise HTTPException(status_code=403, detail="No workspace access")
 
-    for cid in candidate_ids:
-        if cid in member_ids:
+    ordered = [cid for cid in candidate_ids if cid in cached] + sorted(cached)
+    for cid in dict.fromkeys(ordered):
+        member = await _membership_for(user.user_id, cid, cached=cached[cid])
+        if member:
+            request.state.workspace_membership = (user.user_id, cid, member)
             return cid
-    return sorted(member_ids)[0]
+    raise HTTPException(status_code=403, detail="No workspace access")
 
 
 async def get_current_workspace_id(request: Request, user: User = Depends(get_current_user)) -> str:
@@ -1686,7 +1695,9 @@ async def claim_or_create_workspace_for_user(user_doc: dict) -> str:
     return new_ws_id
 
 
-async def reconcile_supabase_memberships_to_mongo(user_doc: dict) -> Optional[str]:
+async def reconcile_supabase_memberships_to_mongo(
+    user_doc: dict, org_names: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
     """Phase 7c — Supabase-first workspace resolution.
 
     On every login, check whether this user already belongs to any org
@@ -1702,7 +1713,9 @@ async def reconcile_supabase_memberships_to_mongo(user_doc: dict) -> Optional[st
          (``QUANTRO_DEFAULT_ORG_ID``) → promote the ``DEFAULT_WORKSPACE_ID``
          Mongo row to carry that ``org_id`` and use it.
       3. No mapping exists → create a fresh Mongo workspace with
-         ``org_id`` already set, then seed config.
+         ``org_id`` already set, named after the organization
+         (``org_names`` from the caller, else ``organizations.name``;
+         the user's name only when neither is known), then seed config.
 
     The user's role in Mongo is *always* synced to match Supabase — so
     role changes made through the Supabase-backed admin UI are reflected
@@ -1748,13 +1761,21 @@ async def reconcile_supabase_memberships_to_mongo(user_doc: dict) -> Optional[st
                 {"_id": 0, "workspace_id": 1},
             )
 
-        # 3) Still nothing → mint a new workspace for this org. Name it
-        #    after the user as a safe default (owner can rename later).
+        # 3) Still nothing → mint a new workspace for this org, named after
+        #    the organization (not after whoever reached Flow first — an
+        #    invitee would otherwise name the owner's workspace). The
+        #    user's name is only the fallback; Leader+ can rename it.
         if not ws:
             new_ws_id = f"ws_{uuid.uuid4().hex[:12]}"
+            org_name = (org_names or {}).get(org_id)
+            if not org_name:
+                try:
+                    org_name = await supabase_admin.organization_name(org_id)
+                except Exception:  # noqa: BLE001 — a name is not worth failing login
+                    org_name = None
             await workspaces_col.insert_one({
                 "workspace_id": new_ws_id,
-                "name": f"{user_doc.get('name') or 'Workspace'}",
+                "name": org_name or f"{user_doc.get('name') or 'Workspace'}",
                 "owner_user_id": user_id if role == "owner" else None,
                 "org_id": org_id,
                 "created_at": datetime.now(timezone.utc),
@@ -2145,8 +2166,19 @@ async def auth_me(user: User = Depends(get_current_user)):
     """Return the authenticated user + their workspace memberships.
 
     The Supabase JWT is verified by ``get_current_user`` which also upserts
-    the user into MongoDB and claims/creates a workspace on first login."""
-    memberships = await workspace_members_col.find({"user_id": user.user_id}, {"_id": 0}).to_list(50)
+    the user into MongoDB and claims/creates a workspace on first login.
+
+    Each cached membership is confirmed with ``_membership_for``: an
+    organization workspace the user was revoked from in Quantro OS is not
+    listed (and its stale cache doc is dropped)."""
+    cached = await workspace_members_col.find({"user_id": user.user_id}, {"_id": 0}).to_list(50)
+    memberships = []
+    for m in cached:
+        if not m.get("workspace_id"):
+            continue
+        confirmed = await _membership_for(user.user_id, m["workspace_id"], cached=m)
+        if confirmed:
+            memberships.append({**m, "role": confirmed.get("role") or m.get("role")})
     workspace_ids = [m["workspace_id"] for m in memberships]
     workspaces = []
     if workspace_ids:
@@ -2203,7 +2235,9 @@ class SwitchWorkspaceRequest(BaseModel):
 @app.post("/api/auth/workspaces/switch")
 async def switch_workspace(req: SwitchWorkspaceRequest, user: User = Depends(get_current_user)):
     """Set the user's current active workspace."""
-    member = await workspace_members_col.find_one({"user_id": user.user_id, "workspace_id": req.workspace_id})
+    # _membership_for, not the cache alone: someone revoked in Quantro OS
+    # cannot switch back into the organization's workspace.
+    member = await _membership_for(user.user_id, req.workspace_id)
     if not member:
         raise HTTPException(status_code=403, detail="Not a member of this workspace")
     await users_col.update_one(
@@ -2345,32 +2379,61 @@ def role_rank(role: Optional[str]) -> int:
     return ROLE_RANK.get(_normalize_role(role), 0)
 
 
-async def _membership_for(user_id: str, workspace_id: str) -> Optional[dict]:
+async def _drop_stale_membership(user_id: str, workspace_id: str) -> None:
+    """Quantro OS says ``user_id`` is not a member of this organization
+    workspace (revoked or deleted in People OS: the mirror removed their
+    org_members row). Drop Flow's cached membership doc and, like
+    remove_member, the user's pointer to the workspace."""
+    deleted = 0
+    if _local_identity_writes():
+        result = await workspace_members_col.delete_one({"user_id": user_id, "workspace_id": workspace_id})
+        deleted = getattr(result, "deleted_count", 0) or 0
+    if deleted:
+        await users_col.update_one(
+            {"user_id": user_id, "current_workspace_id": workspace_id},
+            {"$unset": {"current_workspace_id": ""}},
+        )
+        _membership_logger.info("membership: dropped stale cache doc (org_members has no row)")
+
+
+async def _membership_for(user_id: str, workspace_id: str, *, cached: Optional[dict] = None) -> Optional[dict]:
     """Resolve membership for RBAC.
 
-    Phase 1: when QUANTRO_DB_PRIMARY=supabase, prefer ``org_members``.
-    Falls back to Mongo so rollback / incomplete backfill never locks
-    users out. Does not require a Mongo member doc when Supabase has the row.
+    A workspace of a Quantro OS organization (QUANTRO_DB_PRIMARY=supabase):
+    ``org_members`` — People OS's mirror — decides. When it answers with no
+    row the person is not a member (revoked or deleted in Quantro OS), even
+    if Flow's workspace_members cache still has a doc: that doc is dropped
+    and None is returned. Only when the read itself fails (no service role,
+    no answer, non-200) does Flow fall back to its cache, so an outage
+    never locks members out. Flow-only workspaces (no org_id) and the Mongo
+    rollback use the cache. ``cached``: the caller's already-read cache doc
+    for this (user, workspace), saving the read.
     """
     org_id = await workspace_to_org_id(workspace_id)
     if supabase_admin.is_supabase_primary() and org_id:
         try:
-            row = await supabase_admin.get_org_member(org_id, user_id)
-            if row:
-                return {
-                    "user_id": user_id,
-                    "workspace_id": workspace_id,
-                    "role": _normalize_role(row.get("role")),
-                    "joined_at": row.get("joined_at"),
-                    "org_id": org_id,
-                    "source": "supabase",
-                }
-        except Exception:  # noqa: BLE001
-            pass
+            lookup = await supabase_admin.lookup_org_member(org_id, user_id)
+        except Exception:  # noqa: BLE001 — unknown, not "not a member"
+            lookup = supabase_admin.OrgMemberLookup(False, None)
+        if lookup.row:
+            return {
+                "user_id": user_id,
+                "workspace_id": workspace_id,
+                "role": _normalize_role(lookup.row.get("role")),
+                "joined_at": lookup.row.get("joined_at"),
+                "org_id": org_id,
+                "source": "supabase",
+            }
+        if lookup.answered:
+            await _drop_stale_membership(user_id, workspace_id)
+            return None
 
-    member = await workspace_members_col.find_one(
-        {"user_id": user_id, "workspace_id": workspace_id}, {"_id": 0}
-    )
+    if cached is not None and cached.get("user_id") == user_id and cached.get("workspace_id") == workspace_id:
+        member = dict(cached)
+    else:
+        member = await workspace_members_col.find_one(
+            {"user_id": user_id, "workspace_id": workspace_id}, {"_id": 0}
+        )
     if member and member.get("role"):
         # Normalize on read so callers always see the canonical Quantro
         # role even if the row was written before the migration.
@@ -2399,10 +2462,17 @@ def require_role(min_role: str):
         raise ValueError(f"Unknown role: {min_role}")
 
     async def _dep(
+        request: Request,
         user: User = Depends(get_current_user),
         workspace_id: str = Depends(get_current_workspace_id),
     ) -> dict:
-        member = await _membership_for(user.user_id, workspace_id)
+        # get_current_workspace_id already confirmed this membership (one
+        # org_members read per request); reuse it.
+        confirmed = getattr(request.state, "workspace_membership", None)
+        if confirmed and confirmed[0] == user.user_id and confirmed[1] == workspace_id:
+            member = confirmed[2]
+        else:
+            member = await _membership_for(user.user_id, workspace_id)
         if not member:
             raise HTTPException(status_code=403, detail="Not a workspace member")
         if role_rank(member.get("role")) < role_rank(min_role):
@@ -3071,7 +3141,9 @@ async def peek_invite(token: str, user: User = Depends(get_current_user)):
 
     Quantro OS invitations come from People OS ``get_invitation_preview``
     (organization name, role, masked email, expiry; no ids). Flow-only
-    workspace invites come from Flow's own docs."""
+    workspace invites come from Flow's own docs. Throttled per user: the
+    preview shares one Quantro OS rate-limit bucket for all of Flow."""
+    people_os.throttle_invite("preview", user.user_id)
     invite = await _flow_only_invite(token)
     if invite:
         expires_at = _check_flow_invite_usable(invite)
@@ -3084,6 +3156,8 @@ async def peek_invite(token: str, user: User = Depends(get_current_user)):
             "source": "local",
         }
 
+    if not people_os.is_invite_token(token):
+        raise people_os.http_error("invite_invalid")
     preview = await _people_os_preview(token, user.access_token)
     return {
         "workspace_id": None,
@@ -3102,39 +3176,50 @@ async def accept_invite(token: str, user: User = Depends(get_current_user)):
     """Accept an invite as the signed-in user.
 
     Quantro OS invitations: People OS ``accept_team_invite`` (team_members
-    row) or ``accept_invitation`` (legacy invitations row) with the
-    INVITEE's JWT — the server checks that their confirmed email is the
-    invited one, the token, expiry, the inviter, seats and plan, and the
-    org_members mirror follows. Flow then finds (or, like at login,
-    creates) the organization's workspace. Flow-only workspace invites
-    stay in Flow's own docs. Idempotent: an existing membership is kept
-    (never downgraded).
+    row) or, when it does not know the token, ``accept_invitation`` (legacy
+    invitations row) with the INVITEE's JWT — the server checks that their
+    confirmed email is the invited one, the token, expiry, the inviter,
+    seats and plan, and the org_members mirror follows. There is no preview
+    call here: accept_team_invite is rate-limited per user by Quantro OS,
+    while get_invitation_preview shares one bucket for all of Flow. Flow
+    then finds (or, like at login, creates — named after the organization)
+    the organization's workspace. Flow-only workspace invites stay in
+    Flow's own docs. Idempotent: an existing membership is kept (never
+    downgraded).
     """
+    people_os.throttle_invite("accept", user.user_id)
     invite = await _flow_only_invite(token)
     if invite:
         return await _accept_flow_only_invite(invite, token, user)
+    if not supabase_admin.is_dual_write_enabled() or not people_os.is_invite_token(token):
+        raise people_os.http_error("invite_invalid")
 
-    preview = await _people_os_preview(token, user.access_token)
-    if preview.get("kind") == "team":
-        result = await supabase_admin.rpc_accept_team_invite(token, user.access_token or "")
-        fn = "accept_team_invite"
-    else:
-        result = await supabase_admin.rpc_accept_invitation(token, user.access_token or "")
-        fn = "accept_invitation"
-    data = people_os.require_ok(fn, result) or {}
+    jwt_token = user.access_token or ""
+    kind = "team"
+    data = people_os.require_ok(
+        "accept_team_invite", await supabase_admin.rpc_accept_team_invite(token, jwt_token)) or {}
+    if not data.get("success") and data.get("code") == "invalid":
+        # Not a People OS token: maybe a legacy invitations row.
+        kind = "org"
+        data = people_os.require_ok(
+            "accept_invitation", await supabase_admin.rpc_accept_invitation(token, jwt_token)) or {}
     if not data.get("success"):
         raise people_os.invite_code_error(data.get("code"))
 
     org_id = data.get("organization_id") or data.get("org_id")
-    role = _normalize_role(data.get("role") or preview.get("role"))
+    role = _normalize_role(data.get("role"))
     already_member = data.get("code") == "already_member"
+    org_name = await supabase_admin.organization_name(org_id, jwt_token) if org_id else None
 
     workspace_id = await _workspace_for_org(org_id)
     if not workspace_id and org_id:
         # Same as at login: the organization gets its workspace and the
         # membership cache is filled from org_members (the mirror).
         try:
-            await reconcile_supabase_memberships_to_mongo({"user_id": user.user_id, "name": user.name})
+            await reconcile_supabase_memberships_to_mongo(
+                {"user_id": user.user_id, "name": user.name},
+                org_names={org_id: org_name} if org_name else None,
+            )
         except Exception:  # noqa: BLE001 — the membership exists in Quantro OS either way
             _membership_logger.warning("accept_invite: workspace reconcile failed")
         workspace_id = await _workspace_for_org(org_id)
@@ -3164,14 +3249,14 @@ async def accept_invite(token: str, user: User = Depends(get_current_user)):
             f"{user.email} joined workspace via invite as {role}",
             user_id=user.user_id, workspace_id=workspace_id,
             target_member_id=user.user_id,
-            metadata={"role": role, "source": "people_os", "kind": preview.get("kind"),
+            metadata={"role": role, "source": "people_os", "kind": kind,
                       "already_member": already_member},
         )
     return {
         "success": True,
         "workspace_id": workspace_id,
         "organization_id": org_id,
-        "organization_name": preview.get("organization_name"),
+        "organization_name": org_name,
         "role": role,
         "already_member": already_member,
         "source": "people_os",

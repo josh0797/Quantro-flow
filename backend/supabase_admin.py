@@ -160,8 +160,15 @@ async def list_orgs_for_user(user_id: str) -> List[Dict[str, Any]]:
 
     Shape: ``[{org_id, role, joined_at, id}, ...]``.
     """
-    if not SUPABASE_SERVICE_ROLE_KEY:
-        return []
+    return await lookup_orgs_for_user(user_id) or []
+
+
+async def lookup_orgs_for_user(user_id: str) -> Optional[List[Dict[str, Any]]]:
+    """Like ``list_orgs_for_user``, but ``None`` when Supabase did not
+    answer (no service role, transport error, non-200): only a list —
+    possibly empty — says which organizations the user belongs to."""
+    if not SUPABASE_SERVICE_ROLE_KEY or not user_id:
+        return None
     resp = await _request(
         "GET",
         "/rest/v1/org_members",
@@ -173,27 +180,51 @@ async def list_orgs_for_user(user_id: str) -> List[Dict[str, Any]]:
             "order": "joined_at.asc",
         },
     )
+    return _answered_rows(resp)
+
+
+def _answered_rows(resp: Optional[httpx.Response]) -> Optional[List[Dict[str, Any]]]:
+    """The rows of a 200 PostgREST read, or ``None`` when there was no
+    real answer (no request, transport error, non-200, not a JSON list)."""
     if resp is None or resp.status_code != 200:
-        return []
-    return resp.json() or []
-
-
-
-async def get_org_member(org_id: str, user_id: str) -> Optional[Dict[str, Any]]:
-    """Return one ``org_members`` row for ``(org_id, user_id)``.
-
-    Prefers the service-role key so RBAC checks work without threading a
-    user JWT through every dependency. Returns None if not found or on
-    transport/config failure.
-    """
-    if not org_id or not user_id:
         return None
-    use_service = bool(SUPABASE_SERVICE_ROLE_KEY)
+    try:
+        rows = resp.json()
+    except Exception:  # noqa: BLE001 — empty or non-JSON body
+        return None
+    if rows is None:
+        return []
+    return rows if isinstance(rows, list) else None
+
+
+class OrgMemberLookup(NamedTuple):
+    """Outcome of an ``org_members`` lookup.
+
+    ``answered`` is True only when Supabase answered (service role, HTTP
+    200); then ``row`` is None exactly when the person is NOT a member —
+    revoked or deleted in Quantro OS (the People OS mirror removes the
+    org_members row), or never joined. ``answered`` False means nobody
+    knows (no service role, transport error, non-200)."""
+
+    answered: bool
+    row: Optional[Dict[str, Any]]
+
+
+async def lookup_org_member(org_id: str, user_id: str) -> OrgMemberLookup:
+    """The ``org_members`` row of ``(org_id, user_id)``, read with the
+    service role (RBAC checks have no user JWT for a target user).
+
+    Without a row, ``organizations.owner_id`` still makes the person the
+    owner (org_role_for rule 1; the mirror never writes the owner's row,
+    which comes from organization creation), so an owner whose row is
+    missing is never shut out of their own workspace."""
+    if not org_id or not user_id or not SUPABASE_SERVICE_ROLE_KEY:
+        return OrgMemberLookup(False, None)
     resp = await _request(
         "GET",
         "/rest/v1/org_members",
         access_token=None,
-        use_service=use_service,
+        use_service=True,
         params={
             "org_id": f"eq.{org_id}",
             "user_id": f"eq.{user_id}",
@@ -201,10 +232,36 @@ async def get_org_member(org_id: str, user_id: str) -> Optional[Dict[str, Any]]:
             "limit": "1",
         },
     )
-    if resp is None or resp.status_code != 200:
-        return None
-    rows = resp.json() or []
-    return rows[0] if rows else None
+    rows = _answered_rows(resp)
+    if rows is None:
+        if resp is not None:
+            logger.warning("supabase_admin.lookup_org_member status=%s", resp.status_code)
+        return OrgMemberLookup(False, None)
+    if rows and isinstance(rows[0], dict):
+        return OrgMemberLookup(True, rows[0])
+    owner_resp = await _request(
+        "GET",
+        "/rest/v1/organizations",
+        access_token=None,
+        use_service=True,
+        params={"id": f"eq.{org_id}", "select": "owner_id", "limit": "1"},
+    )
+    orgs = _answered_rows(owner_resp)
+    if orgs is None:
+        if owner_resp is not None:
+            logger.warning("supabase_admin.lookup_org_member owner status=%s", owner_resp.status_code)
+        return OrgMemberLookup(False, None)
+    owner_id = (orgs[0] or {}).get("owner_id") if orgs and isinstance(orgs[0], dict) else None
+    if owner_id and str(owner_id) == str(user_id):
+        return OrgMemberLookup(True, {"org_id": org_id, "user_id": user_id, "role": "owner", "joined_at": None})
+    return OrgMemberLookup(True, None)
+
+
+async def get_org_member(org_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+    """Return one ``org_members`` row for ``(org_id, user_id)``, or None
+    when there is none OR the read failed. Membership decisions must use
+    ``lookup_org_member``, which tells the two apart."""
+    return (await lookup_org_member(org_id, user_id)).row
 
 
 async def list_invitations(org_id: str, access_token: str) -> List[Dict[str, Any]]:
@@ -274,6 +331,32 @@ async def get_organization(org_id: str, access_token: str) -> Optional[Dict[str,
         return None
     rows = resp.json() or []
     return rows[0] if rows else None
+
+
+async def organization_name(org_id: str, access_token: Optional[str] = None) -> Optional[str]:
+    """The ``organizations.name`` of ``org_id``: read with the caller's JWT
+    when given (RLS), else — or when that read shows nothing — with the
+    service role. Only used to name the Flow workspace of a Quantro OS
+    organization the caller belongs to. None when unknown."""
+    if not org_id:
+        return None
+    params = {"id": f"eq.{org_id}", "select": "name", "limit": "1"}
+    attempts = []
+    if access_token:
+        attempts.append(False)
+    if SUPABASE_SERVICE_ROLE_KEY:
+        attempts.append(True)
+    for use_service in attempts:
+        resp = await _request(
+            "GET", "/rest/v1/organizations",
+            access_token=None if use_service else access_token,
+            use_service=use_service, params=params,
+        )
+        rows = _answered_rows(resp) or []
+        name = str((rows[0] or {}).get("name") or "").strip() if rows and isinstance(rows[0], dict) else ""
+        if name:
+            return name[:80]
+    return None
 
 
 # ── People OS (Quantro OS membership) — caller's JWT only ─────────────

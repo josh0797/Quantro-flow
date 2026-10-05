@@ -9,8 +9,10 @@ a member of Flow's default workspace with the invitation's role.
 Since O12 an invitation is accepted by People OS (accept_team_invite /
 accept_invitation, with the invitee's JWT), which binds it to the invitee's
 email. Flow then maps the organization the RPC answers to its workspace: the
-existing one, a new one (as at login), or "default" only when the org IS the
-configured default org. A token People OS does not recognise joins nothing.
+existing one, a new one (as at login, named after the organization), or
+"default" only when the org IS the configured default org. A token People OS
+does not recognise (neither accept_team_invite nor the legacy
+accept_invitation) joins nothing.
 """
 from __future__ import annotations
 
@@ -42,17 +44,23 @@ async def test_invite_of_an_org_without_a_flow_workspace_never_joins_default(app
         return FakeResponse(200, {"status": "invalid"})
 
     def accept(args, auth):
+        if args["p_token"] not in tokens:
+            return FakeResponse(200, {"success": False, "code": "invalid", "error": "Invitación inválida o expirada"})
         return _accepting(fake, tokens[args["p_token"]], "u-b")(args, auth)
 
     fake.rpc_handlers["get_invitation_preview"] = preview
     fake.rpc_handlers["accept_team_invite"] = accept
+    fake.rpc_handlers["accept_invitation"] = lambda args, auth: FakeResponse(
+        200, {"success": False, "code": "invalid", "error": "Invitación inválida o expirada"})
+    fake.rows["organizations"].append({"id": "org-quantro-os-only", "name": "Quantro OS Only Co", "owner_id": "u-x"})
 
     transport = httpx.ASGITransport(app=server.app, raise_app_exceptions=True)
     async with RealAsyncClient(transport=transport, base_url="http://test") as http:
         c = Client(server, http)
         assert (await c.call("u-b", "ws_b", "GET", f"/api/invites/{unknown}")).status_code == 404
         assert (await c.call("u-b", "ws_b", "POST", f"/api/invites/{unknown}/accept")).status_code == 404
-        assert "accept_team_invite" not in [fn for fn, _, _ in fake.rpc_calls]
+        assert [fn for fn, _, _ in fake.rpc_calls] == ["get_invitation_preview", "accept_team_invite", "accept_invitation"]
+        assert await server.workspace_members_col.find_one({"workspace_id": "default", "user_id": "u-b"}) is None
 
         # A real invitation of an org Flow has no workspace for: the person
         # joined it in Quantro OS, and Flow gives the org its own workspace.
@@ -61,7 +69,7 @@ async def test_invite_of_an_org_without_a_flow_workspace_never_joins_default(app
         ws_id = foreign.json()["workspace_id"]
         assert ws_id and ws_id != "default"
         ws = await server.workspaces_col.find_one({"workspace_id": ws_id})
-        assert ws["org_id"] == "org-quantro-os-only"
+        assert ws["org_id"] == "org-quantro-os-only" and ws["name"] == "Quantro OS Only Co"
         assert await server.workspace_members_col.find_one({"workspace_id": "default", "user_id": "u-b"}) is None
 
         # The configured default org still maps to the default workspace.

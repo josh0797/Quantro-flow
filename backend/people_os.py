@@ -19,8 +19,10 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
+from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Deque, Dict, Optional
 from urllib.parse import quote
 
 from fastapi import HTTPException
@@ -123,10 +125,15 @@ _FORBIDDEN_PATTERNS = (
 
 
 def classify(result: RpcResult) -> PeopleOSError:
-    """The Flow error for a failed People OS call."""
+    """The Flow error for a failed People OS call.
+
+    The specific SQLSTATEs are checked BEFORE the HTTP status buckets:
+    PostgREST answers ``P0*`` (e.g. P0002 "Team member not found") with
+    HTTP 500 and an anonymous 42501 with 401, so judging by status first
+    would turn them into "Quantro OS did not answer" / the wrong reason."""
     code = (result.code or "").upper()
     text = (result.message or "").lower()
-    if result.status == 0 or code in ("PGRST202", "NO_RESPONSE") or result.status >= 500:
+    if result.status == 0:
         return PeopleOSError("auth_required" if code == "AUTH_REQUIRED" else "people_os_unavailable")
     if code == "QSEAT":
         return PeopleOSError("seat_required")
@@ -148,7 +155,12 @@ def classify(result: RpcResult) -> PeopleOSError:
         return PeopleOSError("invalid_input")
     if code == "P0002":
         return PeopleOSError("member_not_found")
-    if result.status in (401, 403):
+    # PGRST301/PGRST302: expired, invalid or missing JWT (HTTP 401).
+    if code in ("PGRST301", "PGRST302") or result.status == 401:
+        return PeopleOSError("auth_required")
+    if code in ("PGRST202", "NO_RESPONSE") or result.status >= 500:
+        return PeopleOSError("people_os_unavailable")
+    if result.status == 403:
         return PeopleOSError("permission_required")
     return PeopleOSError("people_os_failed")
 
@@ -160,6 +172,67 @@ def require_ok(fn: str, result: RpcResult) -> Any:
     err = classify(result)
     logger.info("people_os.%s refused: status=%s error=%s", fn, result.status, err.error)
     raise err.http()
+
+
+# ── /api/invites/{token}: token shape + per-user throttle ──────────────
+# People OS and legacy invitation tokens are uuids; anything else is
+# answered "invalid" without calling Quantro OS.
+_UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
+def is_invite_token(token: Optional[str]) -> bool:
+    return bool(token) and bool(_UUID_RE.fullmatch(str(token)))
+
+
+# get_invitation_preview is rate-limited by Quantro OS per client IP
+# ('invite_preview:<ip>', 30 per 5 min), and every Flow call comes from
+# Flow's server — one bucket for all of Flow. Each user may therefore spend
+# only a few previews per window here, so nobody can use the bucket up for
+# everyone else; accept does not preview at all (accept_team_invite has its
+# own per-user limit in Quantro OS). In-process (per worker): a mitigation,
+# not a global quota.
+INVITE_WINDOW_SECS = 300
+INVITE_LIMITS = {"preview": 6, "accept": 10}
+_MAX_THROTTLE_KEYS = 10_000
+
+
+class _Throttle:
+    def __init__(self) -> None:
+        self._hits: Dict[str, Deque[float]] = {}
+
+    def allow(self, key: str, limit: int, window: float, now: Optional[float] = None) -> bool:
+        now = time.monotonic() if now is None else now
+        hits = self._hits.get(key)
+        if hits is None:
+            if len(self._hits) >= _MAX_THROTTLE_KEYS:
+                self._prune(now, window)
+            hits = self._hits.setdefault(key, deque())
+        while hits and now - hits[0] >= window:
+            hits.popleft()
+        if len(hits) >= limit:
+            return False
+        hits.append(now)
+        return True
+
+    def _prune(self, now: float, window: float) -> None:
+        for key in [k for k, v in self._hits.items() if not v or now - v[-1] >= window]:
+            del self._hits[key]
+        if len(self._hits) >= _MAX_THROTTLE_KEYS:
+            self._hits.clear()
+
+    def reset(self) -> None:
+        self._hits.clear()
+
+
+invite_throttle = _Throttle()
+
+
+def throttle_invite(action: str, user_id: str) -> None:
+    """Raise 429 ``rate_limited`` when ``user_id`` used up its ``action``
+    budget ("preview" or "accept") for the current window."""
+    if not invite_throttle.allow(f"{action}:{user_id}", INVITE_LIMITS[action], INVITE_WINDOW_SECS):
+        logger.info("people_os.invite throttled: action=%s", action)
+        raise http_error("rate_limited")
 
 
 # invite_result codes (konta 20261012000000) → Flow error codes.

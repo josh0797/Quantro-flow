@@ -18,11 +18,6 @@ Migración one-shot de los datos legacy de Mongo a las tablas reales de Supabase
 | ~~`workspace_members`~~ | → | ~~`org_members`~~ (retirado, O12) |
 | ~~`workspace_invites`~~ | → | ~~`invitations`~~ (retirado, O12) |
 | `audit_log`             | → | `org_audit_logs`   |
-
-> **O12 (2026-10-05):** la membresía es de Quantro OS People OS (`team_members`;
-> `org_members` es su espejo). El script ya no escribe `org_members` ni
-> `invitations`: `--table members|invites` solo explica por qué. Ver
-> `docs/people-os-membership.md`.
 | `google_integrations` / `microsoft_integrations` | → | `provider_connections` (Phase 2) |
 | `action_executions` | → | `action_executions` (Phase 3) |
 | `automation_policies` / `action_policies` | → | same names (Phase 3) |
@@ -31,6 +26,11 @@ Migración one-shot de los datos legacy de Mongo a las tablas reales de Supabase
 | `content_items` / `content_templates` | → | same names (Phase 6.2) |
 | `contacts` | → | `contacts` (Phase 6.3) |
 | `calendar_events` | → | `calendar_events` (Phase 6.3) |
+
+> **O12 (2026-10-05):** la membresía es de Quantro OS People OS (`team_members`;
+> `org_members` es su espejo). El script ya no escribe `org_members` ni
+> `invitations`: `--table members|invites` solo explica por qué. Ver
+> `docs/people-os-membership.md`.
 
 ### Pre-requisitos
 

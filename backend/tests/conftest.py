@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import os
+import sys
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -185,3 +186,13 @@ def _project(doc: Dict[str, Any], projection: Optional[Dict[str, int]]):
 @pytest.fixture
 def fake_collection():
     return FakeAsyncCollection()
+
+
+@pytest.fixture(autouse=True)
+def _reset_invite_throttle():
+    """people_os keeps a per-process, per-user invite throttle: start every
+    test with an empty one (never imports people_os itself)."""
+    throttle = getattr(sys.modules.get("people_os"), "invite_throttle", None)
+    if throttle is not None:
+        throttle.reset()
+    yield

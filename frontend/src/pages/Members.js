@@ -83,6 +83,19 @@ export default function Members() {
   // Roles only the Owner grants: Leader, and in Quantro OS also Accountant.
   const ownerOnlyRole = (r) => r === 'leader' || (peopleOs && r === 'accountant');
   const errorText = (err) => peopleOsErrorMessage(err, t) || t('members.action_failed');
+  // What I may do to a member's row. Admin+ only; nobody edits the owner
+  // (ownership changes in Quantro OS); only the Owner manages a Leader — and,
+  // in an organization workspace, an Accountant (People OS refuses anyone
+  // else with owner_managed). In an organization workspace nobody changes or
+  // removes themselves either (People OS refuses it).
+  const memberActions = (m) => {
+    const isMe = m.user_id === user?.user_id;
+    const canManage = isOwner || ((ROLE_RANK[m.role] || 0) < ROLE_RANK.leader && !ownerOnlyRole(m.role));
+    return {
+      canEdit: isAdmin && m.role !== 'owner' && !(peopleOs && isMe) && canManage,
+      canRemove: m.role !== 'owner' && (isMe ? !peopleOs : (isAdmin && canManage)),
+    };
+  };
 
   const fetchData = useCallback(async () => {
     if (!currentWorkspaceId) return;
@@ -223,14 +236,20 @@ export default function Members() {
     }
   };
 
+  // The invite link an onboarding card may copy. Quantro OS invitations are
+  // single-use and tied to one email: only that person's own pending
+  // invitation, never someone else's. Flow-only links are shareable.
+  const inviteForCard = (card) => {
+    const usable = (inv) => !inv.revoked && !inv.expired && inv.url;
+    if (!peopleOs) return invites.find(usable) || null;
+    const email = (card?.email || '').trim().toLowerCase();
+    if (!email) return null;
+    return invites.find((inv) => usable(inv) && (inv.email || '').trim().toLowerCase() === email) || null;
+  };
+
   const handleCopyMostRecentInvite = async (memberCard) => {
-    // Best-effort: find the most recent active invite that this member
-    // accepted (or any active one if none match) and copy its URL.
-    const invite = invites.find((inv) => !inv.revoked && inv.url);
-    if (!invite?.url) {
-      toast.error(t('onboarding.action_copy_invite'));
-      return;
-    }
+    const invite = inviteForCard(memberCard);
+    if (!invite?.url) return;
     try {
       await navigator.clipboard.writeText(invite.url);
       toast.success(t('members.invite_link_copied'));
@@ -406,16 +425,7 @@ export default function Members() {
             <CardContent className="space-y-2">
               {data.members.map((m) => {
                 const isMe = m.user_id === user?.user_id;
-                const memberRoleRank = ROLE_RANK[m.role] || 0;
-                // Allow editing only if I'm admin+, target isn't me-as-owner,
-                // and (target is below admin OR I am owner).
-                // Nobody edits the owner (ownership changes in Quantro OS). In
-                // an organization workspace nobody changes or removes
-                // themselves either (People OS refuses it).
-                const canEdit = isAdmin && m.role !== 'owner' && !(peopleOs && isMe) && (memberRoleRank < ROLE_RANK.leader || isOwner);
-                const canRemove = m.role !== 'owner' && (
-                  isMe ? !peopleOs : (isAdmin && (memberRoleRank < ROLE_RANK.leader || isOwner))
-                );
+                const { canEdit, canRemove } = memberActions(m);
 
                 return (
                   <div
@@ -601,8 +611,10 @@ export default function Members() {
                     isAdmin={isAdmin}
                     t={t}
                     onMarkComplete={() => setPendingComplete(card)}
-                    onCopyInvite={() => handleCopyMostRecentInvite(card)}
-                    onRevokeAccess={() => setPendingRemoval({ user_id: card.user_id, role: card.role })}
+                    onCopyInvite={inviteForCard(card) ? () => handleCopyMostRecentInvite(card) : null}
+                    onRevokeAccess={memberActions(card).canRemove
+                      ? () => setPendingRemoval({ user_id: card.user_id, role: card.role })
+                      : null}
                   />
                 ))}
               </div>
@@ -791,11 +803,16 @@ export default function Members() {
                 <SelectContent>
                   {ROLE_OPTIONS.map((r) => (
                     <SelectItem key={r} value={r} disabled={ownerOnlyRole(r) && !isOwner}>
-                      {t(`members.role_${r}`)} — <span className="text-muted-foreground">{t(`members.role_${r}_desc`)}</span>
+                      {t(`members.role_${r}`)} — <span className="text-muted-foreground">{t(peopleOs ? `members.role_${r}_people_os_desc` : `members.role_${r}_desc`)}</span>
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              {peopleOs && (
+                <p className="mt-1.5 text-xs text-muted-foreground" data-testid="invite-role-people-os-hint">
+                  {t('members.invite_role_people_os_hint')}
+                </p>
+              )}
             </div>
             {!peopleOs && (
             <div className="grid grid-cols-2 gap-3">
@@ -1059,16 +1076,18 @@ function OnboardingCard({ card, isAdmin, t, onMarkComplete, onCopyInvite, onRevo
 
       {isAdmin && card.status !== 'completed' && (
         <div className="mt-3 pt-3 border-t border-[hsl(var(--border))] flex flex-wrap gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={onCopyInvite}
-            data-testid={`onb-copy-invite-${card.user_id}`}
-            className="text-xs h-7"
-          >
-            <Copy size={12} className="mr-1" />
-            {t('onboarding.action_copy_invite')}
-          </Button>
+          {onCopyInvite && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onCopyInvite}
+              data-testid={`onb-copy-invite-${card.user_id}`}
+              className="text-xs h-7"
+            >
+              <Copy size={12} className="mr-1" />
+              {t('onboarding.action_copy_invite')}
+            </Button>
+          )}
           <Button
             size="sm"
             variant="outline"
@@ -1079,7 +1098,7 @@ function OnboardingCard({ card, isAdmin, t, onMarkComplete, onCopyInvite, onRevo
             <CheckCircle2 size={12} className="mr-1" />
             {t('onboarding.action_mark_complete')}
           </Button>
-          {card.role !== 'owner' && (
+          {card.role !== 'owner' && onRevokeAccess && (
             <Button
               size="sm"
               variant="outline"

@@ -39,8 +39,9 @@ jest.mock('../context/LanguageContext', () => {
 import React from 'react';
 import { toast } from 'sonner';
 import Members from './Members';
-import { listMembers, listInvites, removeMember } from '../lib/api';
+import { listMembers, listInvites, removeMember, getOnboarding } from '../lib/api';
 import { translations } from '../i18n/translations';
+import { act } from 'react';
 import { render, flush, click, byTestId } from '../test/render';
 /* eslint-enable import/first */
 
@@ -60,12 +61,24 @@ const ROSTER = {
 
 let view;
 
-async function mount(roster = ROSTER) {
+async function mount(roster = ROSTER, invites = []) {
   listMembers.mockResolvedValue(roster);
-  listInvites.mockResolvedValue({ invites: [], source: 'people_os' });
+  listInvites.mockResolvedValue({ invites, source: 'people_os' });
   view = await render(<Members />);
   await flush(5);
 }
+
+// Radix tabs switch on mousedown, not click.
+async function openTab(name) {
+  await act(async () => {
+    byTestId(`tab-${name}`).dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+  });
+  await flush(5);
+}
+
+const ACCOUNTANT = { user_id: 'u-acct', role: 'accountant', email: 'acct@acme.example', name: 'Acct' };
+const asOwner = (roster) => ({ ...roster, your_role: 'owner' });
+const LEADER_USER = mockAuth.user;
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -75,6 +88,7 @@ beforeEach(() => {
 afterEach(async () => {
   await view?.unmount();
   document.body.innerHTML = '';
+  mockAuth.user = LEADER_USER;
 });
 
 it('says the team is managed in Quantro OS and links to it', async () => {
@@ -132,4 +146,72 @@ it('keeps the plain remove flow (and leaving) in a Flow-only workspace', async (
   await click(byTestId('remove-member-u-member'));
   await flush();
   expect(byTestId('confirm-delete-member-btn')).toBeNull();
+});
+
+it('lets only the owner manage an Accountant row in Quantro OS (People OS refuses a Leader)', async () => {
+  const roster = { ...ROSTER, members: [...ROSTER.members, ACCOUNTANT] };
+  await mount(roster);
+  expect(byTestId('role-select-u-acct')).toBeNull();
+  expect(byTestId('remove-member-u-acct')).toBeNull();
+  expect(byTestId('role-select-u-member')).not.toBeNull();   // a Member row stays manageable
+  await view.unmount();
+
+  mockAuth.user = { user_id: 'u-owner', email: 'owner@acme.example', name: 'Owner' };
+  await mount(asOwner(roster));
+  expect(byTestId('role-select-u-acct')).not.toBeNull();
+  expect(byTestId('remove-member-u-acct')).not.toBeNull();
+  await view.unmount();
+
+  // Flow-only workspace: an Accountant is below Leader, as before.
+  mockAuth.user = LEADER_USER;
+  await mount({ ...roster, people_os: false, org_id: null, source: 'mongo' });
+  expect(byTestId('role-select-u-acct')).not.toBeNull();
+});
+
+it('describes the Quantro OS role in the invite dialog of an organization workspace', async () => {
+  await mount();
+  await openTab('invites');
+  await click(byTestId('new-invite-btn'));
+  await flush();
+  expect(byTestId('invite-role-people-os-hint').textContent).toBe(translations.es.members.invite_role_people_os_hint);
+  const trigger = byTestId('invite-role-select').textContent;
+  expect(trigger).toContain(translations.es.members.role_member_people_os_desc);
+  expect(trigger).not.toContain(translations.es.members.role_member_desc);
+  await view.unmount();
+
+  await mount({ ...ROSTER, people_os: false, org_id: null, source: 'mongo' });
+  await openTab('invites');
+  await click(byTestId('new-invite-btn'));
+  await flush();
+  expect(byTestId('invite-role-people-os-hint')).toBeNull();
+  expect(byTestId('invite-role-select').textContent).toContain(translations.es.members.role_member_desc);
+});
+
+it('onboarding copies only that person\u2019s own Quantro OS invitation, and never offers what People OS refuses', async () => {
+  const writeText = jest.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+  const card = (user_id, email, role) => ({
+    user_id, email, name: user_id, role, status: 'in_progress', progress: { completed: 1, total: 5 }, steps: [],
+  });
+  getOnboarding.mockResolvedValue({
+    workspace_id: 'ws_org',
+    members: [card('u-member', 'member@acme.example', 'member'), card('u-new', 'New@Acme.example', 'member'),
+      card('u-acct', 'acct@acme.example', 'accountant')],
+    summary: { completed_onboarding: 0, total_members: 3 },
+  });
+  const invites = [
+    { invite_id: 'tm-other', email: 'someone.else@acme.example', url: 'https://www.quantro.technology/?invite=other', revoked: false },
+    { invite_id: 'tm-new', email: 'new@acme.example', url: 'https://www.quantro.technology/?invite=mine', revoked: false },
+  ];
+  await mount({ ...ROSTER, members: [...ROSTER.members, ACCOUNTANT] }, invites);
+  await openTab('onboarding');
+
+  expect(byTestId('onb-copy-invite-u-member')).toBeNull();   // no invitation of their own
+  await click(byTestId('onb-copy-invite-u-new'));
+  await flush();
+  expect(writeText).toHaveBeenCalledWith('https://www.quantro.technology/?invite=mine');
+  expect(writeText).not.toHaveBeenCalledWith('https://www.quantro.technology/?invite=other');
+
+  expect(byTestId('onb-revoke-u-member')).not.toBeNull();
+  expect(byTestId('onb-revoke-u-acct')).toBeNull();          // only the owner manages an Accountant
 });
