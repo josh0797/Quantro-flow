@@ -7,6 +7,11 @@ Implements the subset Flow's stores use: GET/HEAD/POST/PATCH/DELETE on
 ``Prefer`` ``return=representation|minimal``, ``count=exact`` and
 ``resolution=merge-duplicates|ignore-duplicates`` with ``on_conflict``.
 
+``/rest/v1/rpc/<fn>`` calls go to ``rpc_handlers[fn](body, authorization)``
+(unregistered functions answer 404 / PGRST202, like a function that is not
+deployed). Every call's ``Authorization`` header is kept in ``auth_log`` so
+tests can tell the caller's JWT from the service role.
+
 Declared tables are STRICT like PostgREST: an unknown column in a filter,
 select or body answers 400, a NULL into a NOT NULL column answers 400, a
 unique violation 409, and ``on_conflict`` must name a declared unique key
@@ -303,6 +308,10 @@ class FakePostgrest:
         self.base_url = base_url.rstrip("/")
         self.calls: List[Tuple[str, str]] = []
         self.missing: Set[str] = set()
+        # fn name → handler(body, authorization) -> FakeResponse
+        self.rpc_handlers: Dict[str, Any] = {}
+        self.rpc_calls: List[Tuple[str, Any, Optional[str]]] = []
+        self.auth_log: List[Tuple[str, str, Optional[str]]] = []
 
     def drop_table(self, name: str) -> None:
         """Simulate a table that does not exist (migration not applied)."""
@@ -418,8 +427,18 @@ class FakePostgrest:
             json = _json.loads(_json.dumps(json))
         route = url.path
         self.calls.append((method, route))
+        authorization = (headers or {}).get("Authorization")
+        self.auth_log.append((method, route, authorization))
         if route.rstrip("/") == "/rest/v1":
             return FakeResponse(200, {})
+        if route.startswith("/rest/v1/rpc/"):
+            fn = route[len("/rest/v1/rpc/"):]
+            self.rpc_calls.append((fn, json, authorization))
+            handler = self.rpc_handlers.get(fn)
+            if handler is None:
+                return FakeResponse(404, {"code": "PGRST202", "message": f"Could not find the function public.{fn}"})
+            out = handler(json, authorization)
+            return await out if hasattr(out, "__await__") else out
         if not route.startswith("/rest/v1/"):
             return FakeResponse(404, {"message": "not found"})
         table = route[len("/rest/v1/"):]
@@ -578,5 +597,5 @@ class FakePostgrest:
         return await self.request(
             method, url[len(self.base_url):],
             json=kwargs.get("json"), params=kwargs.get("params"),
-            prefer=headers.get("Prefer"),
+            prefer=headers.get("Prefer"), headers=headers,
         )

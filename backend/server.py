@@ -29,6 +29,7 @@ import ai_billing
 from ai_billing import run_ai_request
 import inbox_categories
 import supabase_admin
+import people_os
 import provider_secrets_store as secrets_store
 import connect_store
 import doc_store
@@ -2265,10 +2266,11 @@ async def update_workspace(
 # ─── RBAC (Phase 7b) ──────────────────────────────────────────────────
 # Quantro role hierarchy (highest → lowest privilege).
 # Matches the `org_members.role` column in Supabase.
-#   owner       — Full control. One per workspace. Can transfer ownership and
-#                 promote others to leader/owner.
+#   owner       — Full control. One per workspace. Ownership is never
+#                 transferred in Flow (Quantro OS or support, decision O12).
 #   leader      — Manage members, integrations, business profile, simulation
-#                 mode. Cannot transfer ownership.
+#                 mode. In an organization workspace, member management is
+#                 People OS's (people.* keys), see _people_os_org.
 #   accountant  — Edit automation policies, escalation rules, content
 #                 templates. Cannot manage members or settings.
 #   member      — Day-to-day workspace usage: inbox actions, CRM/Schedule
@@ -2332,10 +2334,10 @@ async def workspace_to_org_id(workspace_id: str) -> Optional[str]:
         return supabase_admin.resolve_default_org_id()
     return None
 
-# Workspace invites: each invite is a single document (no email needed).
-# A workspace admin generates an invite, gets a shareable URL, and any
-# authenticated user that hits /api/invites/{token}/accept gets added to
-# the workspace with the role specified on the invite.
+# Workspace invites. Organization workspaces invite through Quantro OS
+# People OS (invite_member: single use, 7 days, tied to an email, accepted
+# with the invitee's JWT). Flow-only workspaces (no org_id) keep Flow's own
+# invite docs: a shareable link any signed-in user can accept.
 # Note: workspace_invites_col is defined at the top with other collections
 
 
@@ -2426,9 +2428,9 @@ class CreateInviteRequest(BaseModel):
     role: str = "member"
     max_uses: Optional[int] = 1
     expires_in_days: Optional[int] = 7
-    # Phase 7c: optional metadata for Supabase `invitations` parity.
-    # `email` is required by the Supabase table; if blank we generate a
-    # placeholder so legacy email-free links keep working.
+    # Organization workspaces: People OS requires `email` (the invitation is
+    # bound to it) and ignores max_uses / expires_in_days (single use, 7
+    # days). Flow-only workspaces: all optional.
     email: Optional[str] = None
     full_name: Optional[str] = None
     job_title: Optional[str] = None
@@ -2492,6 +2494,12 @@ async def list_members(
 
     org_id = await workspace_to_org_id(workspace_id)
     use_supabase = supabase_admin.is_supabase_primary() and bool(org_id)
+    # Organization workspaces: the roster is read from org_members (People
+    # OS's mirror) and every change goes through People OS (O12).
+    people_os_info = {
+        "people_os": bool(org_id) and supabase_admin.is_dual_write_enabled(),
+        "people_os_url": people_os.quantro_os_app_url(),
+    }
 
     if use_supabase:
         rows = await supabase_admin.list_org_members(org_id, user.access_token or "")
@@ -2509,6 +2517,7 @@ async def list_members(
                 "workspace_id": workspace_id,
                 "org_id": org_id,
                 "source": "supabase",
+                **people_os_info,
                 "your_role": _normalize_role(me.get("role")),
                 "members": [
                     _serialize_member(
@@ -2532,9 +2541,44 @@ async def list_members(
         "workspace_id": workspace_id,
         "org_id": org_id,
         "source": "mongo",
+        **people_os_info,
         "your_role": _normalize_role(me.get("role")),
         "members": [_serialize_member(m, by_id.get(m["user_id"])) for m in members],
     }
+
+
+# ─── People OS (owner decision O12) ──────────────────────────────────
+# A workspace mapped to a Quantro OS organization has its membership in
+# Quantro OS People OS. Flow never writes org_members / invitations /
+# team_members for it: invites, acceptances, role changes and removals are
+# People OS RPCs run with the CALLER's JWT (people_os.py), which check the
+# People keys, grantable roles, seats and plan. Flow-only workspaces (no
+# org_id, or no Supabase) keep Flow's own workspace_members / invites docs.
+# Ownership never changes in Flow (Quantro OS or support).
+_membership_logger = logging.getLogger("quantro.membership")
+
+
+async def _people_os_org(workspace_id: str) -> Optional[str]:
+    """The Quantro OS organization that owns this workspace's membership,
+    or ``None`` for a Flow-only workspace."""
+    if not supabase_admin.is_dual_write_enabled():
+        return None
+    return await workspace_to_org_id(workspace_id)
+
+
+async def _people_os_member_id(org_id: str, user_id: str, access_token: Optional[str]) -> str:
+    """The team_members id of ``user_id`` in ``org_id``, read with the
+    caller's JWT (their own row, or people.view). Raises member_not_found
+    when the caller cannot see one, people_os_unavailable when the read
+    failed."""
+    rows = await supabase_admin.find_team_members(org_id, user_id, access_token or "")
+    if rows is None:
+        raise people_os.http_error("people_os_unavailable")
+    active = [r for r in rows if r.get("status") == "active"]
+    chosen = (active or rows or [None])[0]
+    if not chosen or not chosen.get("id"):
+        raise people_os.http_error("member_not_found")
+    return str(chosen["id"])
 
 
 @app.patch("/api/workspaces/{workspace_id}/members/{target_user_id}")
@@ -2544,10 +2588,12 @@ async def update_member_role(
     req: UpdateMemberRoleRequest,
     user: User = Depends(get_current_user),
 ):
-    """Change a member's role. Rules:
-      • Only Owner can promote to admin or owner (transfer ownership).
-      • Admin can demote/promote anyone among agent/operator/manager.
-      • Cannot demote yourself if you're the sole Owner.
+    """Change a member's role.
+
+    Organization workspaces: People OS ``change_member_role`` as the caller
+    (people.change_role; Leader / Accountant only by the owner; never one's
+    own role). Flow-only workspaces: Leader+; only the Owner manages
+    leader roles. Ownership is never transferred here (409).
     """
     new_role = (req.role or "").lower()
     if new_role not in VALID_ROLES:
@@ -2556,68 +2602,37 @@ async def update_member_role(
     me = await _membership_for(user.user_id, workspace_id)
     if not me:
         raise HTTPException(status_code=403, detail="Not a workspace member")
-    if role_rank(me.get("role")) < role_rank("leader"):
-        raise HTTPException(status_code=403, detail="Requires leader role")
+    if new_role == "owner":
+        raise people_os.http_error("ownership_transfer_disabled")
 
     target = await _membership_for(target_user_id, workspace_id)
     if not target:
         raise HTTPException(status_code=404, detail="Member not found")
-
     target_role = _normalize_role(target.get("role"))
+    if target_role == "owner":
+        raise people_os.http_error("owner_change_disabled")
 
-    # Only Owner can touch leader/owner roles (either side of the change).
-    is_privileged_change = new_role in {"leader", "owner"} or target_role in {"leader", "owner"}
-    if is_privileged_change and me.get("role") != "owner":
-        raise HTTPException(status_code=403, detail="Only the Owner can manage leader/owner roles")
-
-    # Ownership transfer: demote previous owner to leader so workspace
-    # always has exactly one Owner.
-    org_id = await workspace_to_org_id(workspace_id)
-    if new_role == "owner":
+    org_id = await _people_os_org(workspace_id)
+    if org_id:
         if user.user_id == target_user_id:
-            raise HTTPException(status_code=400, detail="You're already the owner")
-        if org_id and supabase_admin.is_dual_write_enabled():
-            try:
-                await supabase_admin.update_member_role(
-                    org_id=org_id,
-                    member_user_id=user.user_id,
-                    new_role="leader",
-                    access_token=user.access_token or "",
-                )
-            except Exception:  # noqa: BLE001
-                pass
-        if _local_identity_writes():
-            await workspace_members_col.update_one(
-                {"user_id": user.user_id, "workspace_id": workspace_id},
-                {"$set": {"role": "leader"}},
-            )
-        await workspaces_col.update_one(
-            {"workspace_id": workspace_id},
-            {"$set": {"owner_user_id": target_user_id}},
+            raise people_os.http_error("self_change")
+        member_id = await _people_os_member_id(org_id, target_user_id, user.access_token)
+        data = people_os.require_ok(
+            "change_member_role",
+            await supabase_admin.rpc_change_member_role(member_id, new_role, user.access_token or ""),
         )
-
-    # Phase 1: org_members is SoT when primary; Mongo optional mirror.
-    if org_id and supabase_admin.is_dual_write_enabled():
-        try:
-            ok = await supabase_admin.update_member_role(
-                org_id=org_id,
-                member_user_id=target_user_id,
-                new_role=new_role,
-                access_token=user.access_token or "",
-            )
-            if supabase_admin.is_supabase_primary() and not ok:
-                raise HTTPException(status_code=502, detail="Failed to update role in Supabase")
-        except HTTPException:
-            raise
-        except Exception:  # noqa: BLE001
-            if supabase_admin.is_supabase_primary():
-                raise HTTPException(status_code=502, detail="Failed to update role in Supabase")
+        new_role = _normalize_role((data or {}).get("role") or new_role)
+    else:
+        if role_rank(me.get("role")) < role_rank("leader"):
+            raise HTTPException(status_code=403, detail="Requires leader role")
+        if (new_role == "leader" or target_role == "leader") and me.get("role") != "owner":
+            raise HTTPException(status_code=403, detail="Only the Owner can manage leader roles")
 
     if _local_identity_writes():
         await workspace_members_col.update_one(
             {"user_id": target_user_id, "workspace_id": workspace_id},
             {"$set": {"role": new_role, "role_updated_at": datetime.now(timezone.utc)}},
-            upsert=supabase_admin.is_supabase_primary(),
+            upsert=bool(org_id) and supabase_admin.is_supabase_primary(),
         )
 
     await log_audit(
@@ -2630,19 +2645,29 @@ async def update_member_role(
             "new_role": new_role,
             "previous_role": target_role,
             "old_role": target_role,
+            "source": "people_os" if org_id else "local",
         },
     )
-    return {"success": True, "user_id": target_user_id, "role": new_role}
+    return {"success": True, "user_id": target_user_id, "role": new_role,
+            "source": "people_os" if org_id else "local"}
 
 
 @app.delete("/api/workspaces/{workspace_id}/members/{target_user_id}")
 async def remove_member(
     workspace_id: str,
     target_user_id: str,
+    permanent: bool = False,
     user: User = Depends(get_current_user),
 ):
-    """Remove a member. Owner cannot be removed; admins can only be
-    removed by the Owner. Members can also remove themselves (leave)."""
+    """Remove a member.
+
+    Organization workspaces: People OS ``revoke_member_access`` as the
+    caller (people.manage_access: access ends, Quantro OS keeps the record
+    so it can be reactivated), or ``delete_member`` with ``permanent=true``
+    (people.delete). Nobody removes themselves there. Flow-only workspaces:
+    Leader+ (only the Owner removes a leader); members may leave. The owner
+    is never removed here (409).
+    """
     me = await _membership_for(user.user_id, workspace_id)
     if not me:
         raise HTTPException(status_code=403, detail="Not a workspace member")
@@ -2655,29 +2680,24 @@ async def remove_member(
     is_self = user.user_id == target_user_id
 
     if target_role == "owner":
-        raise HTTPException(status_code=400, detail="Owner cannot be removed. Transfer ownership first.")
+        raise people_os.http_error("owner_change_disabled")
 
-    if not is_self:
+    org_id = await _people_os_org(workspace_id)
+    if org_id:
+        if is_self:
+            raise people_os.http_error("self_leave_unavailable")
+        member_id = await _people_os_member_id(org_id, target_user_id, user.access_token)
+        if permanent:
+            people_os.require_ok(
+                "delete_member", await supabase_admin.rpc_delete_member(member_id, user.access_token or ""))
+        else:
+            people_os.require_ok(
+                "revoke_member_access", await supabase_admin.rpc_revoke_member_access(member_id, user.access_token or ""))
+    elif not is_self:
         if role_rank(me.get("role")) < role_rank("leader"):
             raise HTTPException(status_code=403, detail="Requires leader role")
         if target_role == "leader" and me.get("role") != "owner":
             raise HTTPException(status_code=403, detail="Only the Owner can remove a leader")
-
-    org_id = await workspace_to_org_id(workspace_id)
-    if org_id and supabase_admin.is_dual_write_enabled():
-        try:
-            ok = await supabase_admin.delete_member(
-                org_id=org_id,
-                member_user_id=target_user_id,
-                access_token=user.access_token or "",
-            )
-            if supabase_admin.is_supabase_primary() and not ok:
-                raise HTTPException(status_code=502, detail="Failed to remove member in Supabase")
-        except HTTPException:
-            raise
-        except Exception:  # noqa: BLE001
-            if supabase_admin.is_supabase_primary():
-                raise HTTPException(status_code=502, detail="Failed to remove member in Supabase")
 
     if _local_identity_writes():
         await workspace_members_col.delete_one(
@@ -2700,9 +2720,43 @@ async def remove_member(
             "self_leave": is_self,
             "previous_role": target_role,
             "old_role": target_role,
+            "source": "people_os" if org_id else "local",
+            "people_os_action": ("delete_member" if permanent else "revoke_member_access") if org_id else None,
         },
     )
-    return {"success": True}
+    return {"success": True, "source": "people_os" if org_id else "local",
+            "permanent": bool(org_id and permanent)}
+
+
+def _people_os_invite(row: dict, workspace_id: str) -> dict:
+    """A pending People OS invitation (team_members row) as Flow lists it."""
+    token = row.get("invite_token")
+    expires_at = row.get("invite_expires_at")
+    expired = False
+    if isinstance(expires_at, str):
+        try:
+            exp = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            expired = (exp if exp.tzinfo else exp.replace(tzinfo=timezone.utc)) <= datetime.now(timezone.utc)
+        except ValueError:
+            expired = False
+    return {
+        "invite_id": row.get("id"),
+        "workspace_id": workspace_id,
+        "role": _normalize_role(row.get("role")),
+        "token": None if expired else token,
+        "url": None if expired else people_os.invite_url(token),
+        "max_uses": 1,
+        "used_count": 0,
+        "expires_at": expires_at,
+        "expired": expired,
+        "created_by": row.get("invited_by"),
+        "created_at": row.get("created_at"),
+        "revoked": False,
+        "revocable": True,
+        "email": row.get("email"),
+        "full_name": row.get("full_name"),
+        "source": "people_os",
+    }
 
 
 @app.post("/api/workspaces/{workspace_id}/invites")
@@ -2712,56 +2766,81 @@ async def create_invite(
     request: Request,
     user: User = Depends(get_current_user),
 ):
-    """Generate a shareable invite link. Leader+ only."""
+    """Invite someone.
+
+    Organization workspaces: People OS ``invite_member`` as the caller
+    (people.invite, grantable roles, seats and plan are Quantro OS's
+    checks). The invitation is single-use, expires in 7 days, is tied to
+    the email, and is accepted in Quantro OS (``?invite=<token>`` on the
+    Quantro OS app) or on Flow's /join page. Flow-only workspaces: a
+    shareable Flow link, Leader+ only.
+    """
     me = await _membership_for(user.user_id, workspace_id)
     if not me:
         raise HTTPException(status_code=403, detail="Not a workspace member")
-    if role_rank(me.get("role")) < role_rank("leader"):
-        raise HTTPException(status_code=403, detail="Requires leader role")
 
     role = _normalize_role(req.role or "member")
     if role not in VALID_ROLES:
         raise HTTPException(status_code=400, detail=f"Invalid role. Allowed: {VALID_ROLES}")
-    # Only the Owner can mint invites that grant leader/owner.
-    if role in {"leader", "owner"} and me.get("role") != "owner":
-        raise HTTPException(status_code=403, detail="Only the Owner can invite leaders/owners")
+    if role == "owner":
+        raise people_os.http_error("ownership_transfer_disabled")
+
+    org_id = await _people_os_org(workspace_id)
+    if org_id:
+        email = (req.email or "").strip().lower()
+        if not email:
+            raise people_os.http_error("email_required")
+        member = people_os.require_ok("invite_member", await supabase_admin.rpc_invite_member(
+            org_id=org_id,
+            email=email,
+            role=role,
+            full_name=req.full_name,
+            job_title=req.job_title,
+            access_token=user.access_token or "",
+        )) or {}
+        if not member.get("id") or not member.get("invite_token"):
+            raise people_os.http_error("people_os_failed")
+        invite = _people_os_invite({**member, "invited_by": member.get("invited_by") or user.user_id}, workspace_id)
+        if _local_identity_writes():
+            # Flow's own record (onboarding / audit views). No token: the
+            # link lives in Quantro OS only.
+            await workspace_invites_col.insert_one({
+                "invite_id": invite["invite_id"],
+                "workspace_id": workspace_id,
+                "token": None,
+                "role": role,
+                "max_uses": 1,
+                "used_count": 0,
+                "expires_at": invite["expires_at"],
+                "revoked": False,
+                "created_by": user.user_id,
+                "created_at": datetime.now(timezone.utc),
+                "accepted_by": [],
+                "email": email,
+                "full_name": (req.full_name or None),
+                "people_os_member_id": invite["invite_id"],
+                "source": "people_os",
+            })
+        await log_audit(
+            "invites.created",
+            f"{user.email} created invite for role={role}",
+            user_id=user.user_id, workspace_id=workspace_id,
+            target_member_id=user.user_id,
+            metadata={"invite_id": invite["invite_id"], "role": role, "max_uses": 1, "source": "people_os"},
+        )
+        return invite
+
+    if role_rank(me.get("role")) < role_rank("leader"):
+        raise HTTPException(status_code=403, detail="Requires leader role")
+    if role == "leader" and me.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Only the Owner can invite leaders")
 
     import secrets
     expires_in_days = max(1, min(int(req.expires_in_days or 7), 90))
     max_uses = max(1, min(int(req.max_uses or 1), 50))
     expires_at = datetime.now(timezone.utc) + timedelta(days=expires_in_days)
-
-    org_id = await workspace_to_org_id(workspace_id)
-    supabase_invite_id = None
-    sb_token = None
-
-    # Phase 1: invitations table is SoT when primary — create there first.
-    if org_id and supabase_admin.is_dual_write_enabled():
-        try:
-            sb_invite = await supabase_admin.insert_invitation(
-                org_id=org_id,
-                role=role,
-                invited_by=user.user_id,
-                access_token=user.access_token or "",
-                email=req.email,
-                full_name=req.full_name,
-                job_title=req.job_title,
-                expires_at=expires_at.isoformat(),
-            )
-            if sb_invite and sb_invite.get("id"):
-                supabase_invite_id = sb_invite["id"]
-                sb_token = sb_invite.get("token")
-            elif supabase_admin.is_supabase_primary():
-                raise HTTPException(status_code=502, detail="Failed to create invite in Supabase")
-        except HTTPException:
-            raise
-        except Exception:  # noqa: BLE001
-            if supabase_admin.is_supabase_primary():
-                raise HTTPException(status_code=502, detail="Failed to create invite in Supabase")
-
-    # Prefer Supabase token/id when present so join URLs work with SoT.
-    token = sb_token or secrets.token_urlsafe(24)
-    invite_id = supabase_invite_id or f"inv_{uuid.uuid4().hex[:12]}"
+    token = secrets.token_urlsafe(24)
+    invite_id = f"inv_{uuid.uuid4().hex[:12]}"
 
     invite_doc = {
         "invite_id": invite_id,
@@ -2777,8 +2856,7 @@ async def create_invite(
         "accepted_by": [],
         "email": (req.email or None),
         "full_name": (req.full_name or None),
-        "supabase_invite_id": supabase_invite_id,
-        "supabase_token": sb_token,
+        "source": "local",
     }
 
     if _local_identity_writes():
@@ -2789,12 +2867,7 @@ async def create_invite(
         f"{user.email} created invite for role={role}",
         user_id=user.user_id, workspace_id=workspace_id,
         target_member_id=user.user_id,
-        metadata={
-            "invite_id": invite_id,
-            "role": role,
-            "max_uses": max_uses,
-            "supabase_invite_id": supabase_invite_id,
-        },
+        metadata={"invite_id": invite_id, "role": role, "max_uses": max_uses, "source": "local"},
     )
     base_url = (request.headers.get("origin") or "").rstrip("/")
     return _serialize_invite(invite_doc, base_url=base_url or None)
@@ -2806,47 +2879,59 @@ async def list_invites(
     request: Request,
     user: User = Depends(get_current_user),
 ):
-    """List active invites for a workspace. Leader+ only.
+    """List pending invites.
 
-    Phase 7c: when QUANTRO_DB_PRIMARY=supabase, reads from the
-    Supabase ``invitations`` table; otherwise reads Mongo and the
-    Supabase rows are kept in sync via shadow-writes from
-    ``create_invite`` / ``revoke_invite``."""
+    Organization workspaces: the pending People OS invitations the caller
+    can see (people.view), read with their JWT, plus any pending legacy
+    ``invitations`` row (read-only). Flow-only workspaces: Leader+, Flow's
+    own invite docs.
+    """
     me = await _membership_for(user.user_id, workspace_id)
     if not me:
         raise HTTPException(status_code=403, detail="Not a workspace member")
+
+    org_id = await _people_os_org(workspace_id)
+    if org_id:
+        rows = await supabase_admin.list_team_invites(org_id, user.access_token or "")
+        if rows is None:
+            raise people_os.http_error("people_os_unavailable")
+        invites = [_people_os_invite(r, workspace_id) for r in rows]
+        now = datetime.now(timezone.utc)
+        for r in await supabase_admin.list_invitations(org_id, user.access_token or ""):
+            if r.get("accepted"):
+                continue
+            try:
+                exp = datetime.fromisoformat(str(r.get("expires_at")).replace("Z", "+00:00"))
+                exp = exp if exp.tzinfo else exp.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if exp <= now:
+                continue
+            invites.append({
+                "invite_id": r.get("id"),
+                "workspace_id": workspace_id,
+                "role": _normalize_role(r.get("role")),
+                "token": r.get("token"),
+                "url": people_os.invite_url(r.get("token")),
+                "max_uses": 1,
+                "used_count": 0,
+                "expires_at": r.get("expires_at"),
+                "expired": False,
+                "created_by": r.get("invited_by"),
+                "created_at": r.get("created_at"),
+                "revoked": False,
+                "revocable": False,
+                "email": r.get("email"),
+                "full_name": r.get("full_name"),
+                "source": "invitations",
+            })
+        return {"invites": invites, "source": "people_os"}
+
     if role_rank(me.get("role")) < role_rank("leader"):
         raise HTTPException(status_code=403, detail="Requires leader role")
-
-    org_id = await workspace_to_org_id(workspace_id)
     base_url = (request.headers.get("origin") or "").rstrip("/")
-
-    if supabase_admin.is_supabase_primary() and org_id:
-        sb_rows = await supabase_admin.list_invitations(org_id, user.access_token or "")
-        if sb_rows is not None:
-            invites = []
-            for r in sb_rows:
-                token = r.get("token")
-                invites.append({
-                    "invite_id": r.get("id"),
-                    "workspace_id": workspace_id,
-                    "role": _normalize_role(r.get("role")),
-                    "token": token,
-                    "url": f"{base_url}/join/{token}" if base_url and token else None,
-                    "max_uses": 1,
-                    "used_count": 1 if r.get("accepted") else 0,
-                    "expires_at": r.get("expires_at"),
-                    "created_by": r.get("invited_by"),
-                    "created_at": r.get("created_at"),
-                    "revoked": False,
-                    "email": r.get("email"),
-                    "full_name": r.get("full_name"),
-                    "source": "supabase",
-                })
-            return {"invites": invites, "source": "supabase"}
-
     rows = await workspace_invites_col.find({"workspace_id": workspace_id}, {"_id": 0}).sort("created_at", -1).to_list(100)
-    return {"invites": [_serialize_invite(r, base_url=base_url or None) for r in rows], "source": "mongo"}
+    return {"invites": [_serialize_invite(r, base_url=base_url or None) for r in rows], "source": "local"}
 
 
 @app.delete("/api/workspaces/{workspace_id}/invites/{invite_id}")
@@ -2855,31 +2940,47 @@ async def revoke_invite(
     invite_id: str,
     user: User = Depends(get_current_user),
 ):
-    """Revoke a pending invite. Leader+ only."""
+    """Cancel a pending invite.
+
+    Organization workspaces: People OS ``revoke_member_access`` on the
+    invited row, as the caller (people.manage_access; the link stops
+    working). Legacy ``invitations`` rows are read-only (409). Flow-only
+    workspaces: Leader+, Flow's own invite docs.
+    """
     me = await _membership_for(user.user_id, workspace_id)
     if not me:
         raise HTTPException(status_code=403, detail="Not a workspace member")
+
+    org_id = await _people_os_org(workspace_id)
+    if org_id:
+        row = await supabase_admin.get_team_member(org_id, invite_id, user.access_token or "")
+        if not row:
+            legacy = [r for r in await supabase_admin.list_invitations(org_id, user.access_token or "")
+                      if r.get("id") == invite_id]
+            raise people_os.http_error("legacy_invite_read_only" if legacy else "member_not_found")
+        if row.get("auth_user_id"):
+            raise people_os.http_error("invite_already_accepted")
+        people_os.require_ok(
+            "revoke_member_access", await supabase_admin.rpc_revoke_member_access(str(row["id"]), user.access_token or ""))
+        if _local_identity_writes():
+            await workspace_invites_col.update_one(
+                {"workspace_id": workspace_id, "invite_id": invite_id},
+                {"$set": {"revoked": True, "revoked_at": datetime.now(timezone.utc), "revoked_by": user.user_id}},
+            )
+        await log_audit(
+            "invites.revoked",
+            f"{user.email} revoked invite {invite_id}",
+            user_id=user.user_id, workspace_id=workspace_id,
+            target_member_id=user.user_id,
+            metadata={"invite_id": invite_id, "source": "people_os"},
+        )
+        return {"success": True, "source": "people_os"}
+
     if role_rank(me.get("role")) < role_rank("leader"):
         raise HTTPException(status_code=403, detail="Requires leader role")
-    org_id = await workspace_to_org_id(workspace_id)
     invite_row = await workspace_invites_col.find_one(
         {"workspace_id": workspace_id, "invite_id": invite_id}, {"_id": 0}
     )
-
-    # Phase 1: when SoT is Supabase, invite_id is the invitations.id UUID
-    # (list_invites returns that). Revoke there first.
-    sb_id = (invite_row or {}).get("supabase_invite_id") or invite_id
-    revoked_in_sb = False
-    if org_id and supabase_admin.is_dual_write_enabled():
-        try:
-            revoked_in_sb = await supabase_admin.update_invitation(
-                sb_id,
-                {"accepted": True},
-                user.access_token or "",
-            )
-        except Exception:  # noqa: BLE001
-            revoked_in_sb = False
-
     matched = 0
     if _local_identity_writes():
         result = await workspace_invites_col.update_one(
@@ -2887,30 +2988,26 @@ async def revoke_invite(
             {"$set": {"revoked": True, "revoked_at": datetime.now(timezone.utc), "revoked_by": user.user_id}},
         )
         matched = result.matched_count
-
-    if matched == 0 and not revoked_in_sb:
+    if matched == 0:
         raise HTTPException(status_code=404, detail="Invite not found")
-    if invite_row is None:
-        invite_row = {"invite_id": invite_id, "supabase_invite_id": sb_id, "created_by": None}
 
     await log_audit(
         "invites.revoked",
         f"{user.email} revoked invite {invite_id}",
         user_id=user.user_id, workspace_id=workspace_id,
-        target_member_id=invite_row.get("created_by") if invite_row else None,
-        metadata={"invite_id": invite_id, "supabase_invite_id": (invite_row or {}).get("supabase_invite_id")},
+        target_member_id=(invite_row or {}).get("created_by"),
+        metadata={"invite_id": invite_id, "source": "local"},
     )
-    return {"success": True}
+    return {"success": True, "source": "local"}
 
 
 async def _workspace_for_org(org_id: Optional[str]) -> Optional[str]:
     """Reverse of workspace_to_org_id: the Flow workspace of a Supabase org.
 
     ``None`` when Flow has no workspace for the org. Never the default
-    workspace unless the org IS the configured default org: the shared
-    ``invitations`` table also holds Quantro OS invitations, and mapping an
-    unknown org to "default" let any such invite token add its holder to
-    the default workspace.
+    workspace unless the org IS the configured default org: mapping an
+    unknown org to "default" would make any invitation of another Quantro
+    OS organization a membership of Flow's default workspace.
     """
     if not org_id:
         return None
@@ -2922,56 +3019,30 @@ async def _workspace_for_org(org_id: Optional[str]) -> Optional[str]:
     return None
 
 
-async def _resolve_invite_by_token(token: str, access_token: Optional[str] = None) -> Optional[dict]:
-    """Resolve an invite from Supabase SoT (preferred) or Mongo mirror."""
-    if supabase_admin.is_supabase_primary() or supabase_admin.is_dual_write_enabled():
-        try:
-            sb = await supabase_admin.get_invitation_by_token(token, access_token)
-            org_id = sb.get("org_id") if sb else None
-            # An invitation of an org Flow has no workspace for is not a
-            # Flow invite: fall through to Flow's own invite docs (→ 404).
-            workspace_id = await _workspace_for_org(org_id) if sb else None
-            if sb and workspace_id:
-                return {
-                    "invite_id": sb.get("id"),
-                    "supabase_invite_id": sb.get("id"),
-                    "workspace_id": workspace_id,
-                    "org_id": org_id,
-                    "token": sb.get("token"),
-                    "role": sb.get("role"),
-                    "expires_at": sb.get("expires_at"),
-                    "revoked": False,
-                    "accepted": bool(sb.get("accepted")),
-                    "used_count": 1 if sb.get("accepted") else 0,
-                    "max_uses": 1,
-                    "source": "supabase",
-                    "created_by": sb.get("invited_by"),
-                }
-        except Exception:  # noqa: BLE001
-            pass
+async def _flow_only_invite(token: str) -> Optional[dict]:
+    """A Flow invite doc of a Flow-only workspace (no Quantro OS org).
 
+    An invite of an organization workspace is never accepted from Flow's
+    own docs: it must go through People OS (``_people_os_preview``)."""
     invite = await workspace_invites_col.find_one({"token": token}, {"_id": 0})
-    if invite:
-        invite = dict(invite)
-        invite.setdefault("source", "mongo")
+    if not invite or not invite.get("workspace_id"):
+        return None
+    if await _people_os_org(invite["workspace_id"]):
+        return None
+    invite = dict(invite)
+    invite.setdefault("source", "local")
     return invite
 
 
-@app.get("/api/invites/{token}")
-async def peek_invite(token: str, user: User = Depends(get_current_user)):
-    """Public-ish endpoint (still requires Supabase auth so abuse is
-    bounded) that shows the receiver what they're about to accept. Used
-    by the /join/:token frontend page."""
-    invite = await _resolve_invite_by_token(token, user.access_token)
-    if not invite:
-        raise HTTPException(status_code=404, detail="Invite not found or expired")
-    if invite.get("revoked") or invite.get("accepted"):
+def _check_flow_invite_usable(invite: dict) -> Optional[datetime]:
+    """Raise 410 for a revoked / expired / used-up Flow invite; returns its expiry."""
+    if invite.get("revoked"):
         raise HTTPException(status_code=410, detail="This invite has been revoked")
     expires_at = invite.get("expires_at")
     if isinstance(expires_at, str):
         try:
             expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-        except Exception:  # noqa: BLE001
+        except ValueError:
             expires_at = None
     if isinstance(expires_at, datetime):
         exp = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
@@ -2979,47 +3050,141 @@ async def peek_invite(token: str, user: User = Depends(get_current_user)):
             raise HTTPException(status_code=410, detail="This invite has expired")
     if invite.get("used_count", 0) >= invite.get("max_uses", 1):
         raise HTTPException(status_code=410, detail="This invite has reached its usage limit")
-    workspace = await workspaces_col.find_one({"workspace_id": invite["workspace_id"]}, {"_id": 0})
+    return expires_at if isinstance(expires_at, datetime) else None
+
+
+async def _people_os_preview(token: str, access_token: Optional[str]) -> dict:
+    """get_invitation_preview as the caller; raises for anything but valid."""
+    if not supabase_admin.is_dual_write_enabled():
+        raise people_os.http_error("invite_invalid")
+    preview = people_os.require_ok(
+        "get_invitation_preview", await supabase_admin.rpc_invitation_preview(token, access_token or "")) or {}
+    status = preview.get("status")
+    if status != "valid":
+        raise people_os.invite_code_error(status)
+    return preview
+
+
+@app.get("/api/invites/{token}")
+async def peek_invite(token: str, user: User = Depends(get_current_user)):
+    """What the receiver is about to accept (the /join/:token page).
+
+    Quantro OS invitations come from People OS ``get_invitation_preview``
+    (organization name, role, masked email, expiry; no ids). Flow-only
+    workspace invites come from Flow's own docs."""
+    invite = await _flow_only_invite(token)
+    if invite:
+        expires_at = _check_flow_invite_usable(invite)
+        workspace = await workspaces_col.find_one({"workspace_id": invite["workspace_id"]}, {"_id": 0})
+        return {
+            "workspace_id": invite["workspace_id"],
+            "workspace_name": (workspace or {}).get("name", "Workspace"),
+            "role": _normalize_role(invite.get("role")),
+            "expires_at": expires_at.isoformat() if expires_at else invite.get("expires_at"),
+            "source": "local",
+        }
+
+    preview = await _people_os_preview(token, user.access_token)
     return {
-        "workspace_id": invite["workspace_id"],
-        "workspace_name": (workspace or {}).get("name", "Workspace"),
-        "role": _normalize_role(invite.get("role")),
-        "expires_at": expires_at.isoformat() if isinstance(expires_at, datetime) else invite.get("expires_at"),
-        "source": invite.get("source"),
+        "workspace_id": None,
+        "workspace_name": preview.get("organization_name") or "Quantro OS",
+        "organization_name": preview.get("organization_name"),
+        "role": _normalize_role(preview.get("role")),
+        "expires_at": preview.get("expires_at"),
+        "email_hint": preview.get("email_hint"),
+        "kind": preview.get("kind"),
+        "source": "people_os",
     }
 
 
 @app.post("/api/invites/{token}/accept")
 async def accept_invite(token: str, user: User = Depends(get_current_user)):
-    """Accept an invite token. Adds the authenticated user to the
-    workspace with the role specified on the invite. Idempotent: if the
-    user is already a member, the existing membership is preserved
-    (role is NOT downgraded).
+    """Accept an invite as the signed-in user.
 
-    Phase 1: works with Supabase invitations SoT — does not require a
-    Mongo ``workspace_members`` / ``workspace_invites`` document.
+    Quantro OS invitations: People OS ``accept_team_invite`` (team_members
+    row) or ``accept_invitation`` (legacy invitations row) with the
+    INVITEE's JWT — the server checks that their confirmed email is the
+    invited one, the token, expiry, the inviter, seats and plan, and the
+    org_members mirror follows. Flow then finds (or, like at login,
+    creates) the organization's workspace. Flow-only workspace invites
+    stay in Flow's own docs. Idempotent: an existing membership is kept
+    (never downgraded).
     """
-    invite = await _resolve_invite_by_token(token, user.access_token)
-    if not invite:
-        raise HTTPException(status_code=404, detail="Invite not found")
-    if invite.get("revoked") or invite.get("accepted"):
-        raise HTTPException(status_code=410, detail="This invite has been revoked")
-    expires_at = invite.get("expires_at")
-    if isinstance(expires_at, str):
-        try:
-            expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-        except Exception:  # noqa: BLE001
-            expires_at = None
-    if isinstance(expires_at, datetime):
-        exp = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
-        if exp < datetime.now(timezone.utc):
-            raise HTTPException(status_code=410, detail="This invite has expired")
-    if invite.get("used_count", 0) >= invite.get("max_uses", 1):
-        raise HTTPException(status_code=410, detail="This invite has reached its usage limit")
+    invite = await _flow_only_invite(token)
+    if invite:
+        return await _accept_flow_only_invite(invite, token, user)
 
+    preview = await _people_os_preview(token, user.access_token)
+    if preview.get("kind") == "team":
+        result = await supabase_admin.rpc_accept_team_invite(token, user.access_token or "")
+        fn = "accept_team_invite"
+    else:
+        result = await supabase_admin.rpc_accept_invitation(token, user.access_token or "")
+        fn = "accept_invitation"
+    data = people_os.require_ok(fn, result) or {}
+    if not data.get("success"):
+        raise people_os.invite_code_error(data.get("code"))
+
+    org_id = data.get("organization_id") or data.get("org_id")
+    role = _normalize_role(data.get("role") or preview.get("role"))
+    already_member = data.get("code") == "already_member"
+
+    workspace_id = await _workspace_for_org(org_id)
+    if not workspace_id and org_id:
+        # Same as at login: the organization gets its workspace and the
+        # membership cache is filled from org_members (the mirror).
+        try:
+            await reconcile_supabase_memberships_to_mongo({"user_id": user.user_id, "name": user.name})
+        except Exception:  # noqa: BLE001 — the membership exists in Quantro OS either way
+            _membership_logger.warning("accept_invite: workspace reconcile failed")
+        workspace_id = await _workspace_for_org(org_id)
+
+    if workspace_id:
+        if _local_identity_writes():
+            await workspace_members_col.update_one(
+                {"workspace_id": workspace_id, "user_id": user.user_id},
+                {"$set": {"role": role, "source": "people_os"},
+                 "$setOnInsert": {"joined_at": datetime.now(timezone.utc)}},
+                upsert=True,
+            )
+            if user.email:
+                await workspace_invites_col.update_one(
+                    {"workspace_id": workspace_id, "source": "people_os",
+                     "email": user.email.strip().lower(), "used_count": 0},
+                    {"$inc": {"used_count": 1},
+                     "$push": {"accepted_by": {"user_id": user.user_id, "at": datetime.now(timezone.utc)}}},
+                )
+        await users_col.update_one(
+            {"user_id": user.user_id},
+            {"$set": {"current_workspace_id": workspace_id}},
+            upsert=False,
+        )
+        await log_audit(
+            "invites.accepted",
+            f"{user.email} joined workspace via invite as {role}",
+            user_id=user.user_id, workspace_id=workspace_id,
+            target_member_id=user.user_id,
+            metadata={"role": role, "source": "people_os", "kind": preview.get("kind"),
+                      "already_member": already_member},
+        )
+    return {
+        "success": True,
+        "workspace_id": workspace_id,
+        "organization_id": org_id,
+        "organization_name": preview.get("organization_name"),
+        "role": role,
+        "already_member": already_member,
+        "source": "people_os",
+    }
+
+
+async def _accept_flow_only_invite(invite: dict, token: str, user: User) -> dict:
+    """Accept a Flow-only workspace invite (Flow's own docs; no Quantro OS org)."""
+    _check_flow_invite_usable(invite)
     workspace_id = invite["workspace_id"]
     role = _normalize_role(invite.get("role") or "member")
-    org_id = invite.get("org_id") or await workspace_to_org_id(workspace_id)
+    if role == "owner":
+        role = "leader"
 
     existing = await _membership_for(user.user_id, workspace_id)
     if existing:
@@ -3027,30 +3192,10 @@ async def accept_invite(token: str, user: User = Depends(get_current_user)):
             {"user_id": user.user_id},
             {"$set": {"current_workspace_id": workspace_id}},
         )
-        return {"success": True, "workspace_id": workspace_id, "role": existing.get("role"), "already_member": True}
+        return {"success": True, "workspace_id": workspace_id, "role": existing.get("role"),
+                "already_member": True, "source": "local"}
 
     joined_at = datetime.now(timezone.utc)
-    if org_id and supabase_admin.is_dual_write_enabled():
-        sb_member = await supabase_admin.insert_org_member(
-            org_id=org_id,
-            user_id=user.user_id,
-            role=role,
-            access_token=user.access_token,
-            joined_at=joined_at.isoformat(),
-        )
-        if supabase_admin.is_supabase_primary() and not sb_member:
-            raise HTTPException(status_code=502, detail="Failed to add member in Supabase")
-        sb_invite_id = invite.get("supabase_invite_id") or invite.get("invite_id")
-        if sb_invite_id:
-            try:
-                await supabase_admin.update_invitation(
-                    sb_invite_id,
-                    {"accepted": True},
-                    user.access_token or "",
-                )
-            except Exception:  # noqa: BLE001
-                pass
-
     if _local_identity_writes():
         await workspace_members_col.update_one(
             {"workspace_id": workspace_id, "user_id": user.user_id},
@@ -3082,9 +3227,9 @@ async def accept_invite(token: str, user: User = Depends(get_current_user)):
         f"{user.email} joined workspace via invite as {role}",
         user_id=user.user_id, workspace_id=workspace_id,
         target_member_id=user.user_id,
-        metadata={"invite_id": invite.get("invite_id"), "role": role, "source": invite.get("source")},
+        metadata={"invite_id": invite.get("invite_id"), "role": role, "source": "local"},
     )
-    return {"success": True, "workspace_id": workspace_id, "role": role, "already_member": False, "source": invite.get("source")}
+    return {"success": True, "workspace_id": workspace_id, "role": role, "already_member": False, "source": "local"}
 
 
 # ─── Onboarding + Audit (Phase 7b-ext) ────────────────────────────────
