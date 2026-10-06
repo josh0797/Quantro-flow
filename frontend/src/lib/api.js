@@ -73,8 +73,13 @@ export const listMembers = (workspace_id) =>
   api.get(`/workspaces/${workspace_id}/members`).then(r => r.data);
 export const updateMemberRole = (workspace_id, user_id, role) =>
   api.patch(`/workspaces/${workspace_id}/members/${user_id}`, { role }).then(r => r.data);
-export const removeMember = (workspace_id, user_id) =>
-  api.delete(`/workspaces/${workspace_id}/members/${user_id}`).then(r => r.data);
+// Organization workspaces: Quantro OS People OS revokes access
+// (revoke_member_access), or deletes the person with `permanent`
+// (delete_member). Flow-only workspaces: removes the Flow membership.
+export const removeMember = (workspace_id, user_id, { permanent = false } = {}) =>
+  api.delete(`/workspaces/${workspace_id}/members/${user_id}`, {
+    params: permanent ? { permanent: true } : undefined,
+  }).then(r => r.data);
 
 // Workspace invites
 export const listInvites = (workspace_id) =>

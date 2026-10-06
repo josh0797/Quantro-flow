@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Phase 7c — One-shot backfill Mongo → Supabase.
 
-Reads the three legacy MongoDB collections that today hold members,
-invites and audit events, and pushes them into the corresponding
-Supabase tables (`org_members`, `invitations`, `org_audit_logs`).
+Reads legacy MongoDB collections (audit events, provider connections,
+actions, inbox, product domains) and pushes them into the corresponding
+Supabase tables. Members and invites are NOT migrated any more: since
+owner decision O12 membership belongs to Quantro OS People OS, and
+``--table members|invites`` only prints why (docs/people-os-membership.md).
 
 Safety guarantees
 -----------------
@@ -11,8 +13,7 @@ Safety guarantees
   anything. Without it, the script only inspects, validates and prints
   what *would* happen.
 * **Dedup on the Supabase side.** Every insert is preceded by a SELECT
-  on the natural keys we care about (``(org_id, user_id)`` for
-  members; ``token`` for invitations; ``(org_id, action,
+  on the natural keys we care about (e.g. ``(org_id, action,
   target_user_id, created_at)`` for audit). Rows already present are
   reported as ``skipped:duplicate``.
 * **Workspace ↔ Org mapping.** Reads ``QUANTRO_DEFAULT_ORG_ID`` from
@@ -27,7 +28,7 @@ Safety guarantees
 * **Idempotent.** Re-running after a partial run picks up where it
   left off. No row is updated; only inserted-if-missing.
 * **Granular --table flag.** You can run only the table you want
-  (``members``, ``invites``, ``audit``, ``provider_connections``,
+  (``audit``, ``provider_connections``,
   ``integrations_config``,
   ``action_executions``, ``automation_policies``, ``action_policies``,
   ``inbox_items``, ``activity_events``, ``content_items``, ``content_templates``,
@@ -38,11 +39,11 @@ Examples
     # 1) See exactly what would happen for everything (default mode).
     python backfill_mongo_to_supabase.py
 
-    # 2) Dry-run only the members migration, limit 50 rows.
-    python backfill_mongo_to_supabase.py --table members --limit 50
+    # 2) Dry-run only the audit migration, limit 50 rows.
+    python backfill_mongo_to_supabase.py --table audit --limit 50
 
-    # 3) Real run for invites only.
-    python backfill_mongo_to_supabase.py --table invites --execute
+    # 3) Real run for inbox items only.
+    python backfill_mongo_to_supabase.py --table inbox_items --execute
 
     # 4) Full real run after dry-run looks clean.
     python backfill_mongo_to_supabase.py --execute
@@ -55,7 +56,6 @@ import json
 import os
 import re
 import sys
-import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -242,179 +242,12 @@ async def build_workspace_org_map(db) -> Dict[str, str]:
 
 
 # ── Migrators ────────────────────────────────────────────────────────
-async def migrate_members(
-    db, sb: SupabaseClient, ws_org: Dict[str, str], reporter: Reporter, *,
-    execute: bool, limit: Optional[int],
-) -> None:
-    print("\n--- workspace_members → org_members ---")
-    cursor = db["workspace_members"].find({}, {"_id": 0})
-    seen = 0
-    # Local dedup so dry-run numbers reflect what a real run would write.
-    # Keys are `(org_id, user_id)` tuples already "would-be" inserted in
-    # this invocation.
-    dry_seen: set[Tuple[str, str]] = set()
-    async for row in cursor:
-        if limit and seen >= limit:
-            break
-        seen += 1
-        wid = row.get("workspace_id")
-        uid = row.get("user_id")
-        # Resolve legacy Mongo id → current Supabase id BEFORE role override,
-        # dedup and FK checks. This is the single place where identity gets
-        # rewritten across systems.
-        if uid in USER_ID_ALIASES:
-            aliased = USER_ID_ALIASES[uid]
-            print(f"  [alias] {uid} → {aliased}")
-            uid = aliased
-        role = normalize_role(row.get("role"))
-        # Manual override (e.g. Josias Mont → leader in default org).
-        if uid in ROLE_OVERRIDES:
-            role = ROLE_OVERRIDES[uid]
-
-        org_id = ws_org.get(wid)
-        if not org_id and FALLBACK_TO_DEFAULT_ORG and DEFAULT_ORG_ID and is_uuid(uid):
-            # Option A consolidation — no per-workspace org exists yet, so
-            # every real user ends up in the default org. Legacy test seeds
-            # (non-UUID user_id) skip out via `bad_uuid` below.
-            org_id = DEFAULT_ORG_ID
-            # Note: intentionally NOT bumping a counter here — this is an
-            # intermediate resolution, not a terminal status. The row will
-            # still end up reported as `dry:would_insert`, `skip:duplicate`
-            # or `skip:duplicate_in_run` below.
-        if not org_id:
-            print(f"  [skip:no_mapping] ws={wid} user={uid} (add it to workspaces.org_id or QUANTRO_DEFAULT_ORG_ID)")
-            reporter.bump("members", "skip:no_mapping")
-            continue
-        if not is_uuid(uid):
-            print(f"  [skip:bad_uuid] user_id={uid!r} is not a uuid (legacy account)")
-            reporter.bump("members", "skip:bad_uuid")
-            continue
-
-        # Dedup — first against Supabase, then against this run's own plan.
-        status, body = await sb.get(
-            "/rest/v1/org_members",
-            {"org_id": f"eq.{org_id}", "user_id": f"eq.{uid}", "select": "id", "limit": "1"},
-        )
-        if status == 200 and isinstance(body, list) and body:
-            print(f"  [skip:duplicate] org={org_id} user={uid}")
-            reporter.bump("members", "skip:duplicate")
-            continue
-        if (org_id, uid) in dry_seen:
-            print(f"  [skip:duplicate_in_run] org={org_id} user={uid}")
-            reporter.bump("members", "skip:duplicate_in_run")
-            continue
-
-        payload = {
-            "org_id": org_id,
-            "user_id": uid,
-            "role": role,
-        }
-        joined_at = row.get("joined_at")
-        if isinstance(joined_at, datetime):
-            payload["joined_at"] = joined_at.astimezone(timezone.utc).isoformat()
-
-        if not execute:
-            print(f"  [dry] would insert org={org_id} user={uid} role={role}")
-            reporter.bump("members", "dry:would_insert")
-            dry_seen.add((org_id, uid))
-            continue
-
-        status, body = await sb.post("/rest/v1/org_members", payload)
-        if status < 400:
-            print(f"  [ok] inserted user={uid} role={role}")
-            reporter.bump("members", "inserted")
-            dry_seen.add((org_id, uid))
-        else:
-            print(f"  [error:{status}] user={uid} body={str(body)[:160]}")
-            reporter.bump("members", f"error:{status}")
-            reporter.error("members", f"{org_id}/{uid}", f"http {status}: {str(body)[:120]}")
-
-
-async def migrate_invites(
-    db, sb: SupabaseClient, ws_org: Dict[str, str], reporter: Reporter, *,
-    execute: bool, limit: Optional[int],
-) -> None:
-    print("\n--- workspace_invites → invitations ---")
-    cursor = db["workspace_invites"].find({}, {"_id": 0})
-    seen = 0
-    async for row in cursor:
-        if limit and seen >= limit:
-            break
-        seen += 1
-        wid = row.get("workspace_id")
-        token = row.get("token")
-        org_id = ws_org.get(wid)
-
-        if not org_id:
-            print(f"  [skip:no_mapping] ws={wid} token={token[:8] if token else '?'}")
-            reporter.bump("invites", "skip:no_mapping")
-            continue
-        if not token:
-            print(f"  [skip:no_token] invite_id={row.get('invite_id')}")
-            reporter.bump("invites", "skip:no_token")
-            continue
-
-        # Supabase invitations.token is uuid; legacy Mongo tokens are
-        # ``secrets.token_urlsafe(24)`` (~32 chars, NOT a uuid). When
-        # the Mongo row lacks a paired Supabase token (it would have
-        # been stored on ``supabase_token`` after Phase 7c shadow-write),
-        # we generate a fresh uuid for the new Supabase row and store
-        # it back on Mongo for cross-linking on the next run.
-        sb_token = row.get("supabase_token") or (token if is_uuid(token) else str(uuid.uuid4()))
-
-        # Dedup by token
-        status, body = await sb.get(
-            "/rest/v1/invitations",
-            {"token": f"eq.{sb_token}", "select": "id", "limit": "1"},
-        )
-        if status == 200 and isinstance(body, list) and body:
-            print(f"  [skip:duplicate] token={sb_token[:8]}…")
-            reporter.bump("invites", "skip:duplicate")
-            continue
-
-        role = normalize_role(row.get("role"))
-        email = (row.get("email") or "").strip().lower()
-        if not email:
-            email = f"pending+{org_id[:8]}@quantro.invite"
-
-        payload: Dict[str, Any] = {
-            "org_id": org_id,
-            "email": email,
-            "role": role,
-            "token": sb_token,
-            "invited_by": row.get("created_by") if is_uuid(row.get("created_by")) else None,
-            "accepted": bool((row.get("used_count", 0) or 0) > 0 or row.get("revoked")),
-        }
-        if row.get("expires_at") and isinstance(row["expires_at"], datetime):
-            payload["expires_at"] = row["expires_at"].astimezone(timezone.utc).isoformat()
-        if row.get("full_name"):
-            payload["full_name"] = row["full_name"]
-
-        if not execute:
-            print(f"  [dry] would insert email={email} role={role} token={sb_token[:8]}…")
-            reporter.bump("invites", "dry:would_insert")
-            continue
-
-        status, body = await sb.post("/rest/v1/invitations", payload)
-        if status < 400:
-            print(f"  [ok] inserted token={sb_token[:8]}…")
-            reporter.bump("invites", "inserted")
-            # Cross-link Mongo row → Supabase id (so future shadow-writes
-            # on revoke can find the right Supabase row).
-            try:
-                rows = body if isinstance(body, list) else [body] if body else []
-                inserted_id = (rows[0] if rows else {}).get("id") if rows else None
-                if inserted_id:
-                    await db["workspace_invites"].update_one(
-                        {"invite_id": row.get("invite_id")},
-                        {"$set": {"supabase_invite_id": inserted_id, "supabase_token": sb_token}},
-                    )
-            except Exception:
-                pass
-        else:
-            print(f"  [error:{status}] token={sb_token[:8]}… body={str(body)[:160]}")
-            reporter.bump("invites", f"error:{status}")
-            reporter.error("invites", sb_token[:12], f"http {status}: {str(body)[:120]}")
+# workspace_members → org_members and workspace_invites → invitations are
+# gone (owner decision O12): membership belongs to Quantro OS People OS
+# (team_members; org_members is its mirror) and no service-role write may go
+# around it (seats, plan, People keys, audit). A person only Flow knows about
+# is invited from Flow (People OS invite_member) or in Quantro OS.
+MEMBERSHIP_TABLES_RETIRED = ("members", "invites")
 
 
 async def migrate_audit(
@@ -1267,10 +1100,12 @@ async def main(args: argparse.Namespace) -> None:
 
     reporter = Reporter()
     table = args.table.lower()
-    if table in ("members", "all"):
-        await migrate_members(db, sb, ws_org, reporter, execute=args.execute, limit=args.limit)
-    if table in ("invites", "all"):
-        await migrate_invites(db, sb, ws_org, reporter, execute=args.execute, limit=args.limit)
+    if table in MEMBERSHIP_TABLES_RETIRED or table == "all":
+        print(
+            "\n[skip] members / invites: membership is Quantro OS People OS's (O12). "
+            "This script no longer writes org_members or invitations; invite people "
+            "from Flow or in Quantro OS (docs/people-os-membership.md)."
+        )
     if table in ("audit", "all"):
         await migrate_audit(db, sb, ws_org, reporter, execute=args.execute, limit=args.limit)
     if table in ("provider_connections", "all"):

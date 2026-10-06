@@ -6,10 +6,16 @@ Supabase tables are the SoT:
 
 | Concern | Supabase (SoT) | Mongo (optional mirror / rollback) |
 |---------|----------------|-------------------------------------|
-| Members | `org_members` | `workspace_members` |
-| Invites | `invitations` | `workspace_invites` |
+| Members | `org_members` (read-only: People OS mirror) | `workspace_members` |
+| Invites | People OS `team_members` (`invited`); legacy `invitations` read-only | `workspace_invites` |
 | Audit | `org_audit_logs` | `audit_log` |
 | Workspaces / users | projections (`organizations`, Auth users) | `workspaces`, `users` (still used for profile + workspace mapping) |
+
+> **Superseded for writes (decision O12, 2026-10-05):** Flow no longer writes
+> `org_members` or `invitations`. Invites, acceptances, role changes and
+> removals of organization workspaces are Quantro OS People OS RPCs called with
+> the caller's JWT, and ownership is never transferred in Flow. See
+> [people-os-membership.md](people-os-membership.md).
 
 No new parallel tables. Extends Phase 7c (`people_onboarding_steps` + existing org schema).
 
@@ -19,7 +25,7 @@ No new parallel tables. Extends Phase 7c (`people_onboarding_steps` + existing o
 2. Backfill run (dry-run then execute): `scripts/backfill_mongo_to_supabase.py`.
 3. Env:
    - `SUPABASE_URL`, `SUPABASE_ANON_KEY`
-   - `SUPABASE_SERVICE_ROLE_KEY` (required for reliable RBAC lookups + invite accept)
+   - `SUPABASE_SERVICE_ROLE_KEY` (required for reliable RBAC lookups; never used for membership writes)
    - `QUANTRO_DEFAULT_ORG_ID` (maps legacy `default` workspace)
 
 ## Flip `DB_PRIMARY`

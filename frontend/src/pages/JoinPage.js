@@ -8,7 +8,12 @@ import { CheckCircle2, AlertTriangle, Loader2, Users, Clock } from 'lucide-react
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
 import { peekInvite, acceptInvite } from '../lib/api';
+import { peopleOsErrorMessage } from '../lib/peopleOsErrors';
 import { toast } from 'sonner';
+
+// Quantro OS invitations (source 'people_os') are accepted by Quantro OS
+// People OS with the signed-in user's account: their confirmed email must be
+// the invited one, and seats / plan are checked there.
 
 export default function JoinPage() {
   const { token } = useParams();
@@ -35,9 +40,7 @@ export default function JoinPage() {
         const data = await peekInvite(token);
         if (!cancelled) setInvite(data);
       } catch (err) {
-        const detail = err?.response?.data?.detail;
-        const msg = typeof detail === 'string' ? detail : detail?.message || t('invite.error_invalid');
-        if (!cancelled) setError(msg);
+        if (!cancelled) setError(peopleOsErrorMessage(err, t) || t('invite.error_invalid'));
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -51,6 +54,9 @@ export default function JoinPage() {
       const result = await acceptInvite(token);
       if (result?.already_member) {
         toast.info(t('invite.already_member'));
+      } else if (result?.source === 'people_os' && !result?.workspace_id) {
+        // Joined in Quantro OS; Flow maps the organization to a workspace at next sign-in.
+        toast.success(t('invite.joined_org', { name: result.organization_name || invite?.workspace_name || 'Quantro OS' }));
       } else {
         toast.success(t('invite.success_title'));
       }
@@ -59,9 +65,7 @@ export default function JoinPage() {
       // Hard nav to dashboard so all contexts re-fetch under the new workspace.
       window.location.href = '/dashboard';
     } catch (err) {
-      const detail = err?.response?.data?.detail;
-      const msg = typeof detail === 'string' ? detail : detail?.message || 'Failed to accept invite';
-      toast.error(msg);
+      toast.error(peopleOsErrorMessage(err, t) || t('invite.error_invalid'));
     } finally {
       setAccepting(false);
     }
@@ -107,12 +111,16 @@ export default function JoinPage() {
             <Users size={18} className="text-[hsl(var(--primary))]" />
             <CardTitle className="text-base">{t('invite.page_title')}</CardTitle>
           </div>
-          <p className="text-sm text-muted-foreground mt-1">{t('invite.page_subtitle')}</p>
+          <p className="text-sm text-muted-foreground mt-1">
+            {t(invite.source === 'people_os' ? 'invite.people_os_subtitle' : 'invite.page_subtitle')}
+          </p>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
             <div className="flex items-center justify-between p-3 rounded-lg bg-[hsl(var(--surface-1))] border border-[hsl(var(--border))]">
-              <span className="text-xs text-muted-foreground uppercase tracking-wide">{t('invite.workspace_label')}</span>
+              <span className="text-xs text-muted-foreground uppercase tracking-wide">
+                {t(invite.source === 'people_os' ? 'invite.organization_label' : 'invite.workspace_label')}
+              </span>
               <span className="text-sm font-medium" data-testid="invite-workspace-name">{invite.workspace_name}</span>
             </div>
             <div className="flex items-center justify-between p-3 rounded-lg bg-[hsl(var(--surface-1))] border border-[hsl(var(--border))]">
@@ -121,6 +129,12 @@ export default function JoinPage() {
                 {t(`members.role_${invite.role}`)}
               </Badge>
             </div>
+            {invite.email_hint && (
+              <div className="flex items-center justify-between p-3 rounded-lg bg-[hsl(var(--surface-1))] border border-[hsl(var(--border))]">
+                <span className="text-xs text-muted-foreground uppercase tracking-wide">{t('invite.email_hint_label')}</span>
+                <span className="text-xs font-mono" data-testid="invite-email-hint">{invite.email_hint}</span>
+              </div>
+            )}
             {invite.expires_at && (
               <div className="flex items-center justify-between p-3 rounded-lg bg-[hsl(var(--surface-1))] border border-[hsl(var(--border))]">
                 <span className="text-xs text-muted-foreground uppercase tracking-wide flex items-center gap-1.5">
