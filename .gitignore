@@ -108,3 +108,7 @@ credentials.json
 *.key
 .credentials
 supabase/.temp/
+
+# Allow env examples (placeholders only)
+!.env.example
+!**/.env.example
