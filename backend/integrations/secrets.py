@@ -15,7 +15,7 @@ Key resolution order:
   2. GOOGLE_TOKENS_ENCRYPTION_KEY — the key google_oauth.py/
      microsoft_oauth.py already use. Falling back to it means a
      deployment that only ever set up Google OAuth still gets secret
-     encryption for Facturapi/etc. for free, but production should set
+     encryption for generic integrations for free, but production should set
      its own INTEGRATIONS_ENCRYPTION_KEY (a single shared key across
      unrelated secret domains is a compatibility bridge, not the
      target state).
@@ -140,6 +140,9 @@ def decrypt_config_secrets(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 # or HTTP response — only a scrubbed version.
 _BEARER_RE = re.compile(r"Bearer\s+[A-Za-z0-9\-_.~+/]+=*", re.IGNORECASE)
 _SK_KEY_RE = re.compile(r"\b(sk|pk|rk)_(test|live)_[A-Za-z0-9]{6,}\b")
+# OpenAI keys (sk-..., sk-proj-..., sk-svcacct-...), including the masked
+# form OpenAI echoes in 401 messages ("sk-proj-****abcd").
+_OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_\-*.]{4,}")
 _QUERY_SECRET_RE = re.compile(
     r"(?i)\b(key|token|secret|password|api_key)=([^&\s]+)"
 )
@@ -154,6 +157,7 @@ def redact_error_text(text: Optional[str], max_len: int = 300) -> str:
         return ""
     scrubbed = _BEARER_RE.sub("Bearer [redacted]", text)
     scrubbed = _SK_KEY_RE.sub("[redacted-key]", scrubbed)
+    scrubbed = _OPENAI_KEY_RE.sub("[redacted-key]", scrubbed)
     scrubbed = _QUERY_SECRET_RE.sub(lambda m: f"{m.group(1)}=[redacted]", scrubbed)
     scrubbed = _LONG_TOKENish_RE.sub("[redacted]", scrubbed)
     return scrubbed[:max_len]

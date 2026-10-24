@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import {
   Search, CheckCircle2, AlertTriangle, XCircle, Settings2, Loader2,
@@ -14,11 +15,41 @@ import {
   Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription,
 } from '@/components/ui/sheet';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../contexts/AuthContext';
+import { canManageConnections } from '../lib/roles';
 import {
   getConnectProviders, testConnection, syncConnection, disconnectProvider,
   requestGooglePermission, requestMicrosoftPermission, getActions, getActionExecutions,
   startGoogleOAuth, startMicrosoftOAuth,
 } from '../lib/api';
+import {
+  readProviderCallback, stripProviderCallbackParams, providerLabel,
+} from '../lib/providerCallback';
+
+/**
+ * ConnectPanel — Quantro Connect (provider catalog: Google Workspace,
+ * Microsoft Outlook, Facturación, Quantro Internal) rendered inside
+ * Settings → Integrations. It used to be its own /connect page; that URL
+ * (and /connect/*) now redirects here, query string included.
+ *
+ * OAuth return path: '/settings'. It is on the backend's return_to
+ * allowlist (server.ALLOWED_OAUTH_RETURN_PATHS) and Settings opens on the
+ * Integrations tab by default, so the provider callback lands right here.
+ * '/connect' stays allowlisted for OAuth states started before the merge.
+ */
+export const CONNECT_OAUTH_RETURN_PATH = '/settings';
+
+const OAUTH_PROVIDERS = new Set(['google', 'microsoft']);
+
+// Leader+ gate for connection controls (shared with IntegrationsPanel).
+export { canManageConnections };
+
+// 403 {error: 'rbac_forbidden'} → the leader-only explanation.
+function errorDescription(err, t) {
+  const detail = err?.response?.data?.detail;
+  if (err?.response?.status === 403 && detail?.error === 'rbac_forbidden') return t('connect.toasts.leader_only');
+  return typeof detail === 'string' ? detail : undefined;
+}
 
 const CATEGORY_ORDER = ['all', 'productivity', 'fiscal', 'ai', 'automation', 'internal'];
 
@@ -92,7 +123,7 @@ function ProviderCard({ provider, onOpen, t }) {
   );
 }
 
-function ProviderDrawer({ provider, open, onClose, onChanged, t }) {
+function ProviderDrawer({ provider, open, onClose, onChanged, canManage, t }) {
   const [tab, setTab] = useState('overview');
   const [busy, setBusy] = useState(false);
   const [providerActions, setProviderActions] = useState([]);
@@ -140,29 +171,45 @@ function ProviderDrawer({ provider, open, onClose, onChanged, t }) {
       toast.success(t('connect.toasts.disconnected', { provider: provider.name }));
       onChanged();
       onClose();
-    } catch {
-      toast.error(t('connect.toasts.action_failed'));
+    } catch (err) {
+      const description = errorDescription(err, t);
+      toast.error(t('connect.toasts.action_failed'), description ? { description } : undefined);
     } finally {
       setBusy(false);
     }
   };
 
-  const handleGrantPermission = async (providerId, actionId) => {
+  // Top-level redirect to the provider consent screen. `busy` stays true
+  // until the browser leaves, so a second click cannot start another flow.
+  const redirectTo = async (getAuthUrl) => {
+    if (busy) return;
+    setBusy(true);
     try {
-      const returnTo = '/connect';
-      const req =
-        providerId === 'microsoft'
-          ? requestMicrosoftPermission(actionId, returnTo)
-          : requestGooglePermission(actionId, returnTo);
-      const { auth_url } = await req;
+      const { auth_url } = await getAuthUrl();
+      if (!auth_url) throw new Error('no auth_url returned');
       window.location.href = auth_url;
-    } catch {
-      toast.error(t('connect.toasts.action_failed'));
+    } catch (err) {
+      const description = errorDescription(err, t);
+      toast.error(t('connect.toasts.action_failed'), description ? { description } : undefined);
+      setBusy(false);
     }
   };
 
+  const handleOAuth = (providerId) => redirectTo(() => (
+    providerId === 'microsoft'
+      ? startMicrosoftOAuth(CONNECT_OAUTH_RETURN_PATH)
+      : startGoogleOAuth(CONNECT_OAUTH_RETURN_PATH)
+  ));
+
+  const handleGrantPermission = (providerId, actionId) => redirectTo(() => (
+    providerId === 'microsoft'
+      ? requestMicrosoftPermission(actionId, CONNECT_OAUTH_RETURN_PATH)
+      : requestGooglePermission(actionId, CONNECT_OAUTH_RETURN_PATH)
+  ));
+
   const isQuantroInternal = provider.provider_id === 'quantro_internal';
   const isInvoicing = provider.provider_id === 'quantro_invoicing';
+  const isOAuthProvider = OAUTH_PROVIDERS.has(provider.provider_id);
 
   return (
     <Sheet open={open} onOpenChange={(o) => !o && onClose()}>
@@ -197,12 +244,24 @@ function ProviderDrawer({ provider, open, onClose, onChanged, t }) {
                 <span className="text-foreground">{provider.last_sync_at ? new Date(provider.last_sync_at).toLocaleString() : t('connect.card.never_synced')}</span>
               </div>
             )}
+            {!canManage && (
+              <p data-testid="drawer-leader-only" className="text-xs text-muted-foreground pt-2">
+                {t('connect.drawer.leader_only')}
+              </p>
+            )}
+            {canManage && (
             <div className="flex flex-wrap gap-2 pt-2">
-              {provider.status === 'disconnected' && provider.provider_id === 'google' && (
-                <Button size="sm" onClick={() => startGoogleOAuth('/connect').then(({ auth_url }) => { window.location.href = auth_url; })}>{t('connect.card.connect')}</Button>
+              {provider.status === 'disconnected' && isOAuthProvider && (
+                <Button size="sm" onClick={() => handleOAuth(provider.provider_id)} disabled={busy} data-testid="drawer-connect-button">
+                  {busy && <Loader2 size={14} className="animate-spin mr-2" />}
+                  {t('connect.card.connect')}
+                </Button>
               )}
-              {provider.status === 'disconnected' && provider.provider_id === 'microsoft' && (
-                <Button size="sm" onClick={() => startMicrosoftOAuth('/connect').then(({ auth_url }) => { window.location.href = auth_url; })}>{t('connect.card.connect')}</Button>
+              {provider.status !== 'disconnected' && provider.status !== 'configuration_missing' && isOAuthProvider && (
+                <Button size="sm" variant={provider.status === 'connected' ? 'outline' : 'default'} onClick={() => handleOAuth(provider.provider_id)} disabled={busy} data-testid="drawer-reconnect-button">
+                  <RefreshCw size={14} className="mr-2" />
+                  {t('connect.drawer.reconnect')}
+                </Button>
               )}
               {provider.status !== 'disconnected' && !isQuantroInternal && !isInvoicing && (
                 <>
@@ -228,6 +287,7 @@ function ProviderDrawer({ provider, open, onClose, onChanged, t }) {
                 </Button>
               )}
             </div>
+            )}
           </TabsContent>
 
           <TabsContent value="permissions" className="space-y-3 mt-4">
@@ -248,8 +308,8 @@ function ProviderDrawer({ provider, open, onClose, onChanged, t }) {
                   return (
                     <div key={scope} className="flex items-center justify-between gap-2 rounded-lg border border-[hsl(var(--warning)/0.3)] bg-[hsl(var(--warning)/0.06)] px-3 py-2">
                       <span className="text-xs font-mono text-foreground truncate">{scope}</span>
-                      {(provider.provider_id === 'google' || provider.provider_id === 'microsoft') && actionForScope && (
-                        <Button size="sm" variant="outline" onClick={() => handleGrantPermission(provider.provider_id, actionForScope.action_id)} data-testid="drawer-grant-permission-button">
+                      {canManage && (provider.provider_id === 'google' || provider.provider_id === 'microsoft') && actionForScope && (
+                        <Button size="sm" variant="outline" onClick={() => handleGrantPermission(provider.provider_id, actionForScope.action_id)} disabled={busy} data-testid="drawer-grant-permission-button">
                           <Lock size={12} className="mr-1.5" />{t('connect.drawer.grant_permission')}
                         </Button>
                       )}
@@ -296,13 +356,19 @@ function ProviderDrawer({ provider, open, onClose, onChanged, t }) {
   );
 }
 
-export default function Connect() {
+export default function ConnectPanel() {
   const { t } = useLanguage();
+  const { workspaces, currentWorkspaceId } = useAuth();
+  const currentWorkspace = (workspaces || []).find((w) => w.is_current)
+    || (workspaces || []).find((w) => w.workspace_id === currentWorkspaceId);
+  const canManage = canManageConnections(currentWorkspace?.role);
+  const [params, setParams] = useSearchParams();
   const [providers, setProviders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState('all');
   const [selected, setSelected] = useState(null);
+  const handledCallbackRef = useRef(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -318,6 +384,31 @@ export default function Connect() {
 
   useEffect(() => { load(); }, [load]);
 
+  // Provider OAuth callbacks (connect / reconnect / grant permission from
+  // this panel, or a legacy /connect return) land here with
+  // ?google_connected=… — confirm the outcome, clean the URL, refresh.
+  const callback = readProviderCallback(params);
+  const callbackSignature = callback ? params.toString() : null;
+  useEffect(() => {
+    if (!callback) {
+      handledCallbackRef.current = null;
+      return;
+    }
+    if (handledCallbackRef.current === callbackSignature) return;
+    handledCallbackRef.current = callbackSignature;
+    setParams(stripProviderCallbackParams(params), { replace: true });
+    const name = providerLabel(callback.provider);
+    if (callback.status === 'success') {
+      toast.success(t('connect.toasts.connected', { provider: name }), callback.account ? { description: callback.account } : undefined);
+    } else if (callback.status === 'permission_missing' || callback.reason === 'permission_missing') {
+      toast.warning(t('connect.toasts.permission_missing', { provider: name }));
+    } else {
+      toast.error(t('connect.toasts.connect_failed', { provider: name }), callback.reason ? { description: callback.reason } : undefined);
+    }
+    load();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [callbackSignature]);
+
   const filteredProviders = useMemo(
     () => providers
       .filter((p) => category === 'all' || p.category === category)
@@ -332,12 +423,12 @@ export default function Connect() {
   }, [providers]);
 
   return (
-    <div data-testid="connect-page" className="max-w-6xl mx-auto px-4 md:px-6 py-6 space-y-6">
+    <section data-testid="connect-panel" className="space-y-4">
       <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
-          <Bot size={22} className="text-[hsl(var(--primary))]" />
+        <h2 className="text-lg font-semibold tracking-tight flex items-center gap-2 text-foreground">
+          <Bot size={18} className="text-[hsl(var(--primary))]" />
           {t('connect.title')}
-        </h1>
+        </h2>
         <p className="text-sm text-muted-foreground max-w-xl">{t('connect.subtitle')}</p>
       </header>
 
@@ -388,8 +479,9 @@ export default function Connect() {
         open={!!selected}
         onClose={() => setSelected(null)}
         onChanged={load}
+        canManage={canManage}
         t={t}
       />
-    </div>
+    </section>
   );
 }

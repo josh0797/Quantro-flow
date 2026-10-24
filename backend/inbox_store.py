@@ -5,13 +5,18 @@ insert_many / update_many / count_documents`` call sites unchanged.
 
 Flags
 -----
-``QUANTRO_INBOX_PRIMARY`` (default ``mongo``):
+``QUANTRO_INBOX_PRIMARY`` (default ``supabase`` since the Mongo exit):
   * ``mongo``     — reads from Mongo; dual-write Supabase when configured.
-  * ``supabase``  — reads from Supabase first (Mongo fallback); Mongo
-                    writes gated by ``QUANTRO_INBOX_MONGO_MIRROR`` if set,
-                    else ``QUANTRO_MONGO_MIRROR`` (default on).
+  * ``supabase``  — reads/writes Supabase. Mongo is only touched while it is
+                    kept as a mirror (``QUANTRO_INBOX_MONGO_MIRROR`` if set,
+                    else ``QUANTRO_MONGO_MIRROR``; default off): writes are
+                    replayed there and a Supabase miss/error falls back to it.
+                    Mirror off → Supabase failures raise
+                    ``sb_rest.SupabaseStoreError`` instead of dropping data.
 
-Graceful degrade: missing tables / transport errors → log + keep Mongo.
+Filters PostgREST cannot express exactly are evaluated in Python on the
+fetched rows (sb_rest.split_filter + mongo_compat.match). Fields without a
+column land in the ``extra`` jsonb, so nothing is dropped.
 Never log full email bodies in bulk (error snippets truncate ``body`` /
 ``preview``).
 
@@ -26,20 +31,19 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 
+import mongo_compat as mc
+import sb_rest
+import storage_flags
+from sb_rest import SupabaseStoreError
+
 logger = logging.getLogger("quantro.inbox.store")
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
-_INBOX_PRIMARY_RAW = (os.environ.get("QUANTRO_INBOX_PRIMARY") or "mongo").lower().strip()
-INBOX_PRIMARY = _INBOX_PRIMARY_RAW if _INBOX_PRIMARY_RAW in {"mongo", "supabase"} else "mongo"
-
-_MIRROR_DEDICATED = os.environ.get("QUANTRO_INBOX_MONGO_MIRROR")
-if _MIRROR_DEDICATED is None or _MIRROR_DEDICATED == "":
-    _MIRROR_RAW = (os.environ.get("QUANTRO_MONGO_MIRROR") or "1").lower().strip()
-else:
-    _MIRROR_RAW = _MIRROR_DEDICATED.lower().strip()
-MONGO_MIRROR = _MIRROR_RAW not in {"0", "false", "no", "off"}
+# Snapshot at import (tests reload the module with a patched env).
+INBOX_PRIMARY = storage_flags.parse_primary("QUANTRO_INBOX_PRIMARY")
+MONGO_MIRROR = storage_flags.parse_mirror("QUANTRO_INBOX_MONGO_MIRROR")
 
 TABLE_INBOX = "inbox_items"
 
@@ -56,9 +60,17 @@ _KNOWN_COLS = frozenset({
     "is_real", "is_simulation", "hidden_by_real",
     "priority", "synced_at",
     "created_at", "updated_at",
+    # Policy / auto-execution outcome (SmartInbox reads these).
+    "policy_action", "escalation",
+    "auto_executed", "auto_executed_at", "execution_source", "execution_results",
+    # Catch-all for any other field (never dropped).
+    "extra",
 })
-_DT_KEYS = frozenset({"received_at", "synced_at", "created_at", "updated_at"})
-_JSON_KEYS = frozenset({"ai_intent", "ai_suggested_action", "label_ids", "categories"})
+_DT_KEYS = frozenset({"received_at", "synced_at", "created_at", "updated_at", "auto_executed_at"})
+_JSON_KEYS = frozenset({
+    "ai_intent", "ai_suggested_action", "label_ids", "categories",
+    "escalation", "execution_results", "extra",
+})
 _SENSITIVE_LOG_KEYS = frozenset({"body", "preview"})
 
 
@@ -79,6 +91,11 @@ def is_inbox_mongo_write_enabled() -> bool:
         return True
     if INBOX_PRIMARY != "supabase":
         return True
+    return MONGO_MIRROR
+
+
+def _mongo_fallback_ok() -> bool:
+    """Supabase primary consults Mongo only while it is kept as a mirror."""
     return MONGO_MIRROR
 
 
@@ -186,21 +203,36 @@ def _app_inbox_id(doc: Dict[str, Any]) -> Optional[str]:
     return doc.get("inbox_id") or doc.get("id")
 
 
-def inbox_mongo_to_sb(doc: Dict[str, Any]) -> Dict[str, Any]:
-    """Map a Mongo inbox doc (or $set patch) to a Postgres row payload."""
+def inbox_mongo_to_sb(doc: Dict[str, Any], *, full: bool = False) -> Dict[str, Any]:
+    """Map a Mongo inbox doc (or $set patch) to a Postgres row payload.
+
+    Unknown fields go to ``extra`` (jsonb) instead of being dropped.
+    ``full=True`` (whole-document writes) always sends ``extra`` so fields
+    removed from the doc are removed from the row too.
+    """
     out: Dict[str, Any] = {}
+    extra: Dict[str, Any] = {}
     for k, v in doc.items():
         if k in {"_id", "id"} and k != "inbox_id":
             # Postgres uuid pk is separate; Mongo `id` is the app id for sync.
             continue
+        if k == "extra":
+            if isinstance(v, dict):
+                extra.update(mc.to_json(v))
+            else:
+                extra["extra"] = mc.to_json(v)
+            continue
         if k not in _KNOWN_COLS:
+            extra[k] = mc.to_json(v)
             continue
         if k in _DT_KEYS:
             out[k] = _iso(v)
         elif k in _JSON_KEYS:
-            out[k] = v  # None stays None for jsonb
+            out[k] = mc.to_json(v)  # None stays None for jsonb
         else:
             out[k] = v
+    if extra or full:
+        out["extra"] = extra
     # Prefer explicit inbox_id; fall back to Mongo sync `id`.
     aid = _app_inbox_id(doc)
     if aid and "inbox_id" not in out:
@@ -213,55 +245,41 @@ def inbox_mongo_to_sb(doc: Dict[str, Any]) -> Dict[str, Any]:
 def inbox_sb_to_mongo(row: Dict[str, Any]) -> Dict[str, Any]:
     if not row:
         return {}
-    out = {k: v for k, v in row.items() if k not in {"id"}}  # drop PG uuid pk
+    out = {k: v for k, v in row.items() if k not in {"id", "extra"}}  # drop PG uuid pk
     for k in _DT_KEYS:
         if k in out:
             out[k] = _parse_dt(out[k])
+    extra_val = row.get("extra")
+    for k, v in (extra_val.items() if isinstance(extra_val, dict) else ()):
+        out.setdefault(k, mc.from_json(v))
     # Keep `id` alias for sync-shaped docs that historically used `id`.
     if out.get("inbox_id") and "id" not in out:
         out["id"] = out["inbox_id"]
     return out
 
 
+def _split(query: Dict[str, Any]):
+    """(PostgREST params, residual Mongo filter). Raises sb_rest.Impossible."""
+    return sb_rest.split_filter(
+        query, _KNOWN_COLS - {"extra"}, aliases={"id": "inbox_id"}, json_cols=_JSON_KEYS,
+    )
+
+
 def _mongo_filter_to_params(query: Dict[str, Any], *, select: str = "*") -> Dict[str, str]:
-    """Translate common Motor filters used by inbox routes to PostgREST.
+    """PostgREST params for the exactly-expressible part of a Motor filter.
 
     ``$ne: True`` on nullable bools uses ``not.is.true`` so missing/NULL
     rows match (Mongo semantics for hidden_by_real / is_simulation).
+    Callers that must honour the whole filter use ``_split`` and apply the
+    residual in Python.
     """
-    params: Dict[str, str] = {"select": select}
-    for key, val in (query or {}).items():
-        if key == "_id":
-            continue
-        # Map Mongo sync `id` lookups onto inbox_id column.
-        col = "inbox_id" if key == "id" else key
-        if isinstance(val, dict):
-            if "$in" in val:
-                items = ",".join(str(x) for x in val["$in"])
-                params[col] = f"in.({items})"
-            elif "$gte" in val:
-                params[col] = f"gte.{_iso(val['$gte'])}"
-            elif "$exists" in val:
-                if val["$exists"] is False:
-                    params[col] = "is.null"
-            elif "$ne" in val:
-                ne = val["$ne"]
-                if isinstance(ne, bool):
-                    # SQL NOT (col IS TRUE/FALSE) includes NULL — Mongo-like.
-                    params[col] = f"not.is.{str(ne).lower()}"
-                elif ne is None:
-                    params[col] = "not.is.null"
-                else:
-                    params[col] = f"neq.{ne}"
-            else:
-                logger.debug("inbox.store: skipping unsupported filter %s=%s", key, val)
-        elif val is None:
-            params[col] = "is.null"
-        elif isinstance(val, bool):
-            params[col] = f"eq.{str(val).lower()}"
-        else:
-            params[col] = f"eq.{val}"
-    return params
+    try:
+        params, _residual = _split(query)
+    except sb_rest.Impossible:
+        params = {"inbox_id": "is.null", "and": "(inbox_id.not.is.null)"}
+    out: Dict[str, str] = {"select": select}
+    out.update(params)
+    return out
 
 
 def _strip_pg_id(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -296,6 +314,14 @@ def _conflict_for_query(query: Dict[str, Any]) -> str:
     return "workspace_id,inbox_id"
 
 
+async def _req(method: str, path: str, **kwargs: Any):
+    """Late-bound so tests can patch ``inbox_store._sb_request``."""
+    return await _sb_request(method, path, **kwargs)
+
+
+_ORDER_DEFAULT = "created_at.asc,id.asc"
+
+
 class InboxDualWriteCollection:
     """Motor-like facade over Mongo ``inbox_items`` + optional Supabase table."""
 
@@ -303,54 +329,146 @@ class InboxDualWriteCollection:
         self._mongo = mongo_col
         self.table = TABLE_INBOX
 
+    # ── Supabase read primitives ──────────────────────────────────────
+    async def _sb_rows(
+        self,
+        query: Dict[str, Any],
+        *,
+        sort: Optional[List[Tuple[str, int]]] = None,
+        skip: int = 0,
+        limit: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Mongo-shaped docs (+``_pk``) matching the WHOLE filter. Raises on error."""
+        try:
+            params, residual = _split(query)
+        except sb_rest.Impossible:
+            return []
+        params["select"] = "*"
+        order = sb_rest.order_param(sort or [], _KNOWN_COLS, aliases={"id": "inbox_id"}) if sort else _ORDER_DEFAULT
+        exact = not residual and (order is not None)
+        rows = await sb_rest.fetch_all(
+            _req, self.table, params,
+            order=order or _ORDER_DEFAULT,
+            limit=limit if (exact and limit) else None,
+            offset=skip if exact else 0,
+        )
+        if rows is None:
+            raise SupabaseStoreError("inbox_items read failed", table=self.table)
+        docs = []
+        for r in rows:
+            d = inbox_sb_to_mongo(r)
+            if residual and not mc.match(d, residual):
+                continue
+            d["_pk"] = r.get("id")
+            docs.append(d)
+        if not exact:
+            if sort:
+                docs = mc.sort_docs(docs, sort)
+            if skip:
+                docs = docs[skip:]
+            if limit:
+                docs = docs[:limit]
+        return docs
+
+    @staticmethod
+    def _public(doc: Dict[str, Any], projection: Optional[Dict[str, int]]) -> Dict[str, Any]:
+        d = {k: v for k, v in doc.items() if k != "_pk"}
+        return _project(_strip_pg_id(d), projection)
+
+    async def _sb_find_one(self, query: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        docs = await self._sb_rows(query, limit=1)
+        if not docs:
+            return None
+        return {k: v for k, v in docs[0].items() if k != "_pk"}
+
+    async def _sb_find_many(self, query: Dict[str, Any], *, limit: int = 100) -> Optional[List[Dict[str, Any]]]:
+        try:
+            docs = await self._sb_rows(query, limit=limit)
+        except SupabaseStoreError:
+            return None
+        return [{k: v for k, v in d.items() if k != "_pk"} for d in docs]
+
+    async def _sb_count(self, query: Dict[str, Any]) -> Optional[int]:
+        try:
+            params, residual = _split(query)
+        except sb_rest.Impossible:
+            return 0
+        if not residual:
+            n = await sb_rest.count_exact(_req, self.table, params)
+            if n is not None:
+                return n
+        try:
+            return len(await self._sb_rows(query))
+        except SupabaseStoreError:
+            return None
+
     # ── reads ─────────────────────────────────────────────────────────
 
-    async def find_one(self, query: Dict[str, Any], projection: Optional[Dict[str, int]] = None):
+    async def find_one(self, query: Dict[str, Any], projection: Optional[Dict[str, int]] = None, **_: Any):
         if is_inbox_supabase_primary():
-            row = await self._sb_find_one(query)
+            try:
+                row = await self._sb_find_one(query)
+            except SupabaseStoreError:
+                if not _mongo_fallback_ok():
+                    raise
+                row = None
+                logger.warning("%s inbox.store: Supabase read failed — Mongo mirror fallback", storage_flags.MONGO_ONLY)
             if row is not None:
                 return _project(_strip_pg_id(row), projection)
-            return await self._mongo.find_one(query, projection) if projection is not None else await self._mongo.find_one(query)
+            if not _mongo_fallback_ok():
+                return None
+            doc = await self._mongo.find_one(query, projection) if projection is not None else await self._mongo.find_one(query)
+            if doc is not None:
+                logger.warning("%s inbox.store: row only in Mongo (inbox_id=%s) — re-run the backfill",
+                               storage_flags.MONGO_ONLY, _app_inbox_id(doc) or "?")
+            return doc
         try:
             return await self._mongo.find_one(query, projection)
         except TypeError:
             return await self._mongo.find_one(query)
 
-    def find(self, query: Dict[str, Any], projection: Optional[Dict[str, int]] = None):
-        return _LazyFindCursor(self, query, projection)
+    def find(self, query: Optional[Dict[str, Any]] = None, projection: Optional[Dict[str, int]] = None, **kwargs: Any):
+        cur = _LazyFindCursor(self, query or {}, projection)
+        if kwargs.get("sort"):
+            cur.sort(kwargs["sort"])
+        return cur
 
-    async def count_documents(self, query: Dict[str, Any]) -> int:
+    async def count_documents(self, query: Dict[str, Any], **_: Any) -> int:
         if is_inbox_supabase_primary():
             n = await self._sb_count(query)
             if n is not None:
                 return n
+            if not _mongo_fallback_ok():
+                raise SupabaseStoreError("inbox_items count failed", table=self.table)
         return await self._mongo.count_documents(query)
 
     # ── writes ────────────────────────────────────────────────────────
 
-    async def insert_one(self, doc: Dict[str, Any]):
+    async def insert_one(self, doc: Dict[str, Any], *_: Any, **__: Any):
         primary_sb = is_inbox_supabase_primary()
         if primary_sb:
             sb_ok = await self._sb_upsert_doc(doc, conflict="workspace_id,inbox_id")
             if sb_ok is False:
-                logger.warning("inbox.store: SB insert degraded — writing Mongo")
+                if not _mongo_fallback_ok():
+                    raise SupabaseStoreError("inbox_items insert failed", table=self.table)
+                logger.warning("%s inbox.store: SB insert degraded — writing Mongo", storage_flags.MONGO_ONLY)
                 return await self._mongo.insert_one(dict(doc))
             if is_inbox_mongo_write_enabled():
                 try:
                     await self._mongo.insert_one(dict(doc))
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("inbox.store mongo mirror insert_one failed: %s", exc)
-            return doc
+                    logger.warning("%s inbox.store mongo mirror insert_one failed: %s", storage_flags.STORE_DRIFT, exc)
+            return mc.InsertOneResult(_app_inbox_id(doc))
 
         result = await self._mongo.insert_one(dict(doc))
         if is_inbox_dual_write_enabled():
             try:
                 await self._sb_upsert_doc(doc, conflict="workspace_id,inbox_id")
             except Exception as exc:  # noqa: BLE001
-                logger.warning("inbox.store SB dual-write insert_one failed: %s", exc)
+                logger.warning("%s inbox.store SB dual-write insert_one failed: %s", storage_flags.MONGO_ONLY, exc)
         return result
 
-    async def insert_many(self, docs: List[Dict[str, Any]]):
+    async def insert_many(self, docs: List[Dict[str, Any]], *_: Any, **__: Any):
         # Prefer native mongo insert_many when primary=mongo for seed speed.
         if not is_inbox_supabase_primary() and hasattr(self._mongo, "insert_many"):
             result = await self._mongo.insert_many([dict(d) for d in docs])
@@ -359,60 +477,57 @@ class InboxDualWriteCollection:
                     try:
                         await self._sb_upsert_doc(d, conflict="workspace_id,inbox_id")
                     except Exception as exc:  # noqa: BLE001
-                        logger.warning("inbox.store SB dual-write insert_many item failed: %s", exc)
+                        logger.warning("%s inbox.store SB dual-write insert_many item failed: %s", storage_flags.MONGO_ONLY, exc)
             return result
         results = []
         for d in docs:
-            results.append(await self.insert_one(d))
-        return results
+            results.append(getattr(await self.insert_one(d), "inserted_id", None))
+        return mc.InsertManyResult(results)
 
     async def update_one(
         self,
         query: Dict[str, Any],
         update: Dict[str, Any],
         upsert: bool = False,
+        **_: Any,
     ):
-        fields = (update or {}).get("$set") or {}
-        unset = (update or {}).get("$unset") or {}
-        set_on_insert = (update or {}).get("$setOnInsert") or {}
-        primary_sb = is_inbox_supabase_primary()
-
-        if primary_sb:
-            ok = await self._sb_update(
-                query, fields, unset=unset, set_on_insert=set_on_insert, upsert=upsert,
-            )
+        if is_inbox_supabase_primary():
+            res = await self._sb_update(query, update, upsert=upsert, many=False)
+            if res is None:
+                if not _mongo_fallback_ok():
+                    raise SupabaseStoreError("inbox_items update failed", table=self.table)
+                logger.warning("%s inbox.store: SB update degraded — Mongo mirror only", storage_flags.MONGO_ONLY)
             if is_inbox_mongo_write_enabled():
                 try:
-                    await self._mongo.update_one(query, update, upsert=upsert)
+                    mres = await self._mongo.update_one(query, update, upsert=upsert)
+                    if res is None:
+                        return mres
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("inbox.store mongo mirror update_one failed: %s", exc)
-            return ok
+                    logger.warning("%s inbox.store mongo mirror update_one failed: %s", storage_flags.STORE_DRIFT, exc)
+            return res
 
         result = await self._mongo.update_one(query, update, upsert=upsert)
         if is_inbox_dual_write_enabled():
             try:
-                await self._sb_update(
-                    query, fields, unset=unset, set_on_insert=set_on_insert, upsert=upsert,
-                )
+                await self._sb_update(query, update, upsert=upsert, many=False)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("inbox.store SB dual-write update_one failed: %s", _safe_err_text(str(exc)))
+                logger.warning("%s inbox.store SB dual-write update_one failed: %s", storage_flags.MONGO_ONLY, _safe_err_text(str(exc)))
         return result
 
-    async def update_many(self, query: Dict[str, Any], update: Dict[str, Any]):
+    async def update_many(self, query: Dict[str, Any], update: Dict[str, Any], **_: Any):
         """Bulk patch (e.g. hidden_by_real after Google sync)."""
-        fields = (update or {}).get("$set") or {}
-        unset = (update or {}).get("$unset") or {}
-        primary_sb = is_inbox_supabase_primary()
-
-        if primary_sb:
-            await self._sb_update(query, fields, unset=unset, upsert=False)
+        if is_inbox_supabase_primary():
+            res = await self._sb_update(query, update, upsert=False, many=True)
+            if res is None and not _mongo_fallback_ok():
+                raise SupabaseStoreError("inbox_items update failed", table=self.table)
             if is_inbox_mongo_write_enabled() and hasattr(self._mongo, "update_many"):
                 try:
-                    return await self._mongo.update_many(query, update)
+                    mres = await self._mongo.update_many(query, update)
+                    if res is None:
+                        return mres
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("inbox.store mongo mirror update_many failed: %s", exc)
-                    return None
-            return None
+                    logger.warning("%s inbox.store mongo mirror update_many failed: %s", storage_flags.STORE_DRIFT, exc)
+            return res
 
         if hasattr(self._mongo, "update_many"):
             result = await self._mongo.update_many(query, update)
@@ -421,101 +536,62 @@ class InboxDualWriteCollection:
             result = await self._mongo.update_one(query, update)
         if is_inbox_dual_write_enabled():
             try:
-                await self._sb_update(query, fields, unset=unset, upsert=False)
+                await self._sb_update(query, update, upsert=False, many=True)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("inbox.store SB dual-write update_many failed: %s", exc)
+                logger.warning("%s inbox.store SB dual-write update_many failed: %s", storage_flags.MONGO_ONLY, exc)
         return result
 
-    async def delete_one(self, query: Dict[str, Any]):
+    async def delete_one(self, query: Dict[str, Any], **_: Any):
         primary_sb = is_inbox_supabase_primary()
         if primary_sb:
-            await self._sb_delete(query)
+            n = await self._sb_delete(query, many=False)
+            if n is None and not _mongo_fallback_ok():
+                raise SupabaseStoreError("inbox_items delete failed", table=self.table)
             if is_inbox_mongo_write_enabled():
                 try:
-                    return await self._mongo.delete_one(query)
+                    await self._mongo.delete_one(query)
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("inbox.store mongo mirror delete_one failed: %s", exc)
-            return None
+                    logger.warning("%s inbox.store mongo mirror delete_one failed: %s", storage_flags.STORE_DRIFT, exc)
+            return mc.DeleteResult(n or 0)
         result = await self._mongo.delete_one(query)
         if is_inbox_dual_write_enabled():
             try:
-                await self._sb_delete(query)
+                await self._sb_delete(query, many=False)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("inbox.store SB dual-write delete_one failed: %s", exc)
+                logger.warning("%s inbox.store SB dual-write delete_one failed: %s", storage_flags.MONGO_ONLY, exc)
         return result
 
-    async def delete_many(self, query: Dict[str, Any]):
+    async def delete_many(self, query: Dict[str, Any], **_: Any):
         primary_sb = is_inbox_supabase_primary()
         if primary_sb:
-            await self._sb_delete(query)
+            n = await self._sb_delete(query, many=True)
+            if n is None and not _mongo_fallback_ok():
+                raise SupabaseStoreError("inbox_items delete failed", table=self.table)
             if is_inbox_mongo_write_enabled() and hasattr(self._mongo, "delete_many"):
                 try:
-                    return await self._mongo.delete_many(query)
+                    await self._mongo.delete_many(query)
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("inbox.store mongo mirror delete_many failed: %s", exc)
-            return None
+                    logger.warning("%s inbox.store mongo mirror delete_many failed: %s", storage_flags.STORE_DRIFT, exc)
+            return mc.DeleteResult(n or 0)
         if hasattr(self._mongo, "delete_many"):
             result = await self._mongo.delete_many(query)
         else:
-            result = await self.delete_one(query)
+            result = await self._mongo.delete_one(query)
         if is_inbox_dual_write_enabled():
             try:
-                await self._sb_delete(query)
+                await self._sb_delete(query, many=True)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("inbox.store SB dual-write delete_many failed: %s", exc)
+                logger.warning("%s inbox.store SB dual-write delete_many failed: %s", storage_flags.MONGO_ONLY, exc)
         return result
 
     async def create_index(self, *args, **kwargs):
-        if hasattr(self._mongo, "create_index"):
+        if not is_inbox_supabase_primary() and hasattr(self._mongo, "create_index"):
             return await self._mongo.create_index(*args, **kwargs)
         return None
 
-    # ── Supabase primitives ───────────────────────────────────────────
+    # ── Supabase write primitives ─────────────────────────────────────
 
-    async def _sb_find_one(self, query: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        params = _mongo_filter_to_params(query)
-        params["limit"] = "1"
-        resp = await _sb_request("GET", f"/rest/v1/{self.table}", params=params)
-        if resp is None or resp.status_code >= 400:
-            if resp is not None and resp.status_code >= 400:
-                logger.warning(
-                    "inbox.store SB find_one → %s %s",
-                    resp.status_code, _safe_err_text(resp.text or ""),
-                )
-            return None
-        rows = resp.json()
-        if not rows:
-            return None
-        return inbox_sb_to_mongo(rows[0])
-
-    async def _sb_find_many(self, query: Dict[str, Any], *, limit: int = 100) -> Optional[List[Dict[str, Any]]]:
-        params = _mongo_filter_to_params(query)
-        params["limit"] = str(limit)
-        resp = await _sb_request("GET", f"/rest/v1/{self.table}", params=params)
-        if resp is None or resp.status_code >= 400:
-            return None
-        rows = resp.json() or []
-        return [inbox_sb_to_mongo(r) for r in rows]
-
-    async def _sb_count(self, query: Dict[str, Any]) -> Optional[int]:
-        params = _mongo_filter_to_params(query, select="*")
-        resp = await _sb_request(
-            "GET", f"/rest/v1/{self.table}",
-            params={**params, "limit": "0"},
-            prefer="count=exact",
-        )
-        if resp is None:
-            return None
-        cr = resp.headers.get("content-range") or resp.headers.get("Content-Range")
-        if cr and "/" in cr:
-            try:
-                return int(cr.rsplit("/", 1)[-1])
-            except ValueError:
-                pass
-        rows = await self._sb_find_many(query, limit=10000)
-        return None if rows is None else len(rows)
-
-    async def _sb_upsert_doc(self, doc: Dict[str, Any], *, conflict: str) -> bool:
+    async def _sb_upsert_doc(self, doc: Dict[str, Any], *, conflict: str, overwrite: bool = True) -> bool:
         payload = inbox_mongo_to_sb(doc)
         if not payload.get("inbox_id") or not payload.get("workspace_id"):
             logger.warning(
@@ -524,7 +600,7 @@ class InboxDualWriteCollection:
             )
             return False
         path = f"/rest/v1/{self.table}?on_conflict={conflict}"
-        prefer = "resolution=merge-duplicates,return=minimal"
+        prefer = f"resolution={'merge' if overwrite else 'ignore'}-duplicates,return=minimal"
         resp = await _sb_request("POST", path, json=payload, prefer=prefer)
         if resp is None:
             return False
@@ -538,73 +614,167 @@ class InboxDualWriteCollection:
             return False
         return True
 
+    async def _patch(self, params: Dict[str, str], patch: Dict[str, Any]) -> Optional[int]:
+        """PATCH matching rows; returns rows changed or None on failure."""
+        p = dict(params)
+        p["select"] = "inbox_id"
+        resp = await _sb_request(
+            "PATCH", f"/rest/v1/{self.table}",
+            json=patch, params=p, prefer="return=representation",
+        )
+        if resp is None or resp.status_code >= 400:
+            if resp is not None:
+                logger.warning(
+                    "inbox.store SB update → %s %s",
+                    resp.status_code, _safe_err_text(resp.text or ""),
+                )
+            return None
+        try:
+            body = resp.json()
+        except Exception:  # noqa: BLE001
+            body = None
+        return len(body) if isinstance(body, list) else 1
+
+    def _column_patch(self, update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Plain SQL patch for $set/$unset on real columns, else None."""
+        touched, simple = mc.update_touches(update)
+        if not simple or any(f not in _KNOWN_COLS and f != "id" for f in touched):
+            return None
+        if "extra" in touched:
+            return None
+        fields = (update or {}).get("$set") or {}
+        patch = inbox_mongo_to_sb(fields) if fields else {}
+        patch.pop("extra", None)
+        for k in (update or {}).get("$unset") or {}:
+            col = "inbox_id" if k == "id" else k
+            patch[col] = None
+        return patch
+
     async def _sb_update(
         self,
         query: Dict[str, Any],
-        fields: Dict[str, Any],
+        update: Dict[str, Any],
         *,
-        unset: Optional[Dict[str, Any]] = None,
-        set_on_insert: Optional[Dict[str, Any]] = None,
-        upsert: bool = False,
-    ) -> Any:
-        if not fields and not unset and not (upsert and set_on_insert):
+        upsert: bool,
+        many: bool,
+    ) -> Optional[mc.UpdateResult]:
+        """Mongo update semantics on Supabase. None = Supabase unavailable."""
+        if not update:
+            return mc.UpdateResult(0, 0)
+        try:
+            if upsert:
+                return await self._sb_upsert(query, update)
+            try:
+                params, residual = _split(query)
+            except sb_rest.Impossible:
+                return mc.UpdateResult(0, 0)
+            patch = self._column_patch(update)
+            if patch is not None and not residual:
+                if not patch:
+                    return mc.UpdateResult(0, 0)
+                n = await self._patch(params, patch)
+                return None if n is None else mc.UpdateResult(n, n)
+            docs = await self._sb_rows(query, limit=0 if many else 1)
+            changed = 0
+            for d in docs:
+                pk = d.pop("_pk")
+                new = mc.apply_update(d, update)
+                row = inbox_mongo_to_sb(new, full=True)
+                n = await self._patch({"id": f"eq.{pk}"}, row)
+                if n is None:
+                    return None
+                changed += 1
+            return mc.UpdateResult(len(docs), changed)
+        except SupabaseStoreError:
             return None
 
-        if upsert:
-            # Prefer upsert via on_conflict so sync + seed stay idempotent.
-            merged = {**{k: query.get(k) for k in ("workspace_id", "inbox_id", "gmail_id", "ms_id", "id") if k in query}}
-            merged.update(set_on_insert or {})
-            merged.update(fields or {})
-            # Ensure app id for NOT NULL inbox_id column.
-            if not merged.get("inbox_id"):
-                merged["inbox_id"] = merged.get("id") or _app_inbox_id(merged)
-            conflict = _conflict_for_query(query if query.get("gmail_id") or query.get("ms_id") else merged)
-            # If conflicting on gmail/ms, still need inbox_id in payload.
-            if not merged.get("inbox_id"):
-                # Generate-less: leave to caller; sync always $setOnInsert id.
-                logger.warning("inbox.store upsert without inbox_id/id — SB skip")
-                return False
-            return await self._sb_upsert_doc(merged, conflict=conflict)
-
-        patch = inbox_mongo_to_sb(fields) if fields else {}
-        # Never rewrite identity keys via accidental $set.
-        for k in ("workspace_id", "inbox_id", "gmail_id", "ms_id"):
-            if k in query and k in patch and patch[k] == query.get(k):
-                pass  # ok if same
-        if unset:
-            for k in unset:
-                col = "inbox_id" if k == "id" else k
-                if col in _KNOWN_COLS:
-                    patch[col] = None
-        params = _mongo_filter_to_params(query, select="")
-        params.pop("select", None)
+    async def _sb_upsert(self, query: Dict[str, Any], update: Dict[str, Any]) -> Optional[mc.UpdateResult]:
+        """Upsert honouring $setOnInsert (only applied when inserting)."""
+        existing = await self._sb_rows(query, limit=1)
+        set_only = {k: v for k, v in update.items() if k != "$setOnInsert"}
+        if existing:
+            pk = existing[0].pop("_pk")
+            patch = self._column_patch(set_only)
+            if patch is None:
+                patch = inbox_mongo_to_sb(mc.apply_update(existing[0], set_only), full=True)
+            if not patch:
+                return mc.UpdateResult(1, 0)
+            n = await self._patch({"id": f"eq.{pk}"}, patch)
+            return None if n is None else mc.UpdateResult(1, n)
+        new_doc = mc.apply_update(mc.seed_from_query(query), update, is_insert=True)
+        if not _app_inbox_id(new_doc):
+            logger.warning("inbox.store upsert without inbox_id/id — SB skip")
+            return None
+        conflict = _conflict_for_query(query if query.get("gmail_id") or query.get("ms_id") else new_doc)
+        payload = inbox_mongo_to_sb(new_doc)
         resp = await _sb_request(
-            "PATCH", f"/rest/v1/{self.table}",
-            json=patch, params=params, prefer="return=minimal",
+            "POST",
+            f"/rest/v1/{self.table}?on_conflict={conflict}",
+            json=payload,
+            prefer="resolution=ignore-duplicates,return=representation",
         )
-        if resp is not None and resp.status_code >= 400:
-            logger.warning(
-                "inbox.store SB update → %s %s",
-                resp.status_code, _safe_err_text(resp.text or ""),
-            )
-        return resp
+        if resp is None or resp.status_code >= 400:
+            if resp is not None:
+                logger.warning("inbox.store SB upsert → %s %s", resp.status_code, _safe_err_text(resp.text or ""))
+            return None
+        try:
+            body = resp.json()
+        except Exception:  # noqa: BLE001
+            body = None
+        if isinstance(body, list) and not body:
+            # Lost an insert race: the row exists now — apply the $set part.
+            patch = self._column_patch(set_only) or {}
+            if patch:
+                params, _ = _split(query)
+                await self._patch(params, patch)
+            return mc.UpdateResult(1, 1)
+        return mc.UpdateResult(0, 0, payload.get("inbox_id"))
 
-    async def _sb_delete(self, query: Dict[str, Any]) -> None:
-        params = _mongo_filter_to_params(query, select="")
-        params.pop("select", None)
+    async def _sb_delete(self, query: Dict[str, Any], *, many: bool) -> Optional[int]:
+        try:
+            try:
+                params, residual = _split(query)
+            except sb_rest.Impossible:
+                return 0
+            if residual or not many:
+                docs = await self._sb_rows(query, limit=0 if many else 1)
+                ids = [d["_pk"] for d in docs if d.get("_pk")]
+                if not ids:
+                    return 0
+                total = 0
+                for chunk in sb_rest.chunked(ids, 100):
+                    n = await self._delete({"id": "in.(" + ",".join(sb_rest.quote(i) for i in chunk) + ")"})
+                    if n is None:
+                        return None
+                    total += n
+                return total
+            return await self._delete(params)
+        except SupabaseStoreError:
+            return None
+
+    async def _delete(self, params: Dict[str, str]) -> Optional[int]:
+        p = dict(params)
+        p["select"] = "inbox_id"
         resp = await _sb_request(
             "DELETE", f"/rest/v1/{self.table}",
-            params=params, prefer="return=minimal",
+            params=p, prefer="return=representation",
         )
-        if resp is not None and resp.status_code >= 400:
-            logger.warning(
-                "inbox.store SB delete → %s %s",
-                resp.status_code, _safe_err_text(resp.text or ""),
-            )
+        if resp is None or resp.status_code >= 400:
+            if resp is not None:
+                logger.warning(
+                    "inbox.store SB delete → %s %s",
+                    resp.status_code, _safe_err_text(resp.text or ""),
+                )
+            return None
+        try:
+            body = resp.json()
+        except Exception:  # noqa: BLE001
+            body = None
+        return len(body) if isinstance(body, list) else 1
 
 
 class _LazyFindCursor:
-    """Mimics Motor cursor: find() → sort() → to_list()."""
+    """Mimics Motor cursor: find() → sort()/skip()/limit() → to_list()."""
 
     def __init__(
         self,
@@ -615,26 +785,34 @@ class _LazyFindCursor:
         self._store = store
         self._query = query
         self._projection = projection
-        self._sort: Optional[Tuple[str, int]] = None
+        self._sort: List[Tuple[str, int]] = []
+        self._skip = 0
+        self._limit = 0
 
-    def sort(self, key: str, direction: int = 1):
-        self._sort = (key, direction)
+    def sort(self, key: Any, direction: Optional[int] = None):
+        self._sort = mc.normalize_sort(key, direction)
         return self
 
-    async def to_list(self, n: int) -> List[Dict[str, Any]]:
+    def skip(self, n: int):
+        self._skip = int(n or 0)
+        return self
+
+    def limit(self, n: int):
+        self._limit = int(n or 0)
+        return self
+
+    async def to_list(self, n: Optional[int] = None) -> List[Dict[str, Any]]:
+        limit = self._limit
+        if n:
+            limit = min(limit, int(n)) if limit else int(n)
         if is_inbox_supabase_primary():
-            params = _mongo_filter_to_params(self._query)
-            params["limit"] = str(n)
-            if self._sort:
-                key, direction = self._sort
-                params["order"] = f"{key}.{'desc' if direction < 0 else 'asc'}"
-            resp = await _sb_request("GET", f"/rest/v1/{self._store.table}", params=params)
-            if resp is not None and resp.status_code < 400:
-                rows = resp.json() or []
-                return [
-                    _project(_strip_pg_id(inbox_sb_to_mongo(r)), self._projection)
-                    for r in rows
-                ]
+            try:
+                docs = await self._store._sb_rows(self._query, sort=self._sort, skip=self._skip, limit=limit)
+                return [self._store._public(d, self._projection) for d in docs]
+            except SupabaseStoreError:
+                if not _mongo_fallback_ok():
+                    raise
+                logger.warning("%s inbox.store: Supabase list failed — Mongo mirror fallback", storage_flags.MONGO_ONLY)
         try:
             cursor = (
                 self._store._mongo.find(self._query, self._projection)
@@ -644,10 +822,28 @@ class _LazyFindCursor:
         except TypeError:
             cursor = self._store._mongo.find(self._query)
         if self._sort and hasattr(cursor, "sort"):
-            cursor = cursor.sort(self._sort[0], self._sort[1])
+            if len(self._sort) == 1:
+                cursor = cursor.sort(self._sort[0][0], self._sort[0][1])
+            else:
+                cursor = cursor.sort(self._sort)
+        if self._skip and hasattr(cursor, "skip"):
+            cursor = cursor.skip(self._skip)
         if hasattr(cursor, "to_list"):
-            return await cursor.to_list(n)
+            return await cursor.to_list(limit or None)
         return []
+
+    def __aiter__(self):
+        self._buf: Optional[List[Dict[str, Any]]] = None
+        self._pos = 0
+        return self
+
+    async def __anext__(self):
+        if self._buf is None:
+            self._buf = await self.to_list(None)
+        if self._pos >= len(self._buf):
+            raise StopAsyncIteration
+        self._pos += 1
+        return self._buf[self._pos - 1]
 
 
 def wrap_inbox_col(mongo_col: Any) -> InboxDualWriteCollection:

@@ -1,7 +1,7 @@
 """
 ActionExecutor — the single execution path every caller funnels
-through. Covers: idempotency (no double-run on repeat key, per the
-task spec calling out Facturapi invoice creation by name), the
+through. Covers: idempotency (no double-run on repeat key — a
+high-risk action is the case that matters most), the
 pending_approval -> approve() flow, Simulation Mode forcing a
 `simulated` result without ever invoking the real handler logic, and a
 handler exception landing as a `failed` execution record rather than
@@ -92,15 +92,15 @@ async def test_idempotency_key_prevents_double_execution(fake_collection, monkey
     async def handler(ctx, input):
         calls.append(1)
         return ActionResult(status="succeeded", result_metadata={"count": len(calls)})
-    register(monkeypatch, "facturapi.invoice.create", RiskLevel.HIGH, handler)
+    register(monkeypatch, "test.high_risk.run", RiskLevel.HIGH, handler)
     executor = make_executor(fake_collection)
 
     first = await executor.execute(
-        workspace_id="ws1", action_id="facturapi.invoice.create", input={"value": "inv-1"},
+        workspace_id="ws1", action_id="test.high_risk.run", input={"value": "inv-1"},
         idempotency_key="idem-1", skip_policy_gate=True,
     )
     second = await executor.execute(
-        workspace_id="ws1", action_id="facturapi.invoice.create", input={"value": "inv-1"},
+        workspace_id="ws1", action_id="test.high_risk.run", input={"value": "inv-1"},
         idempotency_key="idem-1", skip_policy_gate=True,
     )
     assert len(calls) == 1, "handler must run exactly once for a repeated idempotency_key"
@@ -114,10 +114,10 @@ async def test_high_risk_action_waits_for_approval_then_runs_on_approve(fake_col
     async def handler(ctx, input):
         calls.append(1)
         return ActionResult(status="succeeded")
-    register(monkeypatch, "facturapi.invoice.create", RiskLevel.HIGH, handler)
+    register(monkeypatch, "test.high_risk.run", RiskLevel.HIGH, handler)
     executor = make_executor(fake_collection)
 
-    pending = await executor.execute(workspace_id="ws1", action_id="facturapi.invoice.create", input={"value": "x"}, actor_role="leader")
+    pending = await executor.execute(workspace_id="ws1", action_id="test.high_risk.run", input={"value": "x"}, actor_role="leader")
     assert pending["status"] == "pending_approval"
     assert len(calls) == 0, "handler must not run before approval"
 

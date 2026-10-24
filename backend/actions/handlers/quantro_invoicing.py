@@ -42,4 +42,13 @@ async def invoice_prepare_reply(ctx: ActionContext, input: dict) -> ActionResult
         to=input.get("to"),
         channel=input.get("channel") or "gmail",
     )
+    if payload.get("status") == "refused":
+        # e.g. recipient_mismatch: the invoice belongs to someone else, so
+        # there is nothing to send — never a "succeeded" reply payload.
+        return ActionResult(
+            status="failed",
+            result_metadata=payload,
+            error_code="action_blocked",
+            error_message_sanitized=payload.get("message"),
+        )
     return ActionResult(status="succeeded", result_metadata=payload)

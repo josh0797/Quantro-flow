@@ -1,7 +1,7 @@
 """
 Normalized error vocabulary shared by Quantro Connect and Quantro Actions.
 
-The UI must never have to parse a raw Facturapi/Google/Microsoft error
+The UI must never have to parse a raw Google/Microsoft/Quantro OS error
 message to decide what to render — every provider- or action-facing
 failure gets translated into one of these codes before it leaves the
 backend. Raw provider text (if any) goes in `provider_detail`, which is

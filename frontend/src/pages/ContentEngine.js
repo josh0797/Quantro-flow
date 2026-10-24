@@ -23,6 +23,7 @@ import { toast } from 'sonner';
 import { format, parseISO } from 'date-fns';
 import { useBusinessProfile } from '../contexts/BusinessProfileContext';
 import { useLanguage } from '../context/LanguageContext';
+import { apiErrorMessage } from '../lib/apiError';
 
 const categoryLabels = {
   welcome: { label: 'Welcome', color: 'bg-[hsl(var(--success)/0.15)] text-[hsl(var(--success))]' },
@@ -93,7 +94,7 @@ export default function ContentEngine() {
       setPrompt('');
       fetchContent();
     } catch (err) {
-      toast.error(t('content_engine.toasts.generate_failed'), { description: err.response?.data?.detail || err.message });
+      toast.error(t('content_engine.toasts.generate_failed'), { description: apiErrorMessage(err) });
     } finally {
       setGenerating(false);
     }
@@ -187,7 +188,7 @@ export default function ContentEngine() {
       setGenDialogOpen(false);
       fetchContent();
     } catch (err) {
-      toast.error(t('content_engine.toasts.generate_failed'), { description: err.response?.data?.detail || err.message });
+      toast.error(t('content_engine.toasts.generate_failed'), { description: apiErrorMessage(err) });
     } finally {
       setGeneratingFromTemplate(false);
     }

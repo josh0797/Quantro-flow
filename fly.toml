@@ -1,6 +1,9 @@
 # Quantro-flow API — https://fly.io
 app = "quantro-flow-api"
-primary_region = "iad"
+# The only machine lives in ord. Fly applies min_machines_running to the
+# primary region only, so with "iad" here the machine auto-stopped when idle
+# and the in-process autosync loop stopped with it.
+primary_region = "ord"
 
 [build]
   dockerfile = "backend/Dockerfile"
@@ -10,9 +13,16 @@ primary_region = "iad"
   PORT = "8000"
   DB_NAME = "quantro_os"
   QUANTRO_DB_PRIMARY = "supabase"
+  # Mongo exit (docs/mongo-exit-runbook.md): since this release an UNSET
+  # storage flag means Supabase / no Mongo mirror. The values below pin the
+  # pre-cutover state so deploying the code changes no routing. The cutover
+  # overrides them with `fly secrets set` (Fly: secrets take precedence over
+  # [env]); rolling back = `fly secrets unset` of those names. Delete this
+  # block once the cutover has soaked (runbook step 9).
   QUANTRO_MONGO_MIRROR = "1"
-  # Calendar stays mongo until canonical Google/MS field tests are green.
   QUANTRO_CALENDAR_PRIMARY = "mongo"
+  QUANTRO_INTEGRATIONS_CONFIG_PRIMARY = "mongo"
+  QUANTRO_DOCS_PRIMARY = "mongo"
   # Autosync runs inside the HTTP process. Keep at least one machine warm
   # so Fly auto_stop does not kill the sync loop (min_machines_running=0
   # previously caused cold-start gaps / ERR_CONNECTION_CLOSED). A dedicated

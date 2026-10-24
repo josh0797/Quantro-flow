@@ -1,3 +1,8 @@
+> **Mongo exit:** use `backend/scripts/mongo_to_supabase.py` instead (ships in
+> the image, runs on the Fly machine, covers every collection, idempotent,
+> dry-run by default) — see `docs/mongo-exit-runbook.md`. The script below is
+> the older Phase 7c one-shot and is kept for reference only.
+
 # Backfill MongoDB → Supabase
 
 Scripts para Phase 7c. **Uso bajo demanda únicamente** — no corren en boot ni en CI.
@@ -10,8 +15,8 @@ Migración one-shot de los datos legacy de Mongo a las tablas reales de Supabase
 
 | MongoDB collection      | → | Supabase table     |
 |-------------------------|---|--------------------|
-| `workspace_members`     | → | `org_members`      |
-| `workspace_invites`     | → | `invitations`      |
+| ~~`workspace_members`~~ | → | ~~`org_members`~~ (retirado, O12) |
+| ~~`workspace_invites`~~ | → | ~~`invitations`~~ (retirado, O12) |
 | `audit_log`             | → | `org_audit_logs`   |
 | `google_integrations` / `microsoft_integrations` | → | `provider_connections` (Phase 2) |
 | `action_executions` | → | `action_executions` (Phase 3) |
@@ -21,6 +26,11 @@ Migración one-shot de los datos legacy de Mongo a las tablas reales de Supabase
 | `content_items` / `content_templates` | → | same names (Phase 6.2) |
 | `contacts` | → | `contacts` (Phase 6.3) |
 | `calendar_events` | → | `calendar_events` (Phase 6.3) |
+
+> **O12 (2026-10-05):** la membresía es de Quantro OS People OS (`team_members`;
+> `org_members` es su espejo). El script ya no escribe `org_members` ni
+> `invitations`: `--table members|invites` solo explica por qué. Ver
+> `docs/people-os-membership.md`.
 
 ### Pre-requisitos
 

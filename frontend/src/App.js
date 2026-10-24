@@ -13,7 +13,6 @@ import CRM from './pages/CRM';
 import Onboarding from './pages/Onboarding';
 import ContentEngine from './pages/ContentEngine';
 import AutomationPolicies from './pages/AutomationPolicies';
-import Connect from './pages/Connect';
 import QuantroActions from './pages/Actions';
 import Settings from './pages/Settings';
 import PlanAndUsage from './pages/PlanAndUsage';
@@ -29,6 +28,7 @@ import StepAutomations from './pages/welcome/StepAutomations';
 import StepReady from './pages/welcome/StepReady';
 import Members from './pages/Members';
 import JoinPage from './pages/JoinPage';
+import { legacyRedirectRoutes } from './routes/legacyRedirects';
 import './App.css';
 
 /**
@@ -54,11 +54,16 @@ function AppShell() {
             <Route path="/content" element={<ContentEngine />} />
             <Route path="/automation" element={<AutomationPolicies />} />
             <Route path="/automation-policies" element={<AutomationPolicies />} />
-            <Route path="/connect" element={<Connect />} />
             <Route path="/actions" element={<QuantroActions />} />
             <Route path="/plan" element={<PlanAndUsage />} />
             <Route path="/members" element={<Members />} />
-            <Route path="/settings" element={<Settings />} />
+            {/* /settings opens Integrations (Quantro Connect lives there now). */}
+            <Route path="/settings/:tab?" element={<Settings />} />
+            {/* Old URLs (/connect, /connect/*) → Settings → Integrations,
+                query string preserved for OAuth returns. */}
+            {legacyRedirectRoutes.map((r) => (
+              <Route key={r.path} path={r.path} element={r.element} />
+            ))}
           </Routes>
         </main>
       </div>
@@ -83,12 +88,13 @@ function AppRoutes() {
       />
       {/* Welcome flow (Phase 7d) — multi-step activation experience for
           new signups. Lives OUTSIDE the AppShell so each step gets a
-          full-screen Apple-style canvas. bypassOnboarding prevents the
-          ProtectedRoute from looping back here once the flow is done. */}
+          full-screen Apple-style canvas. welcomeFlow runs the onboarding
+          gate once on entry: existing workspaces (bookmark, old tab, OAuth
+          return) are sent to the app instead of redoing the flow. */}
       <Route
         path="/welcome"
         element={
-          <ProtectedRoute bypassOnboarding>
+          <ProtectedRoute welcomeFlow>
             <OnboardingShell />
           </ProtectedRoute>
         }

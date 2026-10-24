@@ -32,9 +32,11 @@ import {
   getOnboarding, markOnboardingComplete,
   getAuditLog, exportAuditLog, renameWorkspace,
 } from '../lib/api';
+import { peopleOsErrorMessage } from '../lib/peopleOsErrors';
 
 const ROLE_RANK = { viewer: 1, member: 2, accountant: 3, leader: 4, owner: 5 };
-const ROLE_OPTIONS = ['viewer', 'member', 'accountant', 'leader', 'owner'];
+// Ownership is never assigned from Flow (Quantro OS or support, decision O12).
+const ROLE_OPTIONS = ['viewer', 'member', 'accountant', 'leader'];
 
 function roleBadgeClass(role) {
   switch (role) {
@@ -75,6 +77,25 @@ export default function Members() {
   const myRoleRank = ROLE_RANK[data.your_role] || 0;
   const isAdmin = myRoleRank >= ROLE_RANK.leader;
   const isOwner = data.your_role === 'owner';
+  // Organization workspace: the team is Quantro OS People OS's, and the
+  // server applies its rules (permissions, seats, plan) to every change here.
+  const peopleOs = !!data.people_os;
+  // Roles only the Owner grants: Leader, and in Quantro OS also Accountant.
+  const ownerOnlyRole = (r) => r === 'leader' || (peopleOs && r === 'accountant');
+  const errorText = (err) => peopleOsErrorMessage(err, t) || t('members.action_failed');
+  // What I may do to a member's row. Admin+ only; nobody edits the owner
+  // (ownership changes in Quantro OS); only the Owner manages a Leader — and,
+  // in an organization workspace, an Accountant (People OS refuses anyone
+  // else with owner_managed). In an organization workspace nobody changes or
+  // removes themselves either (People OS refuses it).
+  const memberActions = (m) => {
+    const isMe = m.user_id === user?.user_id;
+    const canManage = isOwner || ((ROLE_RANK[m.role] || 0) < ROLE_RANK.leader && !ownerOnlyRole(m.role));
+    return {
+      canEdit: isAdmin && m.role !== 'owner' && !(peopleOs && isMe) && canManage,
+      canRemove: m.role !== 'owner' && (isMe ? !peopleOs : (isAdmin && canManage)),
+    };
+  };
 
   const fetchData = useCallback(async () => {
     if (!currentWorkspaceId) return;
@@ -215,14 +236,20 @@ export default function Members() {
     }
   };
 
+  // The invite link an onboarding card may copy. Quantro OS invitations are
+  // single-use and tied to one email: only that person's own pending
+  // invitation, never someone else's. Flow-only links are shareable.
+  const inviteForCard = (card) => {
+    const usable = (inv) => !inv.revoked && !inv.expired && inv.url;
+    if (!peopleOs) return invites.find(usable) || null;
+    const email = (card?.email || '').trim().toLowerCase();
+    if (!email) return null;
+    return invites.find((inv) => usable(inv) && (inv.email || '').trim().toLowerCase() === email) || null;
+  };
+
   const handleCopyMostRecentInvite = async (memberCard) => {
-    // Best-effort: find the most recent active invite that this member
-    // accepted (or any active one if none match) and copy its URL.
-    const invite = invites.find((inv) => !inv.revoked && inv.url);
-    if (!invite?.url) {
-      toast.error(t('onboarding.action_copy_invite'));
-      return;
-    }
+    const invite = inviteForCard(memberCard);
+    if (!invite?.url) return;
     try {
       await navigator.clipboard.writeText(invite.url);
       toast.success(t('members.invite_link_copied'));
@@ -233,7 +260,7 @@ export default function Members() {
 
   const handleRoleChange = async (member, newRole) => {
     if (newRole === member.role) return;
-    if (['leader', 'owner'].includes(newRole) && !isOwner) {
+    if (ownerOnlyRole(newRole) && !isOwner) {
       toast.error(t('members.not_owner_promotion'));
       return;
     }
@@ -242,23 +269,21 @@ export default function Members() {
       toast.success(t('members.change_role'));
       fetchData();
     } catch (err) {
-      const detail = err?.response?.data?.detail;
-      const msg = typeof detail === 'string' ? detail : detail?.message || 'Action failed';
-      toast.error(msg);
+      toast.error(errorText(err));
     }
   };
 
-  const handleRemove = async () => {
+  const handleRemove = async (permanent = false) => {
     if (!pendingRemoval) return;
     try {
-      await removeMember(currentWorkspaceId, pendingRemoval.user_id);
-      toast.success(t('members.remove_member'));
+      const result = await removeMember(currentWorkspaceId, pendingRemoval.user_id, { permanent });
+      toast.success(result?.source === 'people_os'
+        ? t(result.permanent ? 'members.member_deleted' : 'members.access_revoked')
+        : t('members.remove_member'));
       setPendingRemoval(null);
       fetchData();
     } catch (err) {
-      const detail = err?.response?.data?.detail;
-      const msg = typeof detail === 'string' ? detail : detail?.message || 'Action failed';
-      toast.error(msg);
+      toast.error(errorText(err));
       setPendingRemoval(null);
     }
   };
@@ -267,7 +292,7 @@ export default function Members() {
     setCreatingInvite(true);
     try {
       const result = await createInvite(currentWorkspaceId, inviteForm);
-      toast.success(t('members.invite_link_created'));
+      toast.success(t(result?.source === 'people_os' ? 'members.invite_people_os_created' : 'members.invite_link_created'));
       // Best-effort copy
       if (result?.url) {
         try { await navigator.clipboard.writeText(result.url); } catch { /* noop */ }
@@ -276,9 +301,7 @@ export default function Members() {
       setInviteDialogOpen(false);
       fetchData();
     } catch (err) {
-      const detail = err?.response?.data?.detail;
-      const msg = typeof detail === 'string' ? detail : detail?.message || 'Action failed';
-      toast.error(msg);
+      toast.error(errorText(err));
     } finally {
       setCreatingInvite(false);
     }
@@ -292,9 +315,7 @@ export default function Members() {
       setPendingRevoke(null);
       fetchData();
     } catch (err) {
-      const detail = err?.response?.data?.detail;
-      const msg = typeof detail === 'string' ? detail : detail?.message || 'Action failed';
-      toast.error(msg);
+      toast.error(errorText(err));
       setPendingRevoke(null);
     }
   };
@@ -310,7 +331,7 @@ export default function Members() {
   };
 
   const activeInvites = useMemo(
-    () => invites.filter((i) => !i.revoked && (i.used_count || 0) < (i.max_uses || 1)),
+    () => invites.filter((i) => !i.revoked && !i.expired && (i.used_count || 0) < (i.max_uses || 1)),
     [invites],
   );
 
@@ -348,6 +369,21 @@ export default function Members() {
                 </Button>
               )}
             </div>
+          )}
+          {peopleOs && (
+            <p className="mt-2 max-w-2xl text-xs text-muted-foreground" data-testid="people-os-note">
+              {t('members.people_os_note')}{' '}
+              {data.people_os_url && (
+                <a
+                  href={data.people_os_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-medium text-[hsl(var(--primary))] underline-offset-2 hover:underline"
+                >
+                  {t('members.open_quantro_os')}
+                </a>
+              )}
+            </p>
           )}
         </div>
         <div className="flex items-center gap-3">
@@ -389,11 +425,7 @@ export default function Members() {
             <CardContent className="space-y-2">
               {data.members.map((m) => {
                 const isMe = m.user_id === user?.user_id;
-                const memberRoleRank = ROLE_RANK[m.role] || 0;
-                // Allow editing only if I'm admin+, target isn't me-as-owner,
-                // and (target is below admin OR I am owner).
-                const canEdit = isAdmin && !(isMe && m.role === 'owner') && (memberRoleRank < ROLE_RANK.leader || isOwner);
-                const canRemove = (isMe && m.role !== 'owner') || (isAdmin && memberRoleRank < ROLE_RANK.owner && (memberRoleRank < ROLE_RANK.leader || isOwner));
+                const { canEdit, canRemove } = memberActions(m);
 
                 return (
                   <div
@@ -426,7 +458,7 @@ export default function Members() {
                           </SelectTrigger>
                           <SelectContent>
                             {ROLE_OPTIONS.map((r) => (
-                              <SelectItem key={r} value={r} disabled={['leader', 'owner'].includes(r) && !isOwner}>
+                              <SelectItem key={r} value={r} disabled={ownerOnlyRole(r) && !isOwner}>
                                 {t(`members.role_${r}`)}
                               </SelectItem>
                             ))}
@@ -489,10 +521,29 @@ export default function Members() {
                               {t('members.revoked')}
                             </Badge>
                           )}
-                          <span className="text-xs text-muted-foreground">
-                            {(inv.used_count || 0)}/{inv.max_uses} used
-                          </span>
+                          {inv.expired && (
+                            <Badge className="bg-[hsl(var(--muted-foreground)/0.15)] text-[hsl(var(--muted-foreground))]">
+                              {t('members.invite_expired')}
+                            </Badge>
+                          )}
+                          {inv.email ? (
+                            <span className="text-xs text-muted-foreground truncate">
+                              {t('members.invite_for', { email: inv.full_name ? `${inv.full_name} · ${inv.email}` : inv.email })}
+                            </span>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">
+                              {t('members.invite_uses', { used: inv.used_count || 0, max: inv.max_uses })}
+                            </span>
+                          )}
+                          {inv.expires_at && !inv.expired && (
+                            <span className="text-xs text-muted-foreground">
+                              {t('members.invite_expires_on', { date: new Date(inv.expires_at).toLocaleDateString() })}
+                            </span>
+                          )}
                         </div>
+                        {inv.revocable === false && (
+                          <p className="text-[11px] text-muted-foreground mt-1">{t('members.invite_legacy_read_only')}</p>
+                        )}
                         {inv.url && (
                           <p className="text-[11px] font-mono text-muted-foreground truncate mt-1">
                             {inv.url}
@@ -509,7 +560,7 @@ export default function Members() {
                         >
                           <Copy size={14} className="mr-1" /> {t('members.copy_link')}
                         </Button>
-                        {!inv.revoked && (
+                        {!inv.revoked && inv.revocable !== false && (
                           <Button
                             variant="ghost"
                             size="sm"
@@ -560,8 +611,10 @@ export default function Members() {
                     isAdmin={isAdmin}
                     t={t}
                     onMarkComplete={() => setPendingComplete(card)}
-                    onCopyInvite={() => handleCopyMostRecentInvite(card)}
-                    onRevokeAccess={() => setPendingRemoval({ user_id: card.user_id, role: card.role })}
+                    onCopyInvite={inviteForCard(card) ? () => handleCopyMostRecentInvite(card) : null}
+                    onRevokeAccess={memberActions(card).canRemove
+                      ? () => setPendingRemoval({ user_id: card.user_id, role: card.role })
+                      : null}
                   />
                 ))}
               </div>
@@ -748,14 +801,20 @@ export default function Members() {
               >
                 <SelectTrigger data-testid="invite-role-select"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {ROLE_OPTIONS.filter((r) => r !== 'owner').map((r) => (
-                    <SelectItem key={r} value={r} disabled={r === 'leader' && !isOwner}>
-                      {t(`members.role_${r}`)} — <span className="text-muted-foreground">{t(`members.role_${r}_desc`)}</span>
+                  {ROLE_OPTIONS.map((r) => (
+                    <SelectItem key={r} value={r} disabled={ownerOnlyRole(r) && !isOwner}>
+                      {t(`members.role_${r}`)} — <span className="text-muted-foreground">{t(peopleOs ? `members.role_${r}_people_os_desc` : `members.role_${r}_desc`)}</span>
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              {peopleOs && (
+                <p className="mt-1.5 text-xs text-muted-foreground" data-testid="invite-role-people-os-hint">
+                  {t('members.invite_role_people_os_hint')}
+                </p>
+              )}
             </div>
+            {!peopleOs && (
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label>{t('members.invite_max_uses')}</Label>
@@ -780,12 +839,17 @@ export default function Members() {
                 />
               </div>
             </div>
+            )}
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <Label className="text-xs text-muted-foreground">{t('members.invite_email_optional')}</Label>
+                <Label className="text-xs text-muted-foreground" htmlFor="invite-email-input">
+                  {t(peopleOs ? 'members.invite_email_required' : 'members.invite_email_optional')}
+                </Label>
                 <Input
+                  id="invite-email-input"
                   type="email"
                   placeholder="alice@empresa.com"
+                  required={peopleOs}
                   value={inviteForm.email}
                   onChange={(e) => setInviteForm({ ...inviteForm, email: e.target.value })}
                   data-testid="invite-email"
@@ -801,12 +865,21 @@ export default function Members() {
                 />
               </div>
             </div>
+            {peopleOs && (
+              <p className="text-xs text-muted-foreground" data-testid="invite-people-os-hint">
+                {t('members.invite_people_os_hint')}
+              </p>
+            )}
           </div>
           <DialogFooter>
             <Button variant="secondary" onClick={() => setInviteDialogOpen(false)}>
               {t('common.cancel')}
             </Button>
-            <Button onClick={handleCreateInvite} disabled={creatingInvite} data-testid="invite-submit-btn">
+            <Button
+              onClick={handleCreateInvite}
+              disabled={creatingInvite || (peopleOs && !(inviteForm.email || '').trim())}
+              data-testid="invite-submit-btn"
+            >
               {creatingInvite ? (
                 <><Loader2 size={14} className="animate-spin mr-1.5" />{t('members.generating')}</>
               ) : (
@@ -825,14 +898,35 @@ export default function Members() {
               {pendingRemoval?.user_id === user?.user_id ? t('members.leave_workspace') : t('members.remove_member')}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              {pendingRemoval?.user_id === user?.user_id ? t('members.leave_confirm') : t('members.remove_confirm')}
+              {pendingRemoval?.user_id === user?.user_id
+                ? t('members.leave_confirm')
+                : t(peopleOs ? 'members.remove_people_os_confirm' : 'members.remove_confirm')}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
-            <AlertDialogAction onClick={handleRemove} className="bg-[hsl(var(--destructive))]">
-              {t('common.confirm')}
-            </AlertDialogAction>
+            {peopleOs ? (
+              <>
+                <AlertDialogAction
+                  onClick={() => handleRemove(true)}
+                  className="bg-transparent border border-[hsl(var(--destructive))] text-[hsl(var(--destructive))] hover:bg-[hsl(var(--destructive)/0.1)]"
+                  data-testid="confirm-delete-member-btn"
+                >
+                  {t('members.delete_permanently_cta')}
+                </AlertDialogAction>
+                <AlertDialogAction
+                  onClick={() => handleRemove(false)}
+                  className="bg-[hsl(var(--destructive))]"
+                  data-testid="confirm-revoke-member-btn"
+                >
+                  {t('members.revoke_access_cta')}
+                </AlertDialogAction>
+              </>
+            ) : (
+              <AlertDialogAction onClick={() => handleRemove(false)} className="bg-[hsl(var(--destructive))]">
+                {t('common.confirm')}
+              </AlertDialogAction>
+            )}
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
@@ -982,16 +1076,18 @@ function OnboardingCard({ card, isAdmin, t, onMarkComplete, onCopyInvite, onRevo
 
       {isAdmin && card.status !== 'completed' && (
         <div className="mt-3 pt-3 border-t border-[hsl(var(--border))] flex flex-wrap gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={onCopyInvite}
-            data-testid={`onb-copy-invite-${card.user_id}`}
-            className="text-xs h-7"
-          >
-            <Copy size={12} className="mr-1" />
-            {t('onboarding.action_copy_invite')}
-          </Button>
+          {onCopyInvite && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onCopyInvite}
+              data-testid={`onb-copy-invite-${card.user_id}`}
+              className="text-xs h-7"
+            >
+              <Copy size={12} className="mr-1" />
+              {t('onboarding.action_copy_invite')}
+            </Button>
+          )}
           <Button
             size="sm"
             variant="outline"
@@ -1002,7 +1098,7 @@ function OnboardingCard({ card, isAdmin, t, onMarkComplete, onCopyInvite, onRevo
             <CheckCircle2 size={12} className="mr-1" />
             {t('onboarding.action_mark_complete')}
           </Button>
-          {card.role !== 'owner' && (
+          {card.role !== 'owner' && onRevokeAccess && (
             <Button
               size="sm"
               variant="outline"

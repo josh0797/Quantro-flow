@@ -2,21 +2,47 @@ import React from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
+import { useOnboardingGate, useWelcomeEntryGate } from '../lib/onboardingGate';
+import { readProviderCallback } from '../lib/providerCallback';
+import { CONNECT_NEW_HOME } from '../routes/legacyRedirects';
 
 /**
  * ProtectedRoute — wraps every authenticated screen.
  * - If still hydrating session → shows a slim loader.
  * - If unauthenticated → redirects to /login (preserves the intended URL).
- * - If authenticated but onboarding is still pending and we're NOT
- *   already on /onboarding-lite → redirect there first.
+ * - App routes: if `needs_onboarding` is still set → ask the onboarding
+ *   gate (lib/onboardingGate) whether this is a brand-new workspace
+ *   (→ /welcome) or an existing one that simply never finished the
+ *   Welcome flow (→ flag cleared, app).
+ * - `welcomeFlow` (the /welcome route): the same gate decides, once on
+ *   entry, whether this user belongs in the flow. Anyone who does not
+ *   (flag cleared, or an existing workspace opening /welcome from a
+ *   bookmark / old tab) goes to the dashboard — or, when the URL is a
+ *   provider OAuth return, to Settings → Integrations with the result so
+ *   it is confirmed there instead of continuing the onboarding steps.
+ * - `bypassOnboarding` (e.g. /join): no gate at all.
  * - Otherwise → renders children.
  */
-export default function ProtectedRoute({ children, bypassOnboarding = false }) {
+export default function ProtectedRoute({ children, bypassOnboarding = false, welcomeFlow = false }) {
   const { user, loading } = useAuth();
   const { t } = useLanguage();
   const location = useLocation();
 
-  if (loading) {
+  const gateEnabled =
+    !loading
+    && !!user
+    && !bypassOnboarding
+    && !welcomeFlow
+    && user.needs_onboarding === true
+    && !location.pathname.startsWith('/welcome');
+  const gate = useOnboardingGate(user, gateEnabled);
+  const welcomeGate = useWelcomeEntryGate(user, welcomeFlow && !loading && !!user);
+
+  if (
+    loading
+    || (gateEnabled && gate === 'checking')
+    || (welcomeFlow && !!user && welcomeGate === 'checking')
+  ) {
     return (
       <div
         data-testid="auth-loading"
@@ -34,11 +60,18 @@ export default function ProtectedRoute({ children, bypassOnboarding = false }) {
     return <Navigate to="/login" replace state={{ from: location }} />;
   }
 
-  // Onboarding gate: freshly-signed-up users must finish the Welcome
-  // activation flow before reaching the main platform. Existing users
-  // (who never had `needs_onboarding=true` set on their Supabase
-  // metadata) are NOT forced through it.
-  if (!bypassOnboarding && user.needs_onboarding && !location.pathname.startsWith('/welcome')) {
+  if (welcomeFlow && welcomeGate === 'app') {
+    const oauthReturn = readProviderCallback(new URLSearchParams(location.search));
+    return oauthReturn
+      ? <Navigate to={{ pathname: CONNECT_NEW_HOME, search: location.search }} replace />
+      : <Navigate to="/dashboard" replace />;
+  }
+
+  // Onboarding gate: brand-new signups finish the Welcome activation flow
+  // before reaching the main platform. Users who never had
+  // `needs_onboarding=true`, or whose workspace already has real data,
+  // are NOT forced through it.
+  if (gateEnabled && gate === 'onboarding') {
     return <Navigate to="/welcome" replace />;
   }
 

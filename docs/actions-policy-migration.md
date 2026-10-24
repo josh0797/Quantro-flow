@@ -24,7 +24,7 @@ remains intact for backward compatibility.
   "workspace_id": "...",
   "enabled": true,
   "scope": "action",
-  "action_id": "facturapi.invoice.create",
+  "action_id": "google.gmail.send",
   "mode": "require_approval",
   "minimum_role": "leader",
   "daily_limit": 20

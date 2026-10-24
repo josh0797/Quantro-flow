@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { X, Check, Loader2, Sparkles, Star, Zap } from 'lucide-react';
+import { X, Check, Minus, Loader2, Sparkles, Star, Zap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -176,12 +176,27 @@ export default function PlanSelectorDialog({ open, onOpenChange, currentPlanKey 
                   )}
 
                   <ul className="space-y-2 flex-1">
-                    {p.features.map((f, idx) => (
-                      <li key={idx} className="flex items-start gap-2 text-xs text-muted-foreground">
-                        <Check size={13} className={p.popular ? 'text-[hsl(var(--primary))] mt-0.5 shrink-0' : 'text-[hsl(var(--success))] mt-0.5 shrink-0'} />
-                        <span className="leading-relaxed">{f}</span>
-                      </li>
-                    ))}
+                    {p.features.map((f, idx) => {
+                      // A feature is a string (included) or
+                      // { label, included: false } for something the plan
+                      // explicitly does not include (e.g. Essential's AI credits).
+                      const label = typeof f === 'string' ? f : f.label;
+                      const included = typeof f === 'string' || f.included !== false;
+                      return (
+                        <li
+                          key={idx}
+                          data-testid={included ? undefined : `plan-feature-excluded-${p.key}`}
+                          className={`flex items-start gap-2 text-xs ${included ? 'text-muted-foreground' : 'text-muted-foreground/70'}`}
+                        >
+                          {included ? (
+                            <Check size={13} className={p.popular ? 'text-[hsl(var(--primary))] mt-0.5 shrink-0' : 'text-[hsl(var(--success))] mt-0.5 shrink-0'} />
+                          ) : (
+                            <Minus size={13} className="text-muted-foreground mt-0.5 shrink-0" aria-hidden="true" />
+                          )}
+                          <span className="leading-relaxed">{label}</span>
+                        </li>
+                      );
+                    })}
                   </ul>
 
                   <Button

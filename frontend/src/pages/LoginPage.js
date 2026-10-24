@@ -8,6 +8,10 @@ import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../contexts/AuthContext';
 import { Navigate } from 'react-router-dom';
 import LanguageSwitcher from '../components/LanguageSwitcher';
+import LegalLinks from '../components/LegalLinks';
+import { LEGAL_URLS, buildConsentMetadata } from '../lib/legal';
+import ForgotPasswordScreen from '../components/ForgotPasswordScreen';
+import { isExistingAccountSignup } from '../lib/passwordRecovery';
 
 /**
  * Validates that a full name contains at least two whitespace-separated
@@ -31,16 +35,26 @@ export function isValidFullName(value) {
  * which is stored in ``user_metadata.full_name`` and later upserted into
  * `profiles.full_name`. Right after signup the user is sent through the
  * `/onboarding-lite` step to capture country, industry and company name.
+ *
+ * Signup also requires accepting the Terms and the Privacy Notice (the
+ * shared Quantro pages, src/lib/legal.js); the accepted versions and the
+ * acceptance time go into ``user_metadata`` next to ``full_name``.
+ *
+ * One Quantro account works in Quantro OS and Flow: signing up with an
+ * email that already has an account switches to sign-in (Supabase sends
+ * no email in that case), and "forgot password" opens ForgotPasswordScreen.
  */
 export default function LoginPage() {
   const { t } = useLanguage();
   const { user, loading, signIn, signUp } = useAuth();
-  const [mode, setMode] = useState('signin'); // 'signin' | 'signup'
+  const [mode, setMode] = useState('signin'); // 'signin' | 'signup' | 'forgot'
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
+  const [notice, setNotice] = useState(null);
 
   if (loading) {
     return (
@@ -57,9 +71,14 @@ export default function LoginPage() {
     return <Navigate to="/" replace />;
   }
 
+  if (mode === 'forgot') {
+    return <ForgotPasswordScreen initialEmail={email} onBack={() => setMode('signin')} />;
+  }
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setFormError('');
+    setNotice(null);
 
     if (!email || !password) {
       setFormError(t('auth.missing_fields'));
@@ -74,6 +93,10 @@ export default function LoginPage() {
         setFormError(t('auth.password_min'));
         return;
       }
+      if (!acceptedTerms) {
+        setFormError(t('legal.terms_required'));
+        return;
+      }
     }
 
     setSubmitting(true);
@@ -86,8 +109,16 @@ export default function LoginPage() {
           full_name: cleanName,
           name: cleanName,
           needs_onboarding: true,
+          ...buildConsentMetadata(),
         });
-        if (result?.session) {
+        if (isExistingAccountSignup(result)) {
+          setMode('signin');
+          setPassword('');
+          setNotice({
+            title: t('auth_help.existing_account_title'),
+            desc: t('auth_help.existing_account_desc'),
+          });
+        } else if (result?.session) {
           toast.success(t('auth.account_confirmed'));
         } else {
           toast.success(t('auth.signup_success_title'), {
@@ -230,7 +261,62 @@ export default function LoginPage() {
                 />
               </div>
             </div>
+
+            {mode === 'signup' && (
+              <div className="space-y-1">
+                <label
+                  htmlFor="accept_terms"
+                  className="flex items-start gap-2 text-xs text-muted-foreground leading-relaxed cursor-pointer"
+                >
+                  <input
+                    id="accept_terms"
+                    data-testid="login-accept-terms"
+                    type="checkbox"
+                    checked={acceptedTerms}
+                    onChange={(e) => setAcceptedTerms(e.target.checked)}
+                    disabled={submitting}
+                    required
+                    className="mt-0.5 h-4 w-4 shrink-0 accent-[hsl(var(--primary))]"
+                  />
+                  <span>
+                    {t('legal.accept_prefix')}{' '}
+                    <a
+                      href={LEGAL_URLS.terms}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      data-testid="login-terms-link"
+                      className="text-[hsl(var(--primary))] hover:underline"
+                    >
+                      {t('legal.terms_link')}
+                    </a>{' '}
+                    {t('legal.accept_middle')}{' '}
+                    <a
+                      href={LEGAL_URLS.privacy}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      data-testid="login-privacy-link"
+                      className="text-[hsl(var(--primary))] hover:underline"
+                    >
+                      {t('legal.privacy_link')}
+                    </a>
+                  </span>
+                </label>
+                {t('legal.docs_language_note') && (
+                  <p className="pl-6 text-[11px] text-muted-foreground">{t('legal.docs_language_note')}</p>
+                )}
+              </div>
+            )}
           </div>
+
+          {notice && (
+            <div
+              data-testid="login-notice"
+              className="text-sm border border-[hsl(var(--primary)/0.25)] bg-[hsl(var(--primary)/0.06)] rounded-md px-3 py-2 space-y-0.5"
+            >
+              <p className="font-medium text-foreground">{notice.title}</p>
+              <p className="text-muted-foreground">{notice.desc}</p>
+            </div>
+          )}
 
           {formError && (
             <div
@@ -264,17 +350,33 @@ export default function LoginPage() {
               onClick={() => {
                 setMode(mode === 'signin' ? 'signup' : 'signin');
                 setFormError('');
+                setNotice(null);
               }}
               className="text-[hsl(var(--primary))] hover:underline"
             >
               {mode === 'signin' ? t('auth.toggle_to_signup') : t('auth.toggle_to_signin')}
             </button>
+            {mode === 'signin' && (
+              <button
+                type="button"
+                data-testid="login-forgot-password"
+                onClick={() => {
+                  setMode('forgot');
+                  setFormError('');
+                  setNotice(null);
+                }}
+                className="text-muted-foreground hover:text-foreground hover:underline"
+              >
+                {t('auth.forgot_password')}
+              </button>
+            )}
           </div>
 
           <div className="flex items-center gap-2 text-xs text-muted-foreground pt-2 border-t border-[hsl(var(--border))]">
             <ShieldCheck size={14} className="text-[hsl(var(--success))]" />
             <span>{t('auth.secure_session')} · {t('auth.secured_by')}</span>
           </div>
+          <LegalLinks className="justify-center -mt-3" />
         </form>
       </div>
     </div>

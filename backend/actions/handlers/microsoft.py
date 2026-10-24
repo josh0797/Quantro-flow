@@ -6,9 +6,15 @@ for why the actual incremental-consent UX is a documented follow-up
 part for correctness today is that these handlers never call Graph
 with a scope the stored token doesn't have; they fail structured
 instead.
+
+Graph calls use a synchronous httpx.Client, so they run in a worker
+thread (asyncio.to_thread) and never block the event loop.
 """
 from __future__ import annotations
 
+import asyncio
+
+import provider_secrets_store
 from errors import QuantroError
 from ..base import ActionContext, ActionResult
 
@@ -16,7 +22,11 @@ from ..base import ActionContext, ActionResult
 async def _access_token_or_raise(ctx: ActionContext, action_id: str) -> str:
     msoa = ctx.dep("msoa_module")
     col = ctx.dep("microsoft_integrations_col")
-    doc = await col.find_one({"workspace_id": ctx.workspace_id})
+    # Through provider_secrets_store (Supabase primary) — never a raw
+    # Mongo read, which returned stale/missing docs once secrets moved.
+    doc = await provider_secrets_store.get_connection(
+        provider="microsoft", workspace_id=ctx.workspace_id, mongo_col=col,
+    )
     if not doc:
         raise QuantroError("provider_not_connected", "Microsoft is not connected for this workspace")
 
@@ -41,7 +51,7 @@ async def mail_send(ctx: ActionContext, input: dict) -> ActionResult:
         return ActionResult(status="simulated", result_metadata={"predicted": {"to": input.get("to"), "subject": input.get("subject")}})
     access_token = await _access_token_or_raise(ctx, "microsoft.mail.send")
     msoa = ctx.dep("msoa_module")
-    msoa.send_mail(access_token, input["to"], input["subject"], input.get("body", ""))
+    await asyncio.to_thread(msoa.send_mail, access_token, input["to"], input["subject"], input.get("body", ""))
     return ActionResult(status="succeeded", result_metadata={"sent": True})
 
 
@@ -50,7 +60,8 @@ async def calendar_event_create(ctx: ActionContext, input: dict) -> ActionResult
         return ActionResult(status="simulated", result_metadata={"predicted": {"subject": input.get("title"), "start_time": input.get("start_time")}})
     access_token = await _access_token_or_raise(ctx, "microsoft.calendar.event.create")
     msoa = ctx.dep("msoa_module")
-    event_id = msoa.create_calendar_event(
+    event_id = await asyncio.to_thread(
+        msoa.create_calendar_event,
         access_token,
         subject=input["title"],
         start_iso=input["start_time"],

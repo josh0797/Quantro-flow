@@ -22,7 +22,11 @@ import { useLanguage } from '../../../context/LanguageContext';
  *
  * The skip button is intentionally always reachable (small text under
  * the primary CTA *and* the keyboard shortcut Esc) so an impatient
- * user is never trapped.
+ * user is never trapped. *
+ * `connectBlocked` disables the primary CTA (and shows
+ * `connectBlockedLabel`, default "Sincronizando…") while a provider
+ * connection/sync started elsewhere is still in progress, so OAuth can't
+ * be restarted by a second click.
  */
 export default function DemoPreview({
   badge,
@@ -36,6 +40,8 @@ export default function DemoPreview({
   skipLabel,
   onConnect,
   onSkip,
+  connectBlocked = false,
+  connectBlockedLabel,
   testIdPrefix,
   children,
 }) {
@@ -76,6 +82,7 @@ export default function DemoPreview({
   }, [stage, onSkip]);
 
   const handleConnect = async () => {
+    if (connectBlocked || stage === 'connecting') return;
     setStage('connecting');
     try {
       await onConnect?.();
@@ -171,7 +178,8 @@ export default function DemoPreview({
         <button
           type="button"
           onClick={handleConnect}
-          disabled={stage === 'connecting'}
+          disabled={stage === 'connecting' || connectBlocked}
+          aria-busy={stage === 'connecting' || connectBlocked}
           data-testid={`${testIdPrefix}-connect-btn`}
           className="inline-flex items-center gap-2.5 rounded-full bg-[hsl(var(--primary))] hover:bg-[hsl(var(--primary)/0.92)] text-[hsl(var(--primary-foreground))] px-7 py-3.5 text-sm font-semibold transition-all duration-300 ease-out hover:-translate-y-0.5 disabled:opacity-70 disabled:cursor-wait disabled:hover:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--primary)/0.6)]"
         >
@@ -179,6 +187,11 @@ export default function DemoPreview({
             <>
               <Loader2 size={14} className="animate-spin" />
               {connectingLabel || t('welcome.preview.connecting')}
+            </>
+          ) : connectBlocked ? (
+            <>
+              <Loader2 size={14} className="animate-spin" />
+              {connectBlockedLabel || t('welcome.preview.sync_in_progress')}
             </>
           ) : (
             <>

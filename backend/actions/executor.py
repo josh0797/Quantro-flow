@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, Optional
 
-from pymongo.errors import DuplicateKeyError
+from mongo_compat import DuplicateKeyError
 
 from errors import QuantroError
 from integrations.secrets import redact_error_text

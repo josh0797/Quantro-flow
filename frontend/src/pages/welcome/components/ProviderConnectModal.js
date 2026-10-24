@@ -11,6 +11,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { useLanguage } from '../../../context/LanguageContext';
 import { startGoogleOAuth, startMicrosoftOAuth, getMicrosoftIntegrationStatus } from '../../../lib/api';
+import { useOnboarding } from '../OnboardingContext';
 
 /**
  * ProviderConnectModal — single, opinionated picker for the
@@ -38,7 +39,11 @@ export default function ProviderConnectModal({
   onProviderError,
 }) {
   const { t } = useLanguage();
+  const { syncInProgress } = useOnboarding();
   const [redirecting, setRedirecting] = useState(null); // 'google' | 'microsoft' | null
+  // A connection is "in progress" while we redirect to the provider or
+  // while the post-OAuth sync is still running — no second OAuth start.
+  const busy = redirecting !== null || syncInProgress;
   // Microsoft used to be hard-coded disabled regardless of backend
   // config — now it reflects whether MS_CLIENT_ID/MS_CLIENT_SECRET are
   // actually set on this deployment (see /api/integrations/microsoft/status),
@@ -55,6 +60,7 @@ export default function ProviderConnectModal({
   }, [open]);
 
   const handlePick = async (provider) => {
+    if (busy) return;
     if (provider === 'microsoft' && !microsoftConfigured) {
       // Backend doesn't have MS_CLIENT_ID/MS_CLIENT_SECRET configured
       // in this deployment — the card shows "Configuration required"
@@ -74,10 +80,10 @@ export default function ProviderConnectModal({
       // the modal will be unmounted by the route change.
     } catch (err) {
       const detail = err?.response?.data?.detail;
-      const desc =
-        typeof detail === 'string'
-          ? detail
-          : t(`welcome.connect_modal.${provider}_unavailable_desc`);
+      let desc = t(`welcome.connect_modal.${provider}_unavailable_desc`);
+      if (typeof detail === 'string') desc = detail;
+      // Invited below leader: only a leader/owner can connect the mailbox.
+      else if (detail?.error === 'rbac_forbidden') desc = t('connect.toasts.leader_only');
       toast.error(t(`welcome.connect_modal.${provider}_failed_title`), { description: desc });
       setRedirecting(null);
       onProviderError?.(provider, err);
@@ -107,7 +113,7 @@ export default function ProviderConnectModal({
         <div className="px-6 pb-6 pt-4 space-y-3">
           <ProviderCard
             provider="google"
-            disabled={redirecting !== null}
+            disabled={busy}
             redirecting={redirecting === 'google'}
             title={t('welcome.connect_modal.google_title')}
             subtitle={t('welcome.connect_modal.google_subtitle')}
@@ -116,7 +122,7 @@ export default function ProviderConnectModal({
           />
           <ProviderCard
             provider="microsoft"
-            disabled={!microsoftConfigured || redirecting !== null}
+            disabled={!microsoftConfigured || busy}
             comingSoon={!microsoftConfigured}
             comingSoonLabel={t(microsoftConfigured ? 'welcome.connect_modal.coming_soon_badge' : 'welcome.connect_modal.configuration_required_badge')}
             redirecting={redirecting === 'microsoft'}

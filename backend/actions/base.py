@@ -80,7 +80,7 @@ class ActionDefinition:
         """Returns a list of validation error strings (empty = valid).
         Deliberately simple — a required-field + type check, not a full
         JSON-schema engine. Actions with genuinely complex nested input
-        (Facturapi invoices) validate further inside their own handler."""
+        validate further inside their own handler."""
         errors: List[str] = []
         for field_name, spec in self.input_schema.items():
             if spec.get("required") and field_name not in payload:

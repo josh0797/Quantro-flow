@@ -11,6 +11,8 @@ import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 import Stripe from 'https://esm.sh/stripe@17.5.0?target=deno';
 // @ts-ignore
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.4';
+// @ts-ignore  Deno needs the .ts extension on local imports.
+import { startsNewCreditPeriod } from './credit_period.ts';
 
 // @ts-ignore
 const stripe = new Stripe(Deno.env.get('STRIPE_SECRET_KEY')!, { apiVersion: '2024-11-20.acacia' });
@@ -30,9 +32,14 @@ const PRICE_TO_PLAN: Record<string, 'essential' | 'pro' | 'enterprise'> = {
   price_1TL9HOLJrc96wcWHxt5fDHWe: 'enterprise',
 };
 
-// Per-plan monthly AI credits in USD (lock-step with backend ai_billing.py).
+// Per-plan monthly AI credits in USD (lock-step with backend ai_billing.py
+// and frontend billing.js). Essential includes no Quantro AI credits.
+//
+// NOTE: this directory is a reference copy and is NOT deployed (see
+// ../README.md). The live stripe-webhook is Quantro OS's, and it does not
+// allocate ai_credits_* at all.
 const PLAN_CREDITS: Record<'essential' | 'pro' | 'enterprise', number> = {
-  essential: 5,
+  essential: 0,
   pro: 10,
   enterprise: 20,
 };
@@ -92,10 +99,14 @@ serve(async (req: Request): Promise<Response> => {
         };
         if (plan) {
           update.plan = plan;
-          // Reset AI credits whenever the plan is set/changed. We don't
-          // carry over unused credits between cycles (per spec).
-          // For trial/active, refill to the plan's full bag.
-          if (sub.status === 'active' || sub.status === 'trialing') {
+          // Reset AI credits only when a NEW bag starts (created, renewal,
+          // plan change, or first payment confirmed after 'incomplete'); see
+          // credit_period.ts. We don't carry over unused credits between
+          // cycles (per spec). Any other subscription.updated must neither
+          // refill the bag nor — now that Essential includes 0 — claw back a
+          // balance granted for the current period.
+          const prev = (event.data as any).previous_attributes;
+          if (startsNewCreditPeriod(event.type, sub.status, priceId, prev)) {
             const credits = PLAN_CREDITS[plan];
             update.ai_credits_total = credits;
             update.ai_credits_used = 0;
