@@ -5,10 +5,12 @@ import {
   OPENAI_DEFAULT_MODEL,
   PLAN_CREDITS,
   PLANS,
+  PLAN_NAME,
   TEST_USERS,
   TEST_USER_CREDITS,
   getCreditsState,
   planCreditsFeature,
+  planDisplayName,
   resolveOwnKeyModel,
 } from './billing';
 
@@ -38,6 +40,51 @@ describe('pricing cards', () => {
   it('keeps the Pro and Enterprise bullets exactly as before', () => {
     expect(featuresOf('pro')).toContain('$10 USD en créditos IA / mes');
     expect(featuresOf('enterprise')).toContain('$20 USD en créditos IA / mes');
+  });
+});
+
+describe('plan names', () => {
+  it('reads "Esencial" in Spanish and "Essential" in English; the key never changes', () => {
+    expect(planDisplayName('essential', 'es')).toBe('Esencial');
+    expect(planDisplayName('essential', 'en')).toBe('Essential');
+    expect(PLANS[0].key).toBe('essential');
+  });
+
+  it('names Starter, Pro and Enterprise the same in both languages', () => {
+    ['es', 'en'].forEach((lang) => {
+      expect(planDisplayName('starter', lang)).toBe('Starter');
+      expect(planDisplayName('pro', lang)).toBe('Pro');
+      expect(planDisplayName('enterprise', lang)).toBe('Enterprise');
+    });
+  });
+
+  it('matches stored keys case-insensitively and falls back sensibly', () => {
+    expect(planDisplayName('Essential', 'es')).toBe('Esencial');
+    expect(planDisplayName('essential', 'fr')).toBe('Esencial');
+    expect(planDisplayName('legacy', 'es')).toBe('Legacy');
+    expect(planDisplayName('', 'es')).toBeNull();
+    expect(planDisplayName(null, 'en')).toBeNull();
+  });
+
+  it('never resolves an Object.prototype member as a name', () => {
+    expect(planDisplayName('constructor', 'es')).toBe('Constructor');
+    expect(planDisplayName('__proto__', 'en')).toBe('__proto__');
+    expect(planDisplayName('toString', 'es')).toBe('ToString');
+  });
+
+  it('has a name for every plan card in both languages', () => {
+    PLANS.forEach((p) => {
+      expect(PLAN_NAME.es[p.key]).toEqual(expect.any(String));
+      expect(PLAN_NAME.en[p.key]).toEqual(expect.any(String));
+    });
+  });
+
+  it('says "Todo Esencial" on the Pro card (the card copy is Spanish)', () => {
+    expect(featuresOf('pro')).toContain('Todo Esencial');
+    PLANS.forEach((p) => {
+      const labels = p.features.map((f) => (typeof f === 'string' ? f : f.label));
+      expect(labels.some((l) => /Essential/.test(l))).toBe(false);
+    });
   });
 });
 

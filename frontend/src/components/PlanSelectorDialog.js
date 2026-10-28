@@ -9,7 +9,7 @@ import {
   DialogDescription,
 } from '@/components/ui/dialog';
 import { useLanguage } from '../context/LanguageContext';
-import { PLANS, PLAN_PRICES, startCheckout } from '../lib/billing';
+import { PLANS, PLAN_PRICES, planDisplayName, startCheckout } from '../lib/billing';
 
 /**
  * PlanSelectorDialog — the modal that surfaces when the user clicks
@@ -24,7 +24,7 @@ import { PLANS, PLAN_PRICES, startCheckout } from '../lib/billing';
  *   currentPlanKey: (optional) highlight + label for the user's active plan
  */
 export default function PlanSelectorDialog({ open, onOpenChange, currentPlanKey }) {
-  const { t } = useLanguage();
+  const { t, lang } = useLanguage();
   const [period, setPeriod] = useState('monthly'); // 'monthly' | 'annual'
   const [selecting, setSelecting] = useState(null); // plan key currently being processed
   const [error, setError] = useState('');
@@ -155,7 +155,7 @@ export default function PlanSelectorDialog({ open, onOpenChange, currentPlanKey 
 
                   <div>
                     <div className="flex items-baseline gap-2">
-                      <h3 className="text-lg font-semibold text-foreground">{p.name}</h3>
+                      <h3 data-testid={`plan-card-name-${p.key}`} className="text-lg font-semibold text-foreground">{planDisplayName(p.key, lang)}</h3>
                     </div>
                     <p className="text-xs text-muted-foreground mt-0.5">{p.tagline}</p>
                   </div>
