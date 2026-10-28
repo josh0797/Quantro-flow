@@ -66,6 +66,12 @@ describe('plan names', () => {
     expect(planDisplayName(null, 'en')).toBeNull();
   });
 
+  it('never resolves an Object.prototype member as a name', () => {
+    expect(planDisplayName('constructor', 'es')).toBe('Constructor');
+    expect(planDisplayName('__proto__', 'en')).toBe('__proto__');
+    expect(planDisplayName('toString', 'es')).toBe('ToString');
+  });
+
   it('has a name for every plan card in both languages', () => {
     PLANS.forEach((p) => {
       expect(PLAN_NAME.es[p.key]).toEqual(expect.any(String));

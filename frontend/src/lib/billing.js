@@ -139,7 +139,10 @@ export function planDisplayName(planKey, lang) {
   if (!planKey) return null;
   const raw = String(planKey);
   const names = PLAN_NAME[lang] || PLAN_NAME.es;
-  return names[raw.toLowerCase()] || raw.charAt(0).toUpperCase() + raw.slice(1);
+  const key = raw.toLowerCase();
+  // Own keys only: 'constructor' or '__proto__' must not resolve to Object.prototype members.
+  if (Object.prototype.hasOwnProperty.call(names, key)) return names[key];
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
 }
 
 // ---------- Plans (consumed by PlanSelectorDialog) ----------
