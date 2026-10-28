@@ -32,6 +32,7 @@ import PlanSelectorDialog from '../components/PlanSelectorDialog';
 import {
   PLAN_LIMITS,
   getPlanByKey,
+  planDisplayName,
   deriveSubscriptionState,
   openCustomerPortal,
   getOpenAIUsageLimit,
@@ -109,7 +110,7 @@ function prettyType(type) {
 }
 
 export default function PlanAndUsage() {
-  const { t } = useLanguage();
+  const { t, lang } = useLanguage();
   const { user, workspaces, logout } = useAuth();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -240,7 +241,7 @@ export default function PlanAndUsage() {
 
   const planKey = (profile?.plan || '').toLowerCase();
   const planDef = getPlanByKey(planKey);
-  const planName = planDef?.name || (profile?.plan ? profile.plan.charAt(0).toUpperCase() + profile.plan.slice(1) : null);
+  const planName = planDisplayName(profile?.plan, lang);
   const state = deriveSubscriptionState(profile);
 
   const paymentMethod = profile?.stripe_subscription_id

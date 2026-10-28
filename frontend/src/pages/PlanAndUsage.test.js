@@ -153,3 +153,23 @@ describe.each([
     expect(nav.location.pathname).toBe('/settings/integrations');
   });
 });
+
+// The plan is named in the UI language: "Esencial" in Spanish, "Essential"
+// in English (the stored key stays 'essential'), on the plan card and on the
+// plan selector's cards.
+describe.each([
+  ['es', 'Esencial'],
+  ['en', 'Essential'],
+])('plan name (%s)', (lang, essentialName) => {
+  it('names the Essential plan in the UI language on the page and in the selector', async () => {
+    mockLang.current = lang;
+    mockDb.profile = ESSENTIAL;
+    await mount();
+    expect(byTestId('plan-name').textContent).toBe(essentialName);
+    await click(byTestId('plan-upgrade-btn'));
+    await flush();
+    expect(byTestId('plan-card-name-essential').textContent).toBe(essentialName);
+    expect(byTestId('plan-card-name-pro').textContent).toBe('Pro');
+    expect(byTestId('plan-card-name-enterprise').textContent).toBe('Enterprise');
+  });
+});

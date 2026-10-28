@@ -119,11 +119,34 @@ export function formatUsd(amount) {
   return `$${n.toFixed(2)}`;
 }
 
+// ---------- Plan display names ----------
+// What a person reads for each plan, per UI language: Spanish says
+// "Esencial", English keeps "Essential". Same map as Quantro OS
+// (konta src/constants/plans.ts PLAN_NAME). Only the label changes: plan
+// keys ('essential', ...) stay IDs everywhere (profiles.plan, Stripe
+// metadata, URLs), and Stripe's own product names are not driven from here.
+export const PLAN_NAME = {
+  es: { starter: 'Starter', essential: 'Esencial', pro: 'Pro', enterprise: 'Enterprise' },
+  en: { starter: 'Starter', essential: 'Essential', pro: 'Pro', enterprise: 'Enterprise' },
+};
+
+/**
+ * The name the UI shows for a plan key in a language ('es' | 'en'; anything
+ * else reads as Spanish, the app's default). An unknown key is shown
+ * capitalized as stored; an empty one returns null.
+ */
+export function planDisplayName(planKey, lang) {
+  if (!planKey) return null;
+  const raw = String(planKey);
+  const names = PLAN_NAME[lang] || PLAN_NAME.es;
+  return names[raw.toLowerCase()] || raw.charAt(0).toUpperCase() + raw.slice(1);
+}
+
 // ---------- Plans (consumed by PlanSelectorDialog) ----------
+// Card copy below is Spanish; a plan's name comes from planDisplayName.
 export const PLANS = [
   {
     key: 'essential',
-    name: 'Essential',
     tagline: 'Claridad + control',
     currency: 'USD',
     priceIds: {
@@ -147,7 +170,6 @@ export const PLANS = [
   },
   {
     key: 'pro',
-    name: 'Pro',
     tagline: 'Ejecución + inteligencia',
     currency: 'USD',
     popular: true,
@@ -156,7 +178,7 @@ export const PLANS = [
       annual: 'price_1TL9BeLJrc96wcWHi8ajKg7L',
     },
     features: [
-      'Todo Essential',
+      `Todo ${PLAN_NAME.es.essential}`,
       'Agentes IA ejecutando tareas',
       'Quantro Intelligence (análisis continuo)',
       'AI Coach (ilimitado)',
@@ -170,7 +192,6 @@ export const PLANS = [
   },
   {
     key: 'enterprise',
-    name: 'Enterprise',
     tagline: 'Autonomía real',
     currency: 'USD',
     priceIds: {
